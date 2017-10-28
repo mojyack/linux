@@ -15,6 +15,7 @@
 #include <asm/asm.h>
 #include <asm/regdef.h>
 
+	.cprestore
 	LEAF(start)
 	/* Save boot rom start args */
 	move	s0, a0
@@ -23,10 +24,10 @@
 	move	s3, a3
 
 	/* Clear BSS */
-	PTR_LA	a0, _edata
+	PTR_LA	a0, _edata - 4
 	PTR_LA	a2, _end
-1:	sw	zero, 0(a0)
-	addiu	a0, a0, 4
+1:	addiu	a0, a0, 4
+	sw	zero, 0(a0)
 	bne	a2, a0, 1b
 
 	PTR_LA	a0, (.heap)	     /* heap address */
