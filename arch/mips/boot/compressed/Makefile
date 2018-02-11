@@ -22,13 +22,8 @@ KBUILD_CFLAGS := $(filter-out $(CC_FLAGS_FTRACE), $(KBUILD_CFLAGS))
 
 KBUILD_CFLAGS := $(filter-out -fstack-protector, $(KBUILD_CFLAGS))
 
-# Disable lq/sq in zboot
-ifdef CONFIG_CPU_LOONGSON64
-KBUILD_CFLAGS := $(filter-out -march=loongson3a, $(KBUILD_CFLAGS)) -march=mips64r2
-endif
-
-KBUILD_CFLAGS := $(KBUILD_CFLAGS) -D__KERNEL__ -D__DISABLE_EXPORTS \
-	-DBOOT_HEAP_SIZE=$(BOOT_HEAP_SIZE) -D"VMLINUX_LOAD_ADDRESS_ULL=$(VMLINUX_LOAD_ADDRESS)ull"
+KBUILD_CFLAGS := $(KBUILD_CFLAGS) -D__KERNEL__ \
+	-DBOOT_HEAP_SIZE=$(BOOT_HEAP_SIZE) -DKERNEL_ENTRY=$(VMLINUX_ENTRY_ADDRESS) -D"VMLINUX_LOAD_ADDRESS_ULL=$(VMLINUX_LOAD_ADDRESS)ull"
 
 KBUILD_AFLAGS := $(KBUILD_AFLAGS) -D__ASSEMBLY__ \
 	-DBOOT_HEAP_SIZE=$(BOOT_HEAP_SIZE) \
@@ -40,7 +35,11 @@ GCOV_PROFILE := n
 UBSAN_SANITIZE := n
 
 # decompressor objects (linked with vmlinuz)
+<<<<<<< HEAD
 vmlinuzobjs-y := $(obj)/head.o $(obj)/decompress.o $(obj)/string.o $(obj)/bswapsi.o
+=======
+vmlinuzobjs-y := $(obj)/head.o $(obj)/cache.o $(obj)/decompress.o $(obj)/string.o
+>>>>>>> b894f75642e0 (FIXME: MIPS: boot: 1920x1080p Graphics Synthesizer early putc)
 
 ifdef CONFIG_DEBUG_ZBOOT
 vmlinuzobjs-$(CONFIG_DEBUG_ZBOOT)		   += $(obj)/dbg.o
