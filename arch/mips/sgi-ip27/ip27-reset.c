@@ -19,6 +19,7 @@
 
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/processor.h>
 #include <asm/reboot.h>
 #include <asm/sgialib.h>
 #include <asm/sn/addrs.h>
@@ -27,12 +28,6 @@
 #include <asm/sn/gda.h>
 
 #include "ip27-common.h"
-
-void machine_restart(char *command) __noreturn;
-void machine_halt(void) __noreturn;
-void machine_power_off(void) __noreturn;
-
-#define noreturn while(1);				/* Silence gcc.	 */
 
 /* XXX How to pass the reboot command to the firmware??? */
 static void ip27_machine_restart(char *command)
@@ -51,7 +46,7 @@ static void ip27_machine_restart(char *command)
 #else
 	LOCAL_HUB_S(NI_PORT_RESET, NPR_PORTRESET | NPR_LOCALRESET);
 #endif
-	noreturn;
+	cpu_relax_forever();
 }
 
 static void ip27_machine_halt(void)
@@ -64,13 +59,13 @@ static void ip27_machine_halt(void)
 	for_each_online_node(i)
 		REMOTE_HUB_S(i, PROMOP_REG, PROMOP_RESTART);
 	LOCAL_HUB_S(NI_PORT_RESET, NPR_PORTRESET | NPR_LOCALRESET);
-	noreturn;
+	cpu_relax_forever();
 }
 
 static void ip27_machine_power_off(void)
 {
 	/* To do ...  */
-	noreturn;
+	cpu_relax_forever();
 }
 
 void ip27_reboot_setup(void)

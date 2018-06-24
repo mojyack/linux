@@ -22,6 +22,7 @@
 
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
+#include <asm/processor.h>
 #include <asm/signal.h>
 #include <asm/time.h>
 #include <asm/ip32/crime.h>
@@ -345,7 +346,7 @@ static void ip32_unknown_interrupt(void)
 
 	printk("Please mail this report to linux-mips@vger.kernel.org\n");
 	printk("Spinning...");
-	while(1) ;
+	cpu_relax_forever();
 }
 
 /* CRIME 1.1 appears to deliver all interrupts to this one pin. */

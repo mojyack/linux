@@ -18,6 +18,7 @@
 #include <linux/kexec.h>
 
 #include <asm/mmu_context.h>
+#include <asm/processor.h>
 #include <asm/time.h>
 #include <asm/setup.h>
 
@@ -349,8 +350,7 @@ void play_dead(void)
 
 	mb();
 
-	while (1)	/* core will be reset here */
-		;
+	cpu_relax_forever();	/* core will be reset here */
 }
 
 static void start_after_reset(void)
