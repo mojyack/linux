@@ -26,6 +26,7 @@
 
 /* Cache operations. */
 void (*flush_cache_all)(void);
+EXPORT_SYMBOL(flush_cache_all);
 void (*__flush_cache_all)(void);
 EXPORT_SYMBOL_GPL(__flush_cache_all);
 void (*flush_cache_mm)(struct mm_struct *mm);
@@ -155,6 +156,15 @@ void __update_cache(unsigned long address, pte_t pte)
 			kunmap_atomic((void *)addr);
 
 		ClearPageDcacheDirty(page);
+	} else {
+		/* Cache can be dirty when page is not writeable, because
+		 * data is copied to page in kernel.
+		 */
+		address = (unsigned long) page_address(page);
+		if (!cpu_has_ic_fills_f_dc) {
+			flush_data_cache_page(address);
+			/* TBD: Flush instruction cache also? */
+		}
 	}
 }
 
