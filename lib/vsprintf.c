@@ -152,6 +152,48 @@ long long simple_strtoll(const char *cp, char **endp, unsigned int base)
 }
 EXPORT_SYMBOL(simple_strtoll);
 
+static unsigned long long sscanf_strtoull(const char *cp, int field_width,
+	char **endp, unsigned int base)
+{
+	const char *e = field_width > 0 ? &cp[field_width] : NULL;
+	unsigned long long result;
+	unsigned int rv;
+
+	cp = _parse_integer_fixup_radix(cp, &base);
+	rv = _parse_integer_end(cp, e, base, &result);
+	/* FIXME */
+	cp += (rv & ~KSTRTOX_OVERFLOW);
+
+	if (endp)
+		*endp = (char *)cp;
+
+	return result;
+}
+
+static unsigned long sscanf_strtoul(const char *cp, int field_width,
+	char **endp, unsigned int base)
+{
+	return sscanf_strtoull(cp, field_width, endp, base);
+}
+
+static long sscanf_strtol(const char *cp, int field_width,
+	char **endp, unsigned int base)
+{
+	if (*cp == '-')
+		return -sscanf_strtoul(cp + 1, field_width - 1, endp, base);
+
+	return sscanf_strtoul(cp, field_width, endp, base);
+}
+
+static long long sscanf_strtoll(const char *cp, int field_width,
+	char **endp, unsigned int base)
+{
+	if (*cp == '-')
+		return -sscanf_strtoull(cp + 1, field_width - 1, endp, base);
+
+	return sscanf_strtoull(cp, field_width, endp, base);
+}
+
 static noinline_for_stack
 int skip_atoi(const char **s)
 {
@@ -3633,13 +3675,13 @@ int vsscanf(const char *buf, const char *fmt, va_list args)
 			break;
 
 		if (is_sign)
-			val.s = simple_strntoll(str,
-						field_width >= 0 ? field_width : INT_MAX,
-						&next, base);
+			val.s = qualifier != 'L' ?
+				sscanf_strtol(str, field_width, &next, base) :
+				sscanf_strtoll(str, field_width, &next, base);
 		else
-			val.u = simple_strntoull(str,
-						 field_width >= 0 ? field_width : INT_MAX,
-						 &next, base);
+			val.u = qualifier != 'L' ?
+				sscanf_strtoul(str, field_width, &next, base) :
+				sscanf_strtoull(str, field_width, &next, base);
 
 		switch (qualifier) {
 		case 'H':	/* that's 'hh' in format */
