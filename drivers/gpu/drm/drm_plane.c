@@ -230,16 +230,31 @@ done:
 	return 0;
 }
 
-__printf(9, 0)
-static int __drm_universal_plane_init(struct drm_device *dev,
-				      struct drm_plane *plane,
-				      uint32_t possible_crtcs,
-				      const struct drm_plane_funcs *funcs,
-				      const uint32_t *formats,
-				      unsigned int format_count,
-				      const uint64_t *format_modifiers,
-				      enum drm_plane_type type,
-				      const char *name, va_list ap)
+/**
+ * drm_universal_plane_init - Initialize a new universal plane object
+ * @dev: DRM device
+ * @plane: plane object to init
+ * @possible_crtcs: bitmask of possible CRTCs
+ * @funcs: callbacks for the new plane
+ * @formats: array of supported formats (DRM_FORMAT\_\*)
+ * @format_count: number of elements in @formats
+ * @format_modifiers: array of struct drm_format modifiers terminated by
+ *                    DRM_FORMAT_MOD_INVALID (optional)
+ * @type: type of plane (overlay, primary, cursor)
+ * @name: printf style format string for the plane name, or NULL for default name
+ *
+ * Initializes a plane object of type @type.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane,
+			     uint32_t possible_crtcs,
+			     const struct drm_plane_funcs *funcs,
+			     const uint32_t *formats, unsigned int format_count,
+			     const uint64_t *format_modifiers,
+			     enum drm_plane_type type,
+			     const char *name, ...)
 {
 	struct drm_mode_config *config = &dev->mode_config;
 	unsigned int format_modifier_count = 0;
@@ -320,8 +335,9 @@ static int __drm_universal_plane_init(struct drm_device *dev,
 
 	memcpy(plane->format_types, formats, format_count * sizeof(uint32_t));
 	plane->format_count = format_count;
-	memcpy(plane->modifiers, format_modifiers,
-	       format_modifier_count * sizeof(format_modifiers[0]));
+	if (format_modifier_count)
+		memcpy(plane->modifiers, format_modifiers,
+		       format_modifier_count * sizeof(format_modifiers[0]));
 	plane->possible_crtcs = possible_crtcs;
 	plane->type = type;
 
