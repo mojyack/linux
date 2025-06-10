@@ -17,6 +17,7 @@
 #include <linux/workqueue.h>
 #include <linux/i2c.h>
 #include <linux/extcon-provider.h>
+#include <linux/usb/role.h>
 
 #define	BQ24190_MANUFACTURER	"Texas Instruments"
 
@@ -243,6 +244,7 @@ struct bq24190_dev_info {
 	u8				f_reg;
 	u8				ss_reg;
 	const struct bq24190_chip_info	*info;
+	struct usb_role_switch		*role_sw;
 };
 
 struct bq24190_chip_info {
@@ -1820,6 +1822,7 @@ static const struct power_supply_desc bq24190_battery_desc = {
 static int bq24190_configure_usb_otg(struct bq24190_dev_info *bdi, u8 ss_reg)
 {
 	bool otg_enabled;
+	enum usb_role usb_role;
 	int ret;
 
 	otg_enabled = !!(ss_reg & BQ24190_REG_SS_VBUS_STAT_MASK);
@@ -1827,6 +1830,11 @@ static int bq24190_configure_usb_otg(struct bq24190_dev_info *bdi, u8 ss_reg)
 	if (ret < 0)
 		dev_err(bdi->dev, "Can't set extcon state to %d: %d\n",
 			otg_enabled, ret);
+
+	if (bdi->role_sw) {
+		usb_role = otg_enabled ? USB_ROLE_DEVICE : USB_ROLE_NONE;
+		usb_role_switch_set_role(bdi->role_sw, usb_role);
+	}
 
 	return ret;
 }
@@ -2138,6 +2146,7 @@ static int bq24190_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct power_supply_config charger_cfg = {}, battery_cfg = {};
 	struct bq24190_dev_info *bdi;
+	struct fwnode_handle *connector;
 	int ret;
 
 	if (!i2c_check_functionality(adapter, I2C_FUNC_SMBUS_BYTE_DATA)) {
@@ -2179,6 +2188,16 @@ static int bq24190_probe(struct i2c_client *client)
 	ret = devm_extcon_dev_register(dev, bdi->edev);
 	if (ret < 0)
 		return ret;
+
+	/* The usb connector is optional */
+	connector = device_get_named_child_node(dev, "connector");
+	if (connector) {
+		bdi->role_sw = fwnode_usb_role_switch_get(connector);
+		if (IS_ERR(bdi->role_sw)) {
+			ret = PTR_ERR(bdi->role_sw);
+			goto out_put;
+		}
+	}
 
 	pm_runtime_enable(dev);
 	pm_runtime_use_autosuspend(dev);
@@ -2267,6 +2286,10 @@ out_pmrt:
 	pm_runtime_put_sync(dev);
 	pm_runtime_dont_use_autosuspend(dev);
 	pm_runtime_disable(dev);
+
+out_put:
+	if (connector)
+		fwnode_handle_put(connector);
 	return ret;
 }
 
@@ -2274,6 +2297,9 @@ static void bq24190_remove(struct i2c_client *client)
 {
 	struct bq24190_dev_info *bdi = i2c_get_clientdata(client);
 	int error;
+
+	if (bdi->role_sw)
+		usb_role_switch_put(bdi->role_sw);
 
 	error = pm_runtime_resume_and_get(bdi->dev);
 	if (error < 0)
