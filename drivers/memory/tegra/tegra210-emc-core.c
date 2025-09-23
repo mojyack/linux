@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/pm_opp.h>
 #include <linux/slab.h>
 #include <linux/thermal.h>
 #include <soc/tegra/fuse.h>
@@ -85,6 +86,9 @@
 		(((value) & 0xffff0000) | ((value) & 0xffff) * (speedup))
 
 #define LPDDR2_MR4_SRR GENMASK(2, 0)
+
+#define DRAM_DATA_BUS_WIDTH_BYTES (64 / 8)
+#define DDR 2
 
 static const struct tegra210_emc_sequence *tegra210_emc_sequences[] = {
 	&tegra210_emc_r21021,
@@ -1598,6 +1602,9 @@ static bool tegra210_emc_validate_rate(struct tegra210_emc *emc,
 {
 	unsigned int i;
 
+	if (rate > emc->max_usable_rate)
+		return false;
+
 	for (i = 0; i < emc->num_timings; i++)
 		if (rate == emc->timings[i].rate * 1000UL)
 			return true;
@@ -1613,6 +1620,9 @@ static int tegra210_emc_debug_available_rates_show(struct seq_file *s,
 	unsigned int i;
 
 	for (i = 0; i < emc->num_timings; i++) {
+		if (!tegra210_emc_validate_rate(emc, emc->timings[i].rate * 1000UL))
+			continue;
+
 		seq_printf(s, "%s%u", prefix, emc->timings[i].rate * 1000);
 		prefix = " ";
 	}
@@ -1640,7 +1650,7 @@ static int tegra210_emc_debug_min_rate_set(void *data, u64 rate)
 	if (!tegra210_emc_validate_rate(emc, rate))
 		return -EINVAL;
 
-	err = clk_set_min_rate(emc->clk, rate);
+	err = tegra_emc_set_min_rate(&emc->reqs, rate, TEGRA_EMC_RATE_DEBUG);
 	if (err < 0)
 		return err;
 
@@ -1670,7 +1680,7 @@ static int tegra210_emc_debug_max_rate_set(void *data, u64 rate)
 	if (!tegra210_emc_validate_rate(emc, rate))
 		return -EINVAL;
 
-	err = clk_set_max_rate(emc->clk, rate);
+	err = tegra_emc_set_max_rate(&emc->reqs, rate, TEGRA_EMC_RATE_DEBUG);
 	if (err < 0)
 		return err;
 
@@ -1757,6 +1767,196 @@ static void tegra210_emc_debugfs_init(struct tegra210_emc *emc)
 			    &tegra210_emc_debug_temperature_fops);
 }
 
+static inline struct tegra210_emc *
+to_tegra210_emc_provider(struct icc_provider *provider)
+{
+	return container_of(provider, struct tegra210_emc, icc_provider);
+}
+
+static struct icc_node_data *
+emc_of_icc_xlate_extended(const struct of_phandle_args *spec, void *data)
+{
+	struct icc_provider *provider = data;
+	struct icc_node_data *ndata;
+	struct icc_node *node;
+
+	/* External Memory is the only possible ICC route */
+	list_for_each_entry(node, &provider->nodes, node_list) {
+		if (node->id != TEGRA_ICC_EMEM)
+			continue;
+
+		ndata = kzalloc_obj(*ndata);
+		if (!ndata)
+			return ERR_PTR(-ENOMEM);
+
+		ndata->tag = TEGRA_MC_ICC_TAG_ISO;
+		ndata->node = node;
+
+		return ndata;
+	}
+
+	return ERR_PTR(-EPROBE_DEFER);
+}
+
+static int emc_icc_set(struct icc_node *src, struct icc_node *dst)
+{
+	struct tegra210_emc *emc = to_tegra210_emc_provider(dst->provider);
+	unsigned long long peak_bw = icc_units_to_bps(dst->peak_bw);
+	unsigned long long avg_bw = icc_units_to_bps(dst->avg_bw);
+	unsigned long long rate = max(avg_bw, peak_bw);
+
+	do_div(rate, DDR * DRAM_DATA_BUS_WIDTH_BYTES);
+
+	/* the boot OPP goes with the boot floor, once all providers synced */
+	if (emc->handover_rate && !dst->init_peak) {
+		dev_pm_opp_remove(emc->dev, emc->handover_rate);
+		emc->handover_rate = 0;
+	}
+
+	rate = clamp_t(u64, rate, emc->min_usable_rate,
+		       emc->handover_rate ?: emc->max_usable_rate);
+
+	return tegra_emc_set_min_rate(&emc->reqs, rate, TEGRA_EMC_RATE_ICC);
+}
+
+/* Hold the bootloader's rate as the floor until icc_sync_state(). */
+static int tegra210_emc_icc_get_init_bw(struct icc_node *node, u32 *avg, u32 *peak)
+{
+	struct tegra210_emc *emc = to_tegra210_emc_provider(node->provider);
+
+	*avg = 0;
+	*peak = Bps_to_icc(emc->boot_rate) * DDR * DRAM_DATA_BUS_WIDTH_BYTES;
+
+	return 0;
+}
+
+static int tegra210_emc_interconnect_init(struct tegra210_emc *emc)
+{
+	const struct tegra_mc_soc *soc = emc->mc->soc;
+	struct icc_node *emc_node, *emem_node;
+	int err;
+
+	emc->icc_provider.dev = emc->dev;
+	emc->icc_provider.set = emc_icc_set;
+	emc->icc_provider.data = &emc->icc_provider;
+	emc->icc_provider.aggregate = soc->icc_ops->aggregate;
+	emc->icc_provider.xlate_extended = emc_of_icc_xlate_extended;
+	emc->icc_provider.get_bw = tegra210_emc_icc_get_init_bw;
+
+	icc_provider_init(&emc->icc_provider);
+
+	emc_node = icc_node_create(TEGRA_ICC_EMC);
+	if (IS_ERR(emc_node))
+		return PTR_ERR(emc_node);
+
+	emem_node = icc_node_create(TEGRA_ICC_EMEM);
+	if (IS_ERR(emem_node))
+		return PTR_ERR(emem_node);
+
+	err = icc_provider_register(&emc->icc_provider);
+	if (err)
+		return err;
+
+	emc_node->name = "External Memory Controller";
+	icc_node_add(emc_node, &emc->icc_provider);
+
+	err = icc_link_create(emc_node, TEGRA_ICC_EMEM);
+	if (err) {
+		/* the MC links to the EMC node: keep it for the next probe */
+		icc_node_del(emc_node);
+		icc_provider_deregister(&emc->icc_provider);
+		return err;
+	}
+
+	emem_node->name = "External Memory (DRAM)";
+	icc_node_add(emem_node, &emc->icc_provider);
+
+	return 0;
+}
+
+static int tegra210_emc_opp_table_init(struct tegra210_emc *emc)
+{
+	u32 hw_version = BIT(tegra_sku_info.soc_speedo_id);
+	const char * const clk_names[] = { "emc", NULL };
+	struct dev_pm_opp_config config = {
+		.clk_names = clk_names,
+		.supported_hw = &hw_version,
+		.supported_hw_count = 1,
+	};
+	struct dev_pm_opp *opp;
+	unsigned long rate;
+	unsigned int i;
+	int err;
+
+	emc->min_usable_rate = emc->timings[0].rate * 1000UL;
+	emc->max_usable_rate = emc->timings[emc->num_timings - 1].rate * 1000UL;
+
+	err = devm_pm_opp_set_config(emc->dev, &config);
+	if (err < 0)
+		return dev_err_probe(emc->dev, err, "failed to set OPP config\n");
+
+	/* without an OPP table, rate requests go straight to the clock */
+	err = devm_pm_opp_of_add_table(emc->dev);
+	if (err == -ENODEV)
+		return 0;
+	if (err)
+		return dev_err_probe(emc->dev, err, "failed to add OPP table\n");
+
+	for (rate = 0; ; rate++) {
+		opp = dev_pm_opp_find_freq_ceil(emc->dev, &rate);
+		if (IS_ERR(opp))
+			break;
+
+		dev_pm_opp_put(opp);
+
+		if (tegra210_emc_validate_rate(emc, rate))
+			continue;
+
+		err = dev_pm_opp_disable(emc->dev, rate);
+		if (err)
+			return dev_err_probe(emc->dev, err,
+					     "failed to disable the %lu Hz OPP\n", rate);
+	}
+
+	rate = ULONG_MAX;
+	opp = dev_pm_opp_find_freq_floor(emc->dev, &rate);
+	if (IS_ERR(opp))
+		return dev_err_probe(emc->dev, -ENOENT, "no OPP has an EMC timing\n");
+
+	dev_pm_opp_put(opp);
+	emc->max_usable_rate = rate;
+
+	for (i = 0; i < emc->num_timings; i++) {
+		rate = emc->timings[i].rate * 1000UL;
+		if (rate > emc->max_usable_rate) {
+			dev_info(emc->dev, "%lu Hz timing is above the highest OPP\n", rate);
+			continue;
+		}
+
+		opp = dev_pm_opp_find_freq_exact(emc->dev, rate, true);
+		if (IS_ERR(opp))
+			dev_info(emc->dev, "no OPP for the %lu Hz timing\n", rate);
+		else
+			dev_pm_opp_put(opp);
+	}
+
+	/* keep the rate the bootloader left until icc_sync_state() */
+	if (emc->boot_rate > emc->max_usable_rate) {
+		err = dev_pm_opp_add(emc->dev, emc->boot_rate, 0);
+		if (err)
+			return dev_err_probe(emc->dev, err, "failed to add the boot OPP\n");
+
+		emc->handover_rate = emc->boot_rate;
+		dev_info(emc->dev, "holding the %lu Hz boot rate until ICC sync\n",
+			 emc->boot_rate);
+	}
+
+	dev_info_once(emc->dev, "OPP HW ver. 0x%x, current clock rate %lu MHz\n",
+		      hw_version, clk_get_rate(emc->clk) / 1000000);
+
+	return 0;
+}
+
 static void tegra210_emc_detect(struct tegra210_emc *emc)
 {
 	u32 value;
@@ -1827,6 +2027,7 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, emc);
 	spin_lock_init(&emc->lock);
 	emc->dev = &pdev->dev;
+	tegra_emc_rate_requests_init(&emc->reqs, emc->dev);
 
 	emc->mc = devm_tegra_memory_controller_get(&pdev->dev);
 	if (IS_ERR(emc->mc))
@@ -1883,6 +2084,7 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 	for (i = 0; i < emc->num_timings; i++) {
 		if (emc->timings[i].rate == current_rate) {
 			emc->last = &emc->timings[i];
+			emc->boot_rate = current_rate * 1000;
 			break;
 		}
 	}
@@ -1963,7 +2165,9 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 
 	timer_setup(&emc->training, tegra210_emc_train, 0);
 
-	tegra210_emc_debugfs_init(emc);
+	err = tegra210_emc_opp_table_init(emc);
+	if (err)
+		goto detach;
 
 	cd = devm_thermal_of_child_cooling_device_register(emc->dev, np, "emc", emc,
 							   &tegra210_emc_cd_ops);
@@ -1974,24 +2178,29 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 		goto detach;
 	}
 
+	err = tegra210_emc_interconnect_init(emc);
+	if (err) {
+		dev_err_probe(emc->dev, err, "failed to initialize ICC\n");
+		goto detach;
+	}
+
+	tegra210_emc_debugfs_init(emc);
+
+	/* the clock and the interconnect provider keep pointers into emc */
+	try_module_get(THIS_MODULE);
+
 	return 0;
 
 detach:
-	debugfs_remove_recursive(emc->debugfs.root);
 	tegra210_clk_emc_detach(emc->clk);
+	timer_shutdown_sync(&emc->training);
+	timer_shutdown_sync(&emc->refresh_timer);
+	if (emc->handover_rate)
+		dev_pm_opp_remove(emc->dev, emc->handover_rate);
 release:
 	of_reserved_mem_device_release(emc->dev);
 
 	return err;
-}
-
-static void tegra210_emc_remove(struct platform_device *pdev)
-{
-	struct tegra210_emc *emc = platform_get_drvdata(pdev);
-
-	debugfs_remove_recursive(emc->debugfs.root);
-	tegra210_clk_emc_detach(emc->clk);
-	of_reserved_mem_device_release(emc->dev);
 }
 
 static int __maybe_unused tegra210_emc_suspend(struct device *dev)
@@ -2049,9 +2258,10 @@ static struct platform_driver tegra210_emc_driver = {
 		.name = "tegra210-emc",
 		.of_match_table = tegra210_emc_of_match,
 		.pm = &tegra210_emc_pm_ops,
+		.suppress_bind_attrs = true,
+		.sync_state = icc_sync_state,
 	},
 	.probe = tegra210_emc_probe,
-	.remove = tegra210_emc_remove,
 };
 
 module_platform_driver(tegra210_emc_driver);
