@@ -76,6 +76,17 @@ properties:
       - const: vfe1
       - const: vfe_lite
 
+  interconnects:
+    minItems: 4
+    maxItems: 4
+
+  interconnect-names:
+    items:
+      - const: cam_ahb
+      - const: cam_hf_0_mnoc
+      - const: cam_hf_1_mnoc
+      - const: cam_sf_0_mnoc
+
   iommus:
     maxItems: 4
 
@@ -217,6 +228,8 @@ required:
   - clock-names
   - clocks
   - compatible
+  - interconnect-names
+  - interconnects
   - interrupt-names
   - interrupts
   - iommus
@@ -233,6 +246,7 @@ examples:
     #include <dt-bindings/interrupt-controller/arm-gic.h>
     #include <dt-bindings/clock/qcom,camcc-sdm845.h>
     #include <dt-bindings/clock/qcom,gcc-sdm845.h>
+    #include <dt-bindings/interconnect/qcom,sdm845.h>
 
     soc {
       #address-cells = <2>;
@@ -240,6 +254,15 @@ examples:
 
       camss: camss@acb3000 {
         compatible = "qcom,sdm845-camss";
+
+        interconnects = <&gladiator_noc MASTER_APPSS_PROC 0 &config_noc SLAVE_CAMERA_CFG 0>,
+                        <&mmss_noc MASTER_CAMNOC_HF0 0 &mem_noc SLAVE_EBI1 0>,
+                        <&mmss_noc MASTER_CAMNOC_HF1 0 &mem_noc SLAVE_EBI1 0>,
+                        <&mmss_noc MASTER_CAMNOC_SF 0 &mem_noc SLAVE_EBI1 0>;
+        interconnect-names = "cam_ahb",
+                             "cam_hf_0_mnoc",
+                             "cam_hf_1_mnoc",
+                             "cam_sf_0_mnoc";
 
         clocks = <&clock_camcc CAM_CC_CAMNOC_AXI_CLK>,
           <&clock_camcc CAM_CC_CPAS_AHB_CLK>,
