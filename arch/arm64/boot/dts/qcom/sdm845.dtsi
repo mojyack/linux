@@ -4479,6 +4479,15 @@
 				"vfe1",
 				"vfe_lite";
 
+			interconnects = <&gladiator_noc MASTER_APPSS_PROC 0 &config_noc SLAVE_CAMERA_CFG 0>,
+					<&mmss_noc MASTER_CAMNOC_HF0 0 &mem_noc SLAVE_EBI1 0>,
+					<&mmss_noc MASTER_CAMNOC_HF1 0 &mem_noc SLAVE_EBI1 0>,
+					<&mmss_noc MASTER_CAMNOC_SF 0 &mem_noc SLAVE_EBI1 0>;
+			interconnect-names = "cam_ahb",
+					     "cam_hf_0_mnoc",
+					     "cam_hf_1_mnoc",
+					     "cam_sf_0_mnoc";
+
 			power-domains = <&clock_camcc IFE_0_GDSC>,
 				<&clock_camcc IFE_1_GDSC>,
 				<&clock_camcc TITAN_TOP_GDSC>;
