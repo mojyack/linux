@@ -194,6 +194,14 @@ struct imx519_mode {
 	unsigned int width;
 	unsigned int height;
 	unsigned int line_length_pix;
+	/*
+	 * Minimum frame length (FRAME_LENGTH register) for the mode. This is
+	 * the active height plus the vertical blanking the sensor needs to
+	 * clock out every output line; it must match the mode register table.
+	 * Using mode->height alone as the floor yields zero vblank for the
+	 * sub-windowed C-PHY modes and truncates the bottom of the frame.
+	 */
+	unsigned int frame_length_min;
 	struct v4l2_rect crop;
 	struct v4l2_fract timeperframe_min;
 	struct v4l2_fract timeperframe_default;
@@ -739,6 +747,7 @@ static const struct imx519_mode imx519_modes_dphy[] = {
 		.width = 4656,
 		.height = 3496,
 		.line_length_pix = 0x2080,
+		.frame_length_min = 0x0fa6,
 		.crop = {
 			.left = IMX519_PIXEL_ARRAY_LEFT,
 			.top = IMX519_PIXEL_ARRAY_TOP,
@@ -767,6 +776,7 @@ static const struct imx519_mode imx519_modes_cphy[] = {
 		.width = 4656,
 		.height = 3496,
 		.line_length_pix = 0x4200,
+		.frame_length_min = 0x0df4,
 		.crop = {
 			.left = IMX519_PIXEL_ARRAY_LEFT,
 			.top = IMX519_PIXEL_ARRAY_TOP,
@@ -791,6 +801,7 @@ static const struct imx519_mode imx519_modes_cphy[] = {
 		.width = 3840,
 		.height = 2160,
 		.line_length_pix = 0x3870,
+		.frame_length_min = 0x08d4,
 		.crop = {
 			.left = IMX519_PIXEL_ARRAY_LEFT + 408,
 			.top = IMX519_PIXEL_ARRAY_TOP + 672,
@@ -815,6 +826,7 @@ static const struct imx519_mode imx519_modes_cphy[] = {
 		.width = 2328,
 		.height = 1748,
 		.line_length_pix = 0x2412,
+		.frame_length_min = 0x09ac,
 		.crop = {
 			.left = IMX519_PIXEL_ARRAY_LEFT,
 			.top = IMX519_PIXEL_ARRAY_TOP,
@@ -839,6 +851,7 @@ static const struct imx519_mode imx519_modes_cphy[] = {
 		.width = 1920,
 		.height = 1080,
 		.line_length_pix = 0x25D9,
+		.frame_length_min = 0x049c,
 		.crop = {
 			.left = IMX519_PIXEL_ARRAY_LEFT + 408,
 			.top = IMX519_PIXEL_ARRAY_TOP + 674,
@@ -863,6 +876,7 @@ static const struct imx519_mode imx519_modes_cphy[] = {
 		.width = 1280,
 		.height = 720,
 		.line_length_pix = 0x1B3B,
+		.frame_length_min = 0x0334,
 		.crop = {
 			.left = IMX519_PIXEL_ARRAY_LEFT + 1048,
 			.top = IMX519_PIXEL_ARRAY_TOP + 1042,
@@ -1305,7 +1319,7 @@ unsigned int imx519_get_frame_length(const struct imx519 *imx519,
 	if (WARN_ON(frame_length > IMX519_FRAME_LENGTH_MAX))
 		frame_length = IMX519_FRAME_LENGTH_MAX;
 
-	return max_t(unsigned int, frame_length, mode->height);
+	return max_t(unsigned int, frame_length, mode->frame_length_min);
 }
 
 static void imx519_set_framing_limits(struct imx519 *imx519)
