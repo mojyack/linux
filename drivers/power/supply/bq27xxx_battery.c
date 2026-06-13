@@ -2171,10 +2171,19 @@ static int bq27xxx_battery_get_property(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
-		if (di->regs[BQ27XXX_REG_NAC] != INVALID_REG_ADDR)
-			ret = bq27xxx_battery_read_nac(di, val);
-		else
+		/*
+		 * RemainingCapacity (RC) is the load-compensated remaining
+		 * charge and pairs with FullChargeCapacity (FCC) reported as
+		 * CHARGE_FULL, so SOC = RC / FCC stays consistent. Prefer it.
+		 * NominalAvailableCapacity (NAC) is uncompensated and can read
+		 * higher than FCC, making charge_now > charge_full; only use it
+		 * as a fallback for legacy gauges (bq27000/bq27010) that have no
+		 * RC register.
+		 */
+		if (di->regs[BQ27XXX_REG_RC] != INVALID_REG_ADDR)
 			ret = bq27xxx_battery_read_rc(di, val);
+		else
+			ret = bq27xxx_battery_read_nac(di, val);
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		ret = bq27xxx_battery_read_fcc(di, val);
