@@ -1106,7 +1106,15 @@ u32 venus_helper_get_framesz(u32 v4l2_fmt, u32 width, u32 height)
 	}
 
 	if (compressed) {
-		sz = ALIGN(height, 32) * ALIGN(width, 32) * 3 / 2 / 2;
+		/*
+		 * Size the compressed (bitstream) buffer to a full frame
+		 * (luma + chroma).  The Venus v4 firmware rejects a smaller
+		 * output buffer with "allocLen ... is wrong" and faults the
+		 * encoder session once the bitstream exceeds it; the previous
+		 * 3/4-luma value was only large enough below 720p (where the
+		 * *8 below applies).
+		 */
+		sz = ALIGN(height, 32) * ALIGN(width, 32) * 3 / 2;
 		if (width < 1280 || height < 720)
 			sz *= 8;
 		return ALIGN(sz, SZ_4K);
