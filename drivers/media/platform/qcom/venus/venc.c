@@ -549,7 +549,19 @@ venc_encoder_cmd(struct file *file, void *fh, struct v4l2_encoder_cmd *cmd)
 
 		fdata.buffer_type = HFI_BUFFER_INPUT;
 		fdata.flags |= HFI_BUFFERFLAG_EOS;
-		fdata.device_addr = 0xdeadb000;
+
+		/*
+		 * The empty EOS buffer carries a sentinel device address.  The
+		 * AR50 (v4) firmware validates that address against its content
+		 * protection regions and faults fatally on the bogus 0xdeadb000
+		 * marker ("buffer straddles CP & non-CP regions" -> session
+		 * error 0x1001); send a NULL address there instead, which it
+		 * accepts as an empty EOS buffer.
+		 */
+		if (IS_AR50(inst->core))
+			fdata.device_addr = 0;
+		else
+			fdata.device_addr = 0xdeadb000;
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
