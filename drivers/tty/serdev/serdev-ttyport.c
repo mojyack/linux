@@ -89,6 +89,9 @@ static void ttyport_write_flush(struct serdev_controller *ctrl)
 	struct serport *serport = serdev_controller_get_drvdata(ctrl);
 	struct tty_struct *tty = serport->tty;
 
+	if (!test_bit(SERPORT_ACTIVE, &serport->flags))
+		return;
+
 	tty_driver_flush_buffer(tty);
 }
 
@@ -211,6 +214,9 @@ static void ttyport_wait_until_sent(struct serdev_controller *ctrl, long timeout
 {
 	struct serport *serport = serdev_controller_get_drvdata(ctrl);
 	struct tty_struct *tty = serport->tty;
+
+	if (!test_bit(SERPORT_ACTIVE, &serport->flags))
+		return;
 
 	tty_wait_until_sent(tty, timeout);
 }
