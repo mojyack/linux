@@ -1681,13 +1681,29 @@ void *nvmem_cell_read(struct nvmem_cell *cell, size_t *len)
 {
 	struct nvmem_cell_entry *entry = cell->entry;
 	struct nvmem_device *nvmem = entry->nvmem;
+	size_t buf_len;
 	u8 *buf;
 	int rc;
 
 	if (!nvmem)
 		return ERR_PTR(-EINVAL);
 
-	buf = kzalloc(max_t(size_t, entry->raw_len, entry->bytes), GFP_KERNEL);
+	buf_len = max_t(size_t, entry->raw_len, entry->bytes);
+
+	/*
+	 * nvmem_shift_read_buffer_in_place() shifts the field in place starting
+	 * at byte (bit_offset / BITS_PER_BYTE) and walks ->bytes bytes from
+	 * there, so it can touch up to (bit_offset / BITS_PER_BYTE) + bytes
+	 * bytes.  This exceeds raw_len when bit_offset spans whole bytes (e.g.
+	 * qfprom folds a cell's unaligned byte offset into bit_offset).  Size
+	 * the buffer to cover those in-place accesses; the extra bytes are
+	 * zero, so the shifted result is unchanged.
+	 */
+	if (entry->bit_offset >= BITS_PER_BYTE)
+		buf_len = max_t(size_t, buf_len,
+				entry->bit_offset / BITS_PER_BYTE + entry->bytes);
+
+	buf = kzalloc(buf_len, GFP_KERNEL);
 	if (!buf)
 		return ERR_PTR(-ENOMEM);
 
