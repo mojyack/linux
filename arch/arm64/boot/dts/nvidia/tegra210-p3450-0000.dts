@@ -544,6 +544,8 @@
 			usb2-1 {
 				status = "okay";
 				mode = "host";
+				/* Powers the onboard RTS5411 hub. */
+				vbus-supply = <&vdd_hub_3v3>;
 			};
 
 			usb2-2 {
@@ -554,7 +556,6 @@
 			usb3-0 {
 				status = "okay";
 				nvidia,usb2-companion = <1>;
-				vbus-supply = <&vdd_hub_3v3>;
 			};
 		};
 	};
@@ -1827,12 +1828,15 @@
 		vin-supply = <&vdd_5v0_sys>;
 	};
 
+	/* Shared with the HDMI level-shifter, so it must not be cleaned up. */
 	vdd_hub_3v3: regulator-vdd-hub-3v3 {
 		compatible = "regulator-fixed";
 
 		regulator-name = "VDD_HUB_3V3";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
 
 		gpio = <&gpio TEGRA_GPIO(A, 6) GPIO_ACTIVE_HIGH>;
 		enable-active-high;
