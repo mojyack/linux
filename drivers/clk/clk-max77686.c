@@ -93,6 +93,23 @@ max77686_hw_clk_info max77620_hw_clks_info[MAX77620_CLKS_NUM] = {
 	},
 };
 
+/* On these SoCs, 32K_OUT0 is the PMC's CLK_32K_IN */
+static const char *const max77620_clk32k_in_machines[] = {
+	"nvidia,tegra30",
+	"nvidia,tegra210",
+	NULL
+};
+
+static const struct
+max77686_hw_clk_info max77620_clk32k_in_hw_clks_info[MAX77620_CLKS_NUM] = {
+	[MAX77620_CLK_32K_OUT0] = {
+		.name = "32khz_out0",
+		.clk_reg = MAX77620_REG_CNFG1_32K,
+		.clk_enable_mask = MAX77620_CNFG1_32K_OUT0_EN,
+		.flags = CLK_IS_CRITICAL,
+	},
+};
+
 static struct max77686_clk_init_data *to_max77686_clk_init_data(
 				struct clk_hw *hw)
 {
@@ -181,7 +198,10 @@ static int max77686_clk_probe(struct platform_device *pdev)
 
 	case CHIP_MAX77620:
 		num_clks = MAX77620_CLKS_NUM;
-		hw_clks = max77620_hw_clks_info;
+		if (of_machine_compatible_match(max77620_clk32k_in_machines))
+			hw_clks = max77620_clk32k_in_hw_clks_info;
+		else
+			hw_clks = max77620_hw_clks_info;
 		break;
 
 	default:
