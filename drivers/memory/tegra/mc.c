@@ -553,8 +553,15 @@ int tegra30_mc_probe(struct tegra_mc *mc)
 	return 0;
 }
 
+static void tegra30_mc_resume(struct tegra_mc *mc)
+{
+	/* The SMMU registers reset to their power-on state in deep sleep. */
+	tegra_smmu_resume(mc->smmu);
+}
+
 const struct tegra_mc_ops tegra30_mc_ops = {
 	.probe = tegra30_mc_probe,
+	.resume = tegra30_mc_resume,
 };
 #endif
 
