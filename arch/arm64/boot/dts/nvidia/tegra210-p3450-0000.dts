@@ -185,6 +185,8 @@
 			interrupt-parent = <&tegra_pmc>;
 			interrupts = <51 IRQ_TYPE_LEVEL_LOW>;
 
+			system-power-controller;
+
 			#interrupt-cells = <2>;
 			interrupt-controller;
 
