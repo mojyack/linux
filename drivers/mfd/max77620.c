@@ -487,6 +487,9 @@ static int max77620_pm_power_off(struct sys_off_data *data)
 {
 	struct max77620_chip *chip = data->cb_data;
 
+	/* So the reset drives the PMIC OFF, not treating it as a wake event. */
+	regmap_update_bits(chip->rmap, MAX77620_REG_ONOFFCNFG2,
+			   MAX77620_ONOFFCNFG2_SFT_RST_WK, 0);
 	regmap_update_bits(chip->rmap, MAX77620_REG_ONOFFCNFG1,
 			   MAX77620_ONOFFCNFG1_SFT_RST,
 			   MAX77620_ONOFFCNFG1_SFT_RST);
@@ -574,9 +577,10 @@ static int max77620_probe(struct i2c_client *client)
 	}
 
 	if (of_device_is_system_power_controller(client->dev.of_node)) {
+		/* Above the default: PSCI SYSTEM_OFF may be unimplemented. */
 		ret = devm_register_sys_off_handler(&client->dev,
 						    SYS_OFF_MODE_POWER_OFF,
-						    SYS_OFF_PRIO_DEFAULT,
+						    SYS_OFF_PRIO_HIGH,
 						    max77620_pm_power_off, chip);
 		if (ret)
 			return dev_err_probe(&client->dev, ret,
