@@ -2019,7 +2019,11 @@ static void tegra_xusb_shutdown(struct platform_device *pdev)
 {
 	struct tegra_xusb *tegra = platform_get_drvdata(pdev);
 
-	pm_runtime_get_sync(&pdev->dev);
+	/* In ELPG the controller does no DMA, so there is nothing to stop. */
+	pm_runtime_disable(&pdev->dev);
+	if (pm_runtime_status_suspended(&pdev->dev))
+		return;
+
 	disable_irq(tegra->xhci_irq);
 	xhci_shutdown(tegra->hcd);
 	tegra_xusb_disable(tegra);
