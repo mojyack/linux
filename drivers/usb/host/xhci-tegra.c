@@ -2019,7 +2019,10 @@ static void tegra_xusb_shutdown(struct platform_device *pdev)
 {
 	struct tegra_xusb *tegra = platform_get_drvdata(pdev);
 
-	pm_runtime_get_sync(&pdev->dev);
+	/* Already in ELPG with its partitions gated: nothing to shut down. */
+	if (pm_runtime_suspended(&pdev->dev))
+		return;
+
 	disable_irq(tegra->xhci_irq);
 	xhci_shutdown(tegra->hcd);
 	tegra_xusb_disable(tegra);
