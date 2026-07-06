@@ -103,6 +103,8 @@ struct tegra_smmu *tegra_smmu_probe(struct device *dev,
 				    const struct tegra_smmu_soc *soc,
 				    struct tegra_mc *mc);
 void tegra_smmu_remove(struct tegra_smmu *smmu);
+void tegra_smmu_suspend(struct tegra_smmu *smmu);
+void tegra_smmu_resume(struct tegra_smmu *smmu);
 #else
 static inline struct tegra_smmu *
 tegra_smmu_probe(struct device *dev, const struct tegra_smmu_soc *soc,
@@ -112,6 +114,14 @@ tegra_smmu_probe(struct device *dev, const struct tegra_smmu_soc *soc,
 }
 
 static inline void tegra_smmu_remove(struct tegra_smmu *smmu)
+{
+}
+
+static inline void tegra_smmu_suspend(struct tegra_smmu *smmu)
+{
+}
+
+static inline void tegra_smmu_resume(struct tegra_smmu *smmu)
 {
 }
 #endif
@@ -164,6 +174,7 @@ struct tegra_mc_ops {
 	 */
 	int (*probe)(struct tegra_mc *mc);
 	void (*remove)(struct tegra_mc *mc);
+	void (*suspend)(struct tegra_mc *mc);
 	void (*resume)(struct tegra_mc *mc);
 	int (*probe_device)(struct tegra_mc *mc, struct device *dev);
 };
