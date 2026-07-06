@@ -44,6 +44,11 @@ struct tegra_smmu {
 	unsigned long *asids;
 	struct mutex lock;
 
+	/* Active address spaces and register state saved for SC7 */
+	struct list_head as_list;
+	u32 *swgroup_regs;
+	unsigned long *client_enabled;
+
 	struct list_head list;
 
 	struct dentry *debugfs;
@@ -65,6 +70,7 @@ struct tegra_smmu_as {
 	dma_addr_t pd_dma;
 	unsigned id;
 	u32 attr;
+	struct list_head list;		/* node in tegra_smmu.as_list */
 };
 
 static struct tegra_smmu_as *to_smmu_as(struct iommu_domain *dom)
@@ -417,10 +423,17 @@ static void tegra_smmu_disable(struct tegra_smmu *smmu, unsigned int swgroup,
 	}
 }
 
+static void tegra_smmu_write_ptb(struct tegra_smmu *smmu,
+				 struct tegra_smmu_as *as)
+{
+	smmu_writel(smmu, SMMU_PTB_ASID_VALUE(as->id), SMMU_PTB_ASID);
+	smmu_writel(smmu, SMMU_PTB_DATA_VALUE(as->pd_dma, as->attr),
+		    SMMU_PTB_DATA);
+}
+
 static int tegra_smmu_as_prepare(struct tegra_smmu *smmu,
 				 struct tegra_smmu_as *as)
 {
-	u32 value;
 	int err = 0;
 
 	mutex_lock(&smmu->lock);
@@ -450,13 +463,12 @@ static int tegra_smmu_as_prepare(struct tegra_smmu *smmu,
 	smmu_flush_ptc(smmu, as->pd_dma, 0);
 	smmu_flush_tlb_asid(smmu, as->id);
 
-	smmu_writel(smmu, as->id & 0x7f, SMMU_PTB_ASID);
-	value = SMMU_PTB_DATA_VALUE(as->pd_dma, as->attr);
-	smmu_writel(smmu, value, SMMU_PTB_DATA);
+	tegra_smmu_write_ptb(smmu, as);
 	smmu_flush(smmu);
 
 	as->smmu = smmu;
 	as->use_count++;
+	list_add_tail(&as->list, &smmu->as_list);
 
 	mutex_unlock(&smmu->lock);
 
@@ -479,6 +491,8 @@ static void tegra_smmu_as_unprepare(struct tegra_smmu *smmu,
 		mutex_unlock(&smmu->lock);
 		return;
 	}
+
+	list_del(&as->list);
 
 	tegra_smmu_free_asid(smmu, as->id);
 
@@ -1114,12 +1128,106 @@ static void tegra_smmu_debugfs_exit(struct tegra_smmu *smmu)
 	debugfs_remove_recursive(smmu->debugfs);
 }
 
+/* Program the global SMMU registers (also used to restore state on resume). */
+static void tegra_smmu_setup_regs(struct tegra_smmu *smmu)
+{
+	u32 value;
+
+	value = SMMU_PTC_CONFIG_ENABLE | SMMU_PTC_CONFIG_INDEX_MAP(0x3f);
+
+	if (smmu->soc->supports_request_limit)
+		value |= SMMU_PTC_CONFIG_REQ_LIMIT(8);
+
+	smmu_writel(smmu, value, SMMU_PTC_CONFIG);
+
+	value = SMMU_TLB_CONFIG_HIT_UNDER_MISS |
+		SMMU_TLB_CONFIG_ACTIVE_LINES(smmu);
+
+	if (smmu->soc->supports_round_robin_arbitration)
+		value |= SMMU_TLB_CONFIG_ROUND_ROBIN_ARBITRATION;
+
+	smmu_writel(smmu, value, SMMU_TLB_CONFIG);
+
+	smmu_flush_ptc_all(smmu);
+	smmu_flush_tlb(smmu);
+	smmu_writel(smmu, SMMU_CONFIG_ENABLE, SMMU_CONFIG);
+	smmu_flush(smmu);
+
+	tegra_smmu_ahb_enable();
+}
+
+void tegra_smmu_suspend(struct tegra_smmu *smmu)
+{
+	unsigned int i;
+
+	if (!smmu)
+		return;
+
+	mutex_lock(&smmu->lock);
+
+	for (i = 0; i < smmu->soc->num_swgroups; i++)
+		smmu->swgroup_regs[i] = smmu_readl(smmu,
+						   smmu->soc->swgroups[i].reg);
+
+	for (i = 0; i < smmu->soc->num_clients; i++) {
+		const struct tegra_mc_client *client = &smmu->soc->clients[i];
+		u32 value;
+
+		if (!client->regs.smmu.reg)
+			continue;
+
+		value = smmu_readl(smmu, client->regs.smmu.reg);
+		__assign_bit(i, smmu->client_enabled,
+			     value & BIT(client->regs.smmu.bit));
+	}
+
+	mutex_unlock(&smmu->lock);
+}
+
+void tegra_smmu_resume(struct tegra_smmu *smmu)
+{
+	struct tegra_smmu_as *as;
+	unsigned int i;
+	u32 value;
+
+	if (!smmu)
+		return;
+
+	mutex_lock(&smmu->lock);
+
+	tegra_smmu_setup_regs(smmu);
+
+	list_for_each_entry(as, &smmu->as_list, list)
+		tegra_smmu_write_ptb(smmu, as);
+
+	for (i = 0; i < smmu->soc->num_swgroups; i++)
+		smmu_writel(smmu, smmu->swgroup_regs[i],
+			    smmu->soc->swgroups[i].reg);
+
+	for (i = 0; i < smmu->soc->num_clients; i++) {
+		const struct tegra_mc_client *client = &smmu->soc->clients[i];
+
+		if (!client->regs.smmu.reg)
+			continue;
+
+		value = smmu_readl(smmu, client->regs.smmu.reg);
+		if (test_bit(i, smmu->client_enabled))
+			value |= BIT(client->regs.smmu.bit);
+		else
+			value &= ~BIT(client->regs.smmu.bit);
+		smmu_writel(smmu, value, client->regs.smmu.reg);
+	}
+
+	smmu_flush(smmu);
+
+	mutex_unlock(&smmu->lock);
+}
+
 struct tegra_smmu *tegra_smmu_probe(struct device *dev,
 				    const struct tegra_smmu_soc *soc,
 				    struct tegra_mc *mc)
 {
 	struct tegra_smmu *smmu;
-	u32 value;
 	int err;
 
 	smmu = devm_kzalloc(dev, sizeof(*smmu), GFP_KERNEL);
@@ -1140,7 +1248,16 @@ struct tegra_smmu *tegra_smmu_probe(struct device *dev,
 	if (!smmu->asids)
 		return ERR_PTR(-ENOMEM);
 
+	smmu->swgroup_regs = devm_kcalloc(dev, soc->num_swgroups,
+					  sizeof(*smmu->swgroup_regs),
+					  GFP_KERNEL);
+	smmu->client_enabled = devm_bitmap_zalloc(dev, soc->num_clients,
+						  GFP_KERNEL);
+	if (!smmu->swgroup_regs || !smmu->client_enabled)
+		return ERR_PTR(-ENOMEM);
+
 	INIT_LIST_HEAD(&smmu->groups);
+	INIT_LIST_HEAD(&smmu->as_list);
 	mutex_init(&smmu->lock);
 
 	smmu->regs = mc->regs;
@@ -1156,27 +1273,7 @@ struct tegra_smmu *tegra_smmu_probe(struct device *dev,
 	dev_dbg(dev, "TLB lines: %u, mask: %#lx\n", smmu->soc->num_tlb_lines,
 		smmu->tlb_mask);
 
-	value = SMMU_PTC_CONFIG_ENABLE | SMMU_PTC_CONFIG_INDEX_MAP(0x3f);
-
-	if (soc->supports_request_limit)
-		value |= SMMU_PTC_CONFIG_REQ_LIMIT(8);
-
-	smmu_writel(smmu, value, SMMU_PTC_CONFIG);
-
-	value = SMMU_TLB_CONFIG_HIT_UNDER_MISS |
-		SMMU_TLB_CONFIG_ACTIVE_LINES(smmu);
-
-	if (soc->supports_round_robin_arbitration)
-		value |= SMMU_TLB_CONFIG_ROUND_ROBIN_ARBITRATION;
-
-	smmu_writel(smmu, value, SMMU_TLB_CONFIG);
-
-	smmu_flush_ptc_all(smmu);
-	smmu_flush_tlb(smmu);
-	smmu_writel(smmu, SMMU_CONFIG_ENABLE, SMMU_CONFIG);
-	smmu_flush(smmu);
-
-	tegra_smmu_ahb_enable();
+	tegra_smmu_setup_regs(smmu);
 
 	err = iommu_device_sysfs_add(&smmu->iommu, dev, NULL, dev_name(dev));
 	if (err)

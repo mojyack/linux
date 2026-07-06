@@ -553,8 +553,21 @@ int tegra30_mc_probe(struct tegra_mc *mc)
 	return 0;
 }
 
+static void tegra30_mc_suspend(struct tegra_mc *mc)
+{
+	tegra_smmu_suspend(mc->smmu);
+}
+
+/* SMMU state does not survive SC7 */
+static void tegra30_mc_resume(struct tegra_mc *mc)
+{
+	tegra_smmu_resume(mc->smmu);
+}
+
 const struct tegra_mc_ops tegra30_mc_ops = {
 	.probe = tegra30_mc_probe,
+	.suspend = tegra30_mc_suspend,
+	.resume = tegra30_mc_resume,
 };
 #endif
 
@@ -1053,6 +1066,16 @@ static void tegra_mc_sync_state(struct device *dev)
 		icc_sync_state(dev);
 }
 
+static int tegra_mc_suspend(struct device *dev)
+{
+	struct tegra_mc *mc = dev_get_drvdata(dev);
+
+	if (mc->soc->ops && mc->soc->ops->suspend)
+		mc->soc->ops->suspend(mc);
+
+	return 0;
+}
+
 static int tegra_mc_resume(struct device *dev)
 {
 	struct tegra_mc *mc = dev_get_drvdata(dev);
@@ -1065,7 +1088,8 @@ static int tegra_mc_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(tegra_mc_pm_ops, NULL, tegra_mc_resume);
+static DEFINE_NOIRQ_DEV_PM_OPS(tegra_mc_pm_ops, tegra_mc_suspend,
+			       tegra_mc_resume);
 
 static struct platform_driver tegra_mc_driver = {
 	.driver = {
