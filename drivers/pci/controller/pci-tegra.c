@@ -1153,7 +1153,8 @@ static void tegra_pcie_enable_controller(struct tegra_pcie *pcie)
 	afi_writel(pcie, 0, AFI_FPCI_ERROR_MASKS);
 }
 
-static void tegra_pcie_power_off(struct tegra_pcie *pcie)
+/* Cycling the PCIE powergate across suspend wedges the endpoint. */
+static void tegra_pcie_power_off(struct tegra_pcie *pcie, bool powergate)
 {
 	struct device *dev = pcie->dev;
 	const struct tegra_pcie_soc *soc = pcie->soc;
@@ -1166,7 +1167,7 @@ static void tegra_pcie_power_off(struct tegra_pcie *pcie)
 		clk_disable_unprepare(pcie->cml_clk);
 	clk_disable_unprepare(pcie->afi_clk);
 
-	if (!dev->pm_domain)
+	if (!dev->pm_domain && powergate)
 		tegra_pmc_powergate_power_off(pcie->pmc, TEGRA_POWERGATE_PCIE);
 
 	err = regulator_bulk_disable(pcie->num_supplies, pcie->supplies);
@@ -1174,7 +1175,7 @@ static void tegra_pcie_power_off(struct tegra_pcie *pcie)
 		dev_warn(dev, "failed to disable regulators: %d\n", err);
 }
 
-static int tegra_pcie_power_on(struct tegra_pcie *pcie)
+static int tegra_pcie_power_on(struct tegra_pcie *pcie, bool powergate)
 {
 	struct device *dev = pcie->dev;
 	const struct tegra_pcie_soc *soc = pcie->soc;
@@ -1184,7 +1185,7 @@ static int tegra_pcie_power_on(struct tegra_pcie *pcie)
 	reset_control_assert(pcie->afi_rst);
 	reset_control_assert(pcie->pex_rst);
 
-	if (!dev->pm_domain)
+	if (!dev->pm_domain && powergate)
 		tegra_pmc_powergate_power_off(pcie->pmc, TEGRA_POWERGATE_PCIE);
 
 	/* enable regulators */
@@ -1192,7 +1193,7 @@ static int tegra_pcie_power_on(struct tegra_pcie *pcie)
 	if (err < 0)
 		dev_err(dev, "failed to enable regulators: %d\n", err);
 
-	if (!dev->pm_domain) {
+	if (!dev->pm_domain && powergate) {
 		err = tegra_pmc_powergate_power_on(pcie->pmc,
 						   TEGRA_POWERGATE_PCIE);
 		if (err) {
@@ -1237,7 +1238,7 @@ disable_cml_clk:
 disable_afi_clk:
 	clk_disable_unprepare(pcie->afi_clk);
 powergate:
-	if (!dev->pm_domain)
+	if (!dev->pm_domain && powergate)
 		tegra_pmc_powergate_power_off(pcie->pmc, TEGRA_POWERGATE_PCIE);
 regulator_disable:
 	regulator_bulk_disable(pcie->num_supplies, pcie->supplies);
@@ -2615,7 +2616,7 @@ put_resources:
 	return err;
 }
 
-static int tegra_pcie_pm_suspend(struct device *dev)
+static int __tegra_pcie_pm_suspend(struct device *dev, bool powergate)
 {
 	struct tegra_pcie *pcie = dev_get_drvdata(dev);
 	struct tegra_pcie_port *port;
@@ -2645,17 +2646,17 @@ static int tegra_pcie_pm_suspend(struct device *dev)
 		tegra_pcie_disable_msi(pcie);
 
 	pinctrl_pm_select_idle_state(dev);
-	tegra_pcie_power_off(pcie);
+	tegra_pcie_power_off(pcie, powergate);
 
 	return 0;
 }
 
-static int tegra_pcie_pm_resume(struct device *dev)
+static int __tegra_pcie_pm_resume(struct device *dev, bool powergate)
 {
 	struct tegra_pcie *pcie = dev_get_drvdata(dev);
 	int err;
 
-	err = tegra_pcie_power_on(pcie);
+	err = tegra_pcie_power_on(pcie, powergate);
 	if (err) {
 		dev_err(dev, "tegra pcie power on fail: %d\n", err);
 		return err;
@@ -2700,14 +2701,35 @@ disable_pex_clk:
 pex_dpd_enable:
 	pinctrl_pm_select_idle_state(dev);
 poweroff:
-	tegra_pcie_power_off(pcie);
+	tegra_pcie_power_off(pcie, powergate);
 
 	return err;
 }
 
+static int tegra_pcie_runtime_suspend(struct device *dev)
+{
+	return __tegra_pcie_pm_suspend(dev, true);
+}
+
+static int tegra_pcie_runtime_resume(struct device *dev)
+{
+	return __tegra_pcie_pm_resume(dev, true);
+}
+
+/* See tegra_pcie_power_off(): only runtime PM cycles the powergate. */
+static int tegra_pcie_sleep_suspend(struct device *dev)
+{
+	return __tegra_pcie_pm_suspend(dev, false);
+}
+
+static int tegra_pcie_sleep_resume(struct device *dev)
+{
+	return __tegra_pcie_pm_resume(dev, false);
+}
+
 static const struct dev_pm_ops tegra_pcie_pm_ops = {
-	RUNTIME_PM_OPS(tegra_pcie_pm_suspend, tegra_pcie_pm_resume, NULL)
-	NOIRQ_SYSTEM_SLEEP_PM_OPS(tegra_pcie_pm_suspend, tegra_pcie_pm_resume)
+	RUNTIME_PM_OPS(tegra_pcie_runtime_suspend, tegra_pcie_runtime_resume, NULL)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(tegra_pcie_sleep_suspend, tegra_pcie_sleep_resume)
 };
 
 static struct platform_driver tegra_pcie_driver = {
