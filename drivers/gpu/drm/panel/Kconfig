@@ -412,6 +412,18 @@ config DRM_PANEL_JADARD_JD9365DA_H3
 	  WXGA MIPI DSI panel. The panel support TFT dot matrix LCD with
 	  800RGBx1280 dots at maximum.
 
+config DRM_PANEL_JDI_LPM062M326A
+	tristate "JDI LPM062M326A 720x1280 DSI panel"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for the JDI LPM062M326A
+	  720x1280 command mode DSI panel, as found in the Nintendo Switch
+	  (Erista). The panel is driven over a four-lane DSI link and
+	  carries its own backlight, which is looked up from the device
+	  tree.
+
 config DRM_PANEL_JDI_LPM102A188A
 	tristate "JDI LPM102A188A DSI panel"
 	depends on GPIOLIB
