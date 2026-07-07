@@ -45,6 +45,10 @@
 #define TEGRA_UART_LSR_ANY			(UART_LSR_OE | UART_LSR_BI | \
 						UART_LSR_PE | UART_LSR_FE)
 #define TEGRA_UART_IRDA_CSR			0x08
+#define TEGRA_UART_INVERT_RXD			0x01
+#define TEGRA_UART_INVERT_TXD			0x02
+#define TEGRA_UART_INVERT_CTS			0x04
+#define TEGRA_UART_INVERT_RTS			0x08
 #define TEGRA_UART_SIR_ENABLED			0x80
 
 #define TEGRA_UART_TX_PIO			1
@@ -116,12 +120,17 @@ struct tegra_uart_port {
 	unsigned long				mcr_shadow;
 	unsigned long				lcr_shadow;
 	unsigned long				ier_shadow;
+	unsigned long				irda_csr_shadow;
 	bool					rts_active;
 
 	int					tx_in_progress;
 	unsigned int				tx_bytes;
 
 	bool					enable_modem_interrupt;
+	bool					invert_rxd;
+	bool					invert_txd;
+	bool					invert_cts;
+	bool					invert_rts;
 
 	bool					rx_timeout;
 	int					rx_in_progress;
@@ -1356,6 +1365,17 @@ static void tegra_uart_set_termios(struct uart_port *u,
 		tty_termios_encode_baud_rate(termios, baud, baud);
 	uart_port_lock_irqsave(u, &flags);
 
+	/* Line inversions */
+	if (tup->invert_rxd)
+		tup->irda_csr_shadow |= TEGRA_UART_INVERT_RXD;
+	if (tup->invert_txd)
+		tup->irda_csr_shadow |= TEGRA_UART_INVERT_TXD;
+	if (tup->invert_cts)
+		tup->irda_csr_shadow |= TEGRA_UART_INVERT_CTS;
+	if (tup->invert_rts)
+		tup->irda_csr_shadow |= TEGRA_UART_INVERT_RTS;
+	tegra_uart_write(tup, tup->irda_csr_shadow, TEGRA_UART_IRDA_CSR);
+
 	/* Flow control */
 	if (termios->c_cflag & CRTSCTS)	{
 		tup->mcr_shadow |= TEGRA_UART_MCR_CTS_EN;
@@ -1441,6 +1461,10 @@ static int tegra_uart_parse_dt(struct platform_device *pdev,
 
 	tup->enable_modem_interrupt = of_property_read_bool(np,
 					"nvidia,enable-modem-interrupt");
+	tup->invert_rxd = of_property_read_bool(np, "nvidia,invert-rxd");
+	tup->invert_txd = of_property_read_bool(np, "nvidia,invert-txd");
+	tup->invert_cts = of_property_read_bool(np, "nvidia,invert-cts");
+	tup->invert_rts = of_property_read_bool(np, "nvidia,invert-rts");
 
 	index = of_property_match_string(np, "dma-names", "rx");
 	if (index < 0) {
