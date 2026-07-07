@@ -349,6 +349,7 @@ struct tegra_pcie {
 	struct tegra_msi msi;
 
 	struct list_head ports;
+	void __iomem *rp0_base;
 	u32 xbar_config;
 
 	struct regulator_bulk_data *supplies;
@@ -656,6 +657,15 @@ static void tegra_pcie_apply_sw_fixup(struct tegra_pcie_port *port)
 	writel(value, port->base + RP_LINK_CONTROL_STATUS_2);
 }
 
+static void tegra_pcie_enable_pca(void __iomem *base)
+{
+	u32 value;
+
+	value = readl(base + RP_VEND_CTL2);
+	value |= RP_VEND_CTL2_PCA_ENABLE;
+	writel(value, base + RP_VEND_CTL2);
+}
+
 static void tegra_pcie_port_enable(struct tegra_pcie_port *port)
 {
 	unsigned long ctrl = tegra_pcie_port_get_pex_ctrl(port);
@@ -675,11 +685,8 @@ static void tegra_pcie_port_enable(struct tegra_pcie_port *port)
 
 	tegra_pcie_port_reset(port);
 
-	if (soc->force_pca_enable) {
-		value = readl(port->base + RP_VEND_CTL2);
-		value |= RP_VEND_CTL2_PCA_ENABLE;
-		writel(value, port->base + RP_VEND_CTL2);
-	}
+	if (soc->force_pca_enable)
+		tegra_pcie_enable_pca(port->base);
 
 	tegra_pcie_enable_rp_features(port);
 
@@ -721,9 +728,14 @@ static void tegra_pcie_port_free(struct tegra_pcie_port *port)
 	struct tegra_pcie *pcie = port->pcie;
 	struct device *dev = pcie->dev;
 
-	devm_iounmap(dev, port->base);
-	devm_release_mem_region(dev, port->regs.start,
-				resource_size(&port->regs));
+	/* Root port 0 needs PCA_ENABLE even without a link. */
+	if (port->index == 0 && pcie->soc->force_pca_enable) {
+		pcie->rp0_base = port->base;
+	} else {
+		devm_iounmap(dev, port->base);
+		devm_release_mem_region(dev, port->regs.start,
+					resource_size(&port->regs));
+	}
 	list_del(&port->list);
 	devm_kfree(dev, port);
 }
@@ -2303,6 +2315,10 @@ static void tegra_pcie_enable_ports(struct tegra_pcie *pcie)
 {
 	struct device *dev = pcie->dev;
 	struct tegra_pcie_port *port, *tmp;
+
+	/* Root port 0 needs PCA_ENABLE even without a link. */
+	if (pcie->rp0_base)
+		tegra_pcie_enable_pca(pcie->rp0_base);
 
 	list_for_each_entry_safe(port, tmp, &pcie->ports, list) {
 		dev_info(dev, "probing port %u, using %u lanes\n",
