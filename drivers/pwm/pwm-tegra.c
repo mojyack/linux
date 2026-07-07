@@ -64,7 +64,12 @@
  * This 1.6 MHz frequency can further be divided using SCALE value in PWM.
  *
  * Limitations:
- * -	When PWM is disabled, the output is driven to inactive.
+ * -	When PWM is disabled, the output is driven low (measured on Tegra210).
+ * -	There is no polarity control. Inversed polarity is emulated by
+ *	inverting the duty cycle, which moves the pulse within the period,
+ *	so an enabled inversed channel needs usage_power. A disabled
+ *	inversed channel is kept running at 100% duty instead, so its clock
+ *	stays on. Not supported on Tegra264.
  * -	It does not allow the current PWM period to complete and
  *	stops abruptly.
  *
@@ -115,6 +120,9 @@ struct tegra_pwm_chip {
 
 	void __iomem *regs;
 
+	/* Bitmask of the channels that are running in hardware. */
+	unsigned long enabled;
+
 	const struct tegra_pwm_soc *soc;
 };
 
@@ -138,11 +146,13 @@ static inline void tegra_pwm_writel(struct pwm_device *pwm, unsigned int offset,
 }
 
 static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
-			    int duty_ns, int period_ns)
+			    int duty_ns, int period_ns,
+			    enum pwm_polarity polarity)
 {
 	struct tegra_pwm_chip *pc = to_tegra_pwm_chip(chip);
 	unsigned long long c = duty_ns;
 	unsigned long rate, required_clk_rate;
+	bool enabled = test_bit(pwm->hwpwm, &pc->enabled);
 	u32 val = 0;
 	int err;
 
@@ -153,6 +163,10 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 */
 	c *= TEGRA_PWM_DEPTH;
 	c = DIV_ROUND_CLOSEST_ULL(c, period_ns);
+
+	/* No polarity control, so an inverted output inverts the duty cycle. */
+	if (polarity == PWM_POLARITY_INVERSED)
+		c = TEGRA_PWM_DEPTH - c;
 
 	val = (u32)c << TEGRA_PWM_DUTY_SHIFT;
 
@@ -236,7 +250,7 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	 * If the PWM channel is disabled, make sure to turn on the clock
 	 * before writing the register. Otherwise, keep it enabled.
 	 */
-	if (!pwm_is_enabled(pwm)) {
+	if (!enabled) {
 		err = pm_runtime_resume_and_get(pwmchip_parent(chip));
 		if (err)
 			return err;
@@ -249,7 +263,7 @@ static int tegra_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	/*
 	 * If the PWM is not enabled, turn the clock off again to save power.
 	 */
-	if (!pwm_is_enabled(pwm))
+	if (!enabled)
 		pm_runtime_put(pwmchip_parent(chip));
 
 	return 0;
@@ -269,6 +283,28 @@ static int tegra_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 	val |= TEGRA_PWM_ENABLE;
 	tegra_pwm_writel(pwm, pc->soc->enable_reg, val);
 
+	set_bit(pwm->hwpwm, &pc->enabled);
+
+	return 0;
+}
+
+/* Drive the output constantly high, the inactive level of an inversed channel. */
+static int tegra_pwm_park(struct pwm_chip *chip, struct pwm_device *pwm)
+{
+	struct tegra_pwm_chip *pc = to_tegra_pwm_chip(chip);
+	int err;
+
+	if (!test_bit(pwm->hwpwm, &pc->enabled)) {
+		err = pm_runtime_resume_and_get(pwmchip_parent(chip));
+		if (err)
+			return err;
+	}
+
+	tegra_pwm_writel(pwm, TEGRA_PWM_CSR_0, TEGRA_PWM_ENABLE |
+			 TEGRA_PWM_DEPTH << TEGRA_PWM_DUTY_SHIFT);
+
+	set_bit(pwm->hwpwm, &pc->enabled);
+
 	return 0;
 }
 
@@ -281,26 +317,40 @@ static void tegra_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 	val &= ~TEGRA_PWM_ENABLE;
 	tegra_pwm_writel(pwm, pc->soc->enable_reg, val);
 
+	clear_bit(pwm->hwpwm, &pc->enabled);
+
 	pm_runtime_put_sync(pwmchip_parent(chip));
 }
 
 static int tegra_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			   const struct pwm_state *state)
 {
+	struct tegra_pwm_chip *pc = to_tegra_pwm_chip(chip);
+	bool enabled = test_bit(pwm->hwpwm, &pc->enabled);
 	int err;
-	bool enabled = pwm->state.enabled;
 
-	if (state->polarity != PWM_POLARITY_NORMAL)
-		return -EINVAL;
+	if (state->polarity == PWM_POLARITY_INVERSED) {
+		/* Bit 24 means 100% duty only in the CSR_0-enable layout. */
+		if (pc->soc->enable_reg != TEGRA_PWM_CSR_0)
+			return -EINVAL;
+
+		/* Inverting the duty cycle moves the pulse within the period. */
+		if (state->enabled && !state->usage_power)
+			return -EINVAL;
+	}
 
 	if (!state->enabled) {
+		if (state->polarity == PWM_POLARITY_INVERSED)
+			return tegra_pwm_park(chip, pwm);
+
 		if (enabled)
 			tegra_pwm_disable(chip, pwm);
 
 		return 0;
 	}
 
-	err = tegra_pwm_config(chip, pwm, state->duty_cycle, state->period);
+	err = tegra_pwm_config(chip, pwm, state->duty_cycle, state->period,
+			       state->polarity);
 	if (err)
 		return err;
 
