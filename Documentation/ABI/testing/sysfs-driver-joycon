@@ -1,0 +1,54 @@
+What:		/sys/bus/serial/devices/<dev>/pairing_host
+Date:		August 2026
+KernelVersion:	7.1
+Contact:	linux-input@vger.kernel.org
+Description:
+		(RW) Address of the Bluetooth host the attached Joy-Con is
+		paired to, as recorded in the controller's own flash.
+
+		A Joy-Con is the same controller on the rail and over
+		Bluetooth, and it keeps the host it belongs to. Reading this
+		says which adapter it would reconnect to once detached.
+
+		Reading returns -ENODATA until the controller has answered,
+		which takes a moment after it is docked, and for a controller
+		that has never been paired.
+
+		Writing an address pairs the controller to that host over the
+		rail, with no SYNC button and no Bluetooth pairing, and
+		replaces the record that was there - a controller holds one
+		host. The write blocks until the controller has stored it, and
+		returns -ENODEV if the rail is empty, -EBUSY if a pairing is
+		already in flight, and -ETIMEDOUT if the controller stops
+		answering.
+
+What:		/sys/bus/serial/devices/<dev>/pairing_key
+Date:		August 2026
+KernelVersion:	7.1
+Contact:	linux-input@vger.kernel.org
+Description:
+		(RO) Bluetooth link key for the pairing described by
+		pairing_host, as 16 hex bytes.
+
+		A detached Joy-Con reconnects by paging the host it stored and
+		asking it for this key. Only the controller has it - it is not
+		established through bonding, so a Bluetooth host has no way to
+		learn it - and a host that cannot answer has to pair again,
+		which is what a user notices as a controller that never comes
+		back on its own. Reading it here lets that host be told.
+
+		Readable by root only. Returns -ENODATA under the same
+		conditions as pairing_host.
+
+What:		/sys/bus/serial/devices/<dev>/reconnect
+Date:		August 2026
+KernelVersion:	7.1
+Contact:	linux-input@vger.kernel.org
+Description:
+		(WO) Writing a true value restarts the attached Joy-Con, so
+		that it pages its stored host over Bluetooth without having to
+		be pulled off the rail.
+
+		A pairing written to pairing_host takes effect at once and does
+		not need this; it is only a way to reach Bluetooth while
+		docked. Returns -ENODEV if the rail is empty.
