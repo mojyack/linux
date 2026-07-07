@@ -21,6 +21,7 @@
  */
 #include "nouveau_platform.h"
 
+#include <core/tegra.h>
 #include <nvkm/subdev/clk/gk20a_devfreq.h>
 
 static int nouveau_platform_probe(struct platform_device *pdev)
@@ -45,12 +46,39 @@ static void nouveau_platform_remove(struct platform_device *pdev)
 #ifdef CONFIG_PM_SLEEP
 static int nouveau_platform_suspend(struct device *dev)
 {
-	return gk20a_devfreq_suspend(dev);
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+	int ret;
+
+	/* Stop the devfreq governor before quiescing the GPU. */
+	gk20a_devfreq_suspend(dev);
+
+	/* The SoC powers the GPU off in deep sleep, as the PCI path expects. */
+	ret = nouveau_do_suspend(drm, false);
+	if (ret)
+		return ret;
+
+	/* Rail-gate it, like the PCI path's D3hot: nvkm wants a reset GPU. */
+	return nvkm_device_tegra_suspend(nvxx_device(drm));
 }
 
 static int nouveau_platform_resume(struct device *dev)
 {
-	return gk20a_devfreq_resume(dev);
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+	int ret;
+
+	/* Power the GPU back up before touching any of its registers. */
+	ret = nvkm_device_tegra_resume(nvxx_device(drm));
+	if (ret)
+		return ret;
+
+	/* Reinitialise the GPU before restarting the devfreq governor. */
+	ret = nouveau_do_resume(drm, false);
+	if (ret)
+		return ret;
+
+	gk20a_devfreq_resume(dev);
+
+	return 0;
 }
 
 static SIMPLE_DEV_PM_OPS(nouveau_pm_ops, nouveau_platform_suspend,

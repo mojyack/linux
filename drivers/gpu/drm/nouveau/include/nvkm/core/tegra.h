@@ -56,4 +56,6 @@ int nvkm_device_tegra_new(const struct nvkm_device_tegra_func *,
 			  struct platform_device *,
 			  const char *cfg, const char *dbg,
 			  struct nvkm_device **);
+int nvkm_device_tegra_suspend(struct nvkm_device *);
+int nvkm_device_tegra_resume(struct nvkm_device *);
 #endif

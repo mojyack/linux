@@ -268,6 +268,13 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **gdevfreq)
 	struct gk20a_devfreq *new_gdevfreq;
 	int i;
 
+	/* Only the perfmon counters need re-arming; the device persists. */
+	if (*gdevfreq) {
+		gk20a_pmu_init_perfmon_counter(*gdevfreq);
+		gk20a_devfreq_reset(*gdevfreq);
+		return 0;
+	}
+
 	new_gdevfreq = drmm_kzalloc(drm->dev, sizeof(struct gk20a_devfreq), GFP_KERNEL);
 	if (!new_gdevfreq)
 		return -ENOMEM;

@@ -347,12 +347,36 @@ free:
 	kfree(tdev);
 	return ret;
 }
+
+int
+nvkm_device_tegra_suspend(struct nvkm_device *device)
+{
+	return nvkm_device_tegra_power_down(nvkm_device_tegra(device));
+}
+
+int
+nvkm_device_tegra_resume(struct nvkm_device *device)
+{
+	return nvkm_device_tegra_power_up(nvkm_device_tegra(device));
+}
 #else
 int
 nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
 		      struct platform_device *pdev,
 		      const char *cfg, const char *dbg,
 		      struct nvkm_device **pdevice)
+{
+	return -ENOSYS;
+}
+
+int
+nvkm_device_tegra_suspend(struct nvkm_device *device)
+{
+	return -ENOSYS;
+}
+
+int
+nvkm_device_tegra_resume(struct nvkm_device *device)
 {
 	return -ENOSYS;
 }

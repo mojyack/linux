@@ -939,7 +939,7 @@ nouveau_drm_remove(struct pci_dev *pdev)
 	pci_disable_device(pdev);
 }
 
-static int
+int
 nouveau_do_suspend(struct nouveau_drm *drm, bool runtime)
 {
 	struct drm_device *dev = drm->dev;
@@ -1002,7 +1002,7 @@ fail_display:
 	return ret;
 }
 
-static int
+int
 nouveau_do_resume(struct nouveau_drm *drm, bool runtime)
 {
 	struct drm_device *dev = drm->dev;
