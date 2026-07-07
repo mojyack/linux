@@ -349,6 +349,30 @@ static const u32 pkt_seq_video_non_burst_sync_events[NUM_PKT_SEQ] = {
 	[11] = PKT_ID0(MIPI_DSI_BLANKING_PACKET) | PKT_LEN0(4),
 };
 
+/* non-burst mode with sync events, without EOTp */
+static const u32 pkt_seq_video_non_burst_sync_events_no_eotp[NUM_PKT_SEQ] = {
+	[ 0] = PKT_ID0(MIPI_DSI_V_SYNC_START) | PKT_LEN0(0) |
+	       PKT_LP,
+	[ 1] = 0,
+	[ 2] = PKT_ID0(MIPI_DSI_H_SYNC_START) | PKT_LEN0(0) |
+	       PKT_LP,
+	[ 3] = 0,
+	[ 4] = PKT_ID0(MIPI_DSI_H_SYNC_START) | PKT_LEN0(0) |
+	       PKT_LP,
+	[ 5] = 0,
+	[ 6] = PKT_ID0(MIPI_DSI_H_SYNC_START) | PKT_LEN0(0) |
+	       PKT_ID1(MIPI_DSI_BLANKING_PACKET) | PKT_LEN1(2) |
+	       PKT_ID2(MIPI_DSI_PACKED_PIXEL_STREAM_24) | PKT_LEN2(3),
+	[ 7] = PKT_ID0(MIPI_DSI_BLANKING_PACKET) | PKT_LEN0(4),
+	[ 8] = PKT_ID0(MIPI_DSI_H_SYNC_START) | PKT_LEN0(0) |
+	       PKT_LP,
+	[ 9] = 0,
+	[10] = PKT_ID0(MIPI_DSI_H_SYNC_START) | PKT_LEN0(0) |
+	       PKT_ID1(MIPI_DSI_BLANKING_PACKET) | PKT_LEN1(2) |
+	       PKT_ID2(MIPI_DSI_PACKED_PIXEL_STREAM_24) | PKT_LEN2(3),
+	[11] = PKT_ID0(MIPI_DSI_BLANKING_PACKET) | PKT_LEN0(4),
+};
+
 static const u32 pkt_seq_command_mode[NUM_PKT_SEQ] = {
 	[ 0] = 0,
 	[ 1] = 0,
@@ -506,8 +530,13 @@ static void tegra_dsi_configure(struct tegra_dsi *dsi, unsigned int pipe,
 		DRM_DEBUG_KMS("Non-burst video mode with sync pulses\n");
 		pkt_seq = pkt_seq_video_non_burst_sync_pulses;
 	} else if (dsi->flags & MIPI_DSI_MODE_VIDEO) {
-		DRM_DEBUG_KMS("Non-burst video mode with sync events\n");
-		pkt_seq = pkt_seq_video_non_burst_sync_events;
+		if (dsi->flags & MIPI_DSI_MODE_NO_EOT_PACKET) {
+			DRM_DEBUG_KMS("Non-burst video mode with sync events, no EOTp\n");
+			pkt_seq = pkt_seq_video_non_burst_sync_events_no_eotp;
+		} else {
+			DRM_DEBUG_KMS("Non-burst video mode with sync events\n");
+			pkt_seq = pkt_seq_video_non_burst_sync_events;
+		}
 	} else {
 		DRM_DEBUG_KMS("Command mode\n");
 		pkt_seq = pkt_seq_command_mode;
