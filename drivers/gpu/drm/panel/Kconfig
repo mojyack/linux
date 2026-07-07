@@ -623,6 +623,18 @@ config DRM_PANEL_NEWVISION_NV3052C
 	  Say Y here if you want to enable support for the panels built
 	  around the NewVision NV3052C display controller.
 
+config DRM_PANEL_NINTENDO_SWITCH
+	tristate "Nintendo Switch 720x1280 DSI panel"
+	depends on GPIOLIB
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for the 6.2" 720x1280
+	  video mode DSI panel of the Nintendo Switch. The console was
+	  built with JDI, InnoLux and AUO panels; the driver tells them
+	  apart by their DCS display ID.
+
 config DRM_PANEL_NOVATEK_NT35510
 	tristate "Novatek NT35510 RGB panel driver"
 	depends on OF
