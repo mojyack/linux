@@ -315,6 +315,7 @@ struct tegra_xusb_usb2_port {
 	struct regulator *supply;
 	enum usb_dr_mode mode;
 	bool internal;
+	bool supply_enabled;
 	int usb3_port_fake;
 };
 
