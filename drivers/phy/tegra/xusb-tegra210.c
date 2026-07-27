@@ -1927,17 +1927,26 @@ static int tegra210_usb2_phy_set_mode(struct phy *phy, enum phy_mode mode,
 		if (submode == USB_ROLE_HOST) {
 			tegra210_xusb_padctl_id_override(padctl, true);
 
-			err = regulator_enable(port->supply);
+			if (!port->supply_enabled) {
+				err = regulator_enable(port->supply);
+				if (!err)
+					port->supply_enabled = true;
+			}
 		} else if (submode == USB_ROLE_DEVICE) {
 			tegra210_xusb_padctl_vbus_override(padctl, true);
 		} else if (submode == USB_ROLE_NONE) {
 			/*
 			 * When port is peripheral only or role transitions to
-			 * USB_ROLE_NONE from USB_ROLE_DEVICE, regulator is not
-			 * be enabled.
+			 * USB_ROLE_NONE from USB_ROLE_DEVICE, the regulator
+			 * was never enabled here. Track that instead of asking
+			 * the regulator: an always-on VBUS supply reports
+			 * itself as enabled even though this consumer never
+			 * enabled it, which makes the disable unbalanced.
 			 */
-			if (regulator_is_enabled(port->supply))
+			if (port->supply_enabled) {
 				regulator_disable(port->supply);
+				port->supply_enabled = false;
+			}
 
 			tegra210_xusb_padctl_id_override(padctl, false);
 			tegra210_xusb_padctl_vbus_override(padctl, false);
