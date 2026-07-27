@@ -1927,23 +1927,29 @@ static int tegra210_usb2_phy_set_mode(struct phy *phy, enum phy_mode mode,
 		if (submode == USB_ROLE_HOST) {
 			tegra210_xusb_padctl_id_override(padctl, true);
 
-			err = regulator_enable(port->supply);
+			if (!port->supply_enabled) {
+				err = regulator_enable(port->supply);
+				if (!err)
+					port->supply_enabled = true;
+			}
 		} else if (submode == USB_ROLE_DEVICE) {
 			tegra210_xusb_padctl_vbus_override(padctl, true);
 		} else if (submode == USB_ROLE_NONE) {
-			/*
-			 * When port is peripheral only or role transitions to
-			 * USB_ROLE_NONE from USB_ROLE_DEVICE, regulator is not
-			 * be enabled.
-			 */
-			if (regulator_is_enabled(port->supply))
-				regulator_disable(port->supply);
+			/* Drop only the reference taken for the host role. */
+			if (port->supply_enabled) {
+				err = regulator_disable(port->supply);
+				if (err)
+					goto unlock;
+
+				port->supply_enabled = false;
+			}
 
 			tegra210_xusb_padctl_id_override(padctl, false);
 			tegra210_xusb_padctl_vbus_override(padctl, false);
 		}
 	}
 
+unlock:
 	mutex_unlock(&padctl->lock);
 
 	return err;
