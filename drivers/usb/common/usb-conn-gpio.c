@@ -48,6 +48,7 @@ struct usb_conn_info {
 	struct power_supply_desc desc;
 	struct power_supply *charger;
 	bool initial_detection;
+	bool resume_detection;
 };
 
 /*
@@ -93,11 +94,20 @@ static void usb_conn_detect_cable(struct work_struct *work)
 		usb_role_string(info->last_role), usb_role_string(role), id, vbus);
 
 	if (!info->initial_detection && info->last_role == role) {
-		dev_warn(info->dev, "repeated role: %s\n", usb_role_string(role));
+		/* Resume always re-runs detection, so no change is expected. */
+		if (info->resume_detection)
+			dev_dbg(info->dev, "unchanged role after resume: %s\n",
+				usb_role_string(role));
+		else
+			dev_warn(info->dev, "repeated role: %s\n",
+				 usb_role_string(role));
+
+		info->resume_detection = false;
 		return;
 	}
 
 	info->initial_detection = false;
+	info->resume_detection = false;
 
 	if (info->last_role == USB_ROLE_HOST && info->vbus)
 		regulator_disable(info->vbus);
@@ -344,6 +354,7 @@ static int __maybe_unused usb_conn_resume(struct device *dev)
 	if (info->vbus_gpiod)
 		enable_irq(info->vbus_irq);
 
+	info->resume_detection = true;
 	usb_conn_queue_dwork(info, 0);
 
 	return 0;
