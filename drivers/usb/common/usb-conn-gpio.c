@@ -93,7 +93,7 @@ static void usb_conn_detect_cable(struct work_struct *work)
 		usb_role_string(info->last_role), usb_role_string(role), id, vbus);
 
 	if (!info->initial_detection && info->last_role == role) {
-		dev_warn(info->dev, "repeated role: %s\n", usb_role_string(role));
+		dev_dbg(info->dev, "repeated role: %s\n", usb_role_string(role));
 		return;
 	}
 
