@@ -494,6 +494,7 @@ static struct tegra_bo *tegra_bo_import(struct drm_device *drm,
 
 	get_dma_buf(buf);
 	bo->dma_buf = buf;
+	bo->gem.resv = buf->resv;
 
 	return bo;
 
