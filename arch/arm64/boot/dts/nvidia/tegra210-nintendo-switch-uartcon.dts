@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Nintendo Switch with a serial console on the right Joy-Con rail.
+ *
+ * Mutually exclusive with Joy-Con support: the port becomes a plain 16550 the
+ * 8250 driver binds as ttyS1.
+ */
+
+#include "tegra210-nintendo-switch.dts"
+
+/ {
+	aliases {
+		serial1 = &uartb;
+	};
+};
+
+&uartb {
+	compatible = "nvidia,tegra210-uart", "nvidia,tegra20-uart";
+	/delete-property/ nvidia,invert-txd;
+	/delete-property/ nvidia,invert-rts;
+
+	/* the Joy-Con transport needs the hsuart driver, which is now gone */
+	/delete-node/ game-controller;
+};
