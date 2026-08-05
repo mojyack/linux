@@ -3,6 +3,8 @@
  * Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
  */
 
+#include <linux/math64.h>
+#include <linux/minmax.h>
 #include <linux/of_reserved_mem.h>
 
 #include "tegra210-emc.h"
@@ -14,7 +16,11 @@ static int tegra210_emc_table_device_init(struct reserved_mem *rmem,
 {
 	struct tegra210_emc *emc = dev_get_drvdata(dev);
 	struct tegra210_emc_timing *timings;
-	unsigned int i, count = 0;
+	unsigned int i, max, count = 0;
+
+	/* The table ends at a zero revision, or else at the region end. */
+	max = min_t(unsigned int, TEGRA_EMC_MAX_FREQS,
+		    div_u64(rmem->size, sizeof(*timings)));
 
 	timings = memremap(rmem->base, rmem->size, MEMREMAP_WB);
 	if (!timings) {
@@ -22,11 +28,17 @@ static int tegra210_emc_table_device_init(struct reserved_mem *rmem,
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < TEGRA_EMC_MAX_FREQS; i++) {
+	for (i = 0; i < max; i++) {
 		if (timings[i].revision == 0)
 			break;
 
 		count++;
+	}
+
+	if (!count) {
+		dev_err(dev, "no EMC timings in table '%s'\n", rmem->name);
+		memunmap(timings);
+		return -EINVAL;
 	}
 
 	/* only the nominal and derated tables are expected */
