@@ -187,13 +187,11 @@ static int tegra210_clk_emc_set_rate(struct clk_hw *hw, unsigned long rate,
 
 			new = clk_hw_get_parent_by_index(hw, new_idx);
 		}
-
-		index = new_idx;
-		parent = new;
-	} else {
-		index = old_idx;
-		parent = old;
 	}
+
+	/* _UD taps ignore the divider: use the source the timing names */
+	index = new_idx;
+	parent = new;
 
 	clk = tegra210_clk_emc_find_parent(emc, index);
 	if (IS_ERR(clk)) {
