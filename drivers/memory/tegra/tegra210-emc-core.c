@@ -1980,11 +1980,13 @@ static int tegra210_emc_opp_table_init(struct tegra210_emc *emc)
 
 	max_opps = dev_pm_opp_get_opp_count(emc->dev);
 	if (max_opps <= 0) {
+		err = max_opps ? max_opps : -ENODEV;
 		dev_err_probe(emc->dev, err, "Failed to add OPPs\n");
 		goto remove_table;
 	}
 
 	if (emc->num_timings != max_opps) {
+		err = -EINVAL;
 		dev_err_probe(emc->dev, err, "OPP table does not match emc table\n");
 		goto remove_table;
 	}
@@ -1993,6 +1995,7 @@ static int tegra210_emc_opp_table_init(struct tegra210_emc *emc)
 		rate = emc->timings[i].rate * 1000;
 		opp = dev_pm_opp_find_freq_exact(emc->dev, rate, true);
 		if (IS_ERR(opp)) {
+			err = PTR_ERR(opp);
 			dev_err_probe(emc->dev, err, "Rate %lu not found in OPP table\n", rate);
 			goto remove_table;
 		}
