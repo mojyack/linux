@@ -2085,6 +2085,7 @@ static int tegra210_emc_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, emc);
 	spin_lock_init(&emc->lock);
+	mutex_init(&emc->rate_lock);
 	emc->dev = &pdev->dev;
 
 	emc->mc = devm_tegra_memory_controller_get(&pdev->dev);
