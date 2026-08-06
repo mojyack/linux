@@ -227,6 +227,14 @@ gm20b_pmu_init(struct nvkm_pmu *pmu)
 
 	nvkm_falcon_pio_wr(falcon, (u8 *)&args, 0, 0, DMEM, addr_args, sizeof(args), 0, false);
 	nvkm_falcon_start(falcon);
+
+	/* Starting the falcon only begins the handshake that sets WPR up. */
+	if (!wait_for_completion_timeout(&pmu->wpr_ready,
+					 msecs_to_jiffies(1000))) {
+		nvkm_error(&pmu->subdev, "ACR WPR init timeout\n");
+		return -ETIMEDOUT;
+	}
+
 	return 0;
 }
 
