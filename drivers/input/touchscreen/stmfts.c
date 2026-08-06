@@ -54,6 +54,9 @@
 #define STMFTS_EV_STATUS			0x16
 #define STMFTS_EV_DEBUG				0xdb
 
+/* error types, carried in the second byte of an error event */
+#define STMFTS_ERR_INVALID_COMMAND		0xba
+
 /* multi touch related event masks */
 #define STMFTS_MASK_EVENT_ID			0x0f
 #define STMFTS_MASK_TOUCH_ID			0xf0
@@ -103,11 +106,15 @@ struct stmfts_data {
 	u8 data[STMFTS_DATA_MAX_SIZE];
 
 	struct completion cmd_done;
+	int cmd_err;
 
 	bool use_key;
 	bool led_status;
 	bool hover_enabled;
 	bool running;
+
+	/* firmware rejects the sleep in/out commands, see stmfts_power_on() */
+	bool no_sleep_commands;
 
 	/* Nintendo Switch (FTM4CD60D) specifics */
 	bool switch_format;
@@ -307,10 +314,15 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 			break;
 
 		case STMFTS_EV_ERROR:
-			dev_warn(&sdata->client->dev,
-				 "error code: 0x%x%x%x%x%x%x",
-				 event[6], event[5], event[4],
-				 event[3], event[2], event[1]);
+			/* An unimplemented command answers with this error. */
+			if (event[1] == STMFTS_ERR_INVALID_COMMAND) {
+				sdata->cmd_err = -EOPNOTSUPP;
+				complete(&sdata->cmd_done);
+				break;
+			}
+
+			dev_warn(&sdata->client->dev, "error code: %*ph\n",
+				 STMFTS_EVENT_SIZE - 1, &event[1]);
 			break;
 
 		default:
@@ -350,6 +362,7 @@ static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
 {
 	int err;
 
+	sdata->cmd_err = 0;
 	reinit_completion(&sdata->cmd_done);
 
 	err = i2c_smbus_write_byte(sdata->client, cmd);
@@ -360,7 +373,7 @@ static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
 					 msecs_to_jiffies(1000)))
 		return -ETIMEDOUT;
 
-	return 0;
+	return sdata->cmd_err;
 }
 
 static int stmfts_write_register(struct stmfts_data *sdata, const u16 reg,
@@ -632,10 +645,16 @@ static int stmfts_configure(struct stmfts_data *sdata)
 		goto stop_poll;
 	}
 
+	/* Not every firmware has sleep in/out; sense on/off is the gate. */
 	err = stmfts_command(sdata, STMFTS_SLEEP_OUT);
-	if (err)
+	if (err == -EOPNOTSUPP) {
+		sdata->no_sleep_commands = true;
+		dev_dbg(&sdata->client->dev,
+			"firmware has no sleep in/out, not using them\n");
+	} else if (err) {
 		dev_warn(&sdata->client->dev,
 			 "failed to perform sleep_out: %d\n", err);
+	}
 
 	/* optional tuning */
 	err = stmfts_command(sdata, STMFTS_MS_CX_TUNING);
@@ -699,7 +718,8 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 	 * At this point no one is using the touchscreen
 	 * and I don't really care about the return value
 	 */
-	(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
+	if (!sdata->no_sleep_commands)
+		(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 
 	return 0;
 
@@ -888,6 +908,9 @@ static int stmfts_runtime_suspend(struct device *dev)
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int ret;
 
+	if (sdata->no_sleep_commands)
+		return 0;
+
 	ret = i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 	if (ret)
 		dev_warn(dev, "failed to suspend device: %d\n", ret);
@@ -900,6 +923,9 @@ static int stmfts_runtime_resume(struct device *dev)
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	struct i2c_client *client = sdata->client;
 	int ret;
+
+	if (sdata->no_sleep_commands)
+		return 0;
 
 	ret = i2c_smbus_write_byte(client, STMFTS_SLEEP_OUT);
 	if (ret)
