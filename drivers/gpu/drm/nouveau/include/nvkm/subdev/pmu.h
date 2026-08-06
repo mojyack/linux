@@ -16,6 +16,7 @@ struct nvkm_pmu {
 	bool initmsg_received;
 
 	struct completion wpr_ready;
+	int wpr_status;
 
 	struct {
 		struct mutex mutex;

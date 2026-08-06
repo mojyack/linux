@@ -132,12 +132,14 @@ gm20b_pmu_acr_init_wpr_callback(void *priv, struct nvfw_falcon_msg *hdr)
 	if (msg->error_code) {
 		nvkm_error(subdev, "ACR WPR init failure: %d\n",
 			   msg->error_code);
-		return -EINVAL;
+		pmu->wpr_status = -EINVAL;
+	} else {
+		nvkm_debug(subdev, "ACR WPR init complete\n");
+		pmu->wpr_status = 0;
 	}
 
-	nvkm_debug(subdev, "ACR WPR init complete\n");
 	complete_all(&pmu->wpr_ready);
-	return 0;
+	return pmu->wpr_status;
 }
 
 static int
@@ -227,7 +229,18 @@ gm20b_pmu_init(struct nvkm_pmu *pmu)
 
 	nvkm_falcon_pio_wr(falcon, (u8 *)&args, 0, 0, DMEM, addr_args, sizeof(args), 0, false);
 	nvkm_falcon_start(falcon);
-	return 0;
+
+	/* Starting the falcon only begins the handshake that sets WPR up. */
+	if (!nvkm_acr_managed_falcon(pmu->subdev.device, NVKM_ACR_LSF_PMU))
+		return 0;
+
+	if (!wait_for_completion_timeout(&pmu->wpr_ready,
+					 msecs_to_jiffies(1000))) {
+		nvkm_error(&pmu->subdev, "ACR WPR init timeout\n");
+		return -ETIMEDOUT;
+	}
+
+	return pmu->wpr_status;
 }
 
 const struct nvkm_pmu_func
