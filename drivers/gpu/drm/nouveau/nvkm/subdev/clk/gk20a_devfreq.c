@@ -306,6 +306,18 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **gdevfreq)
 	return 0;
 }
 
+void gk20a_devfreq_fini(struct device *dev)
+{
+	struct gk20a_devfreq *gdevfreq = dev_to_gk20a_devfreq(dev);
+
+	if (!gdevfreq || !gdevfreq->devfreq)
+		return;
+
+	/* devres would free it after remove(), when this is already gone. */
+	devm_devfreq_remove_device(dev, gdevfreq->devfreq);
+	gdevfreq->devfreq = NULL;
+}
+
 int gk20a_devfreq_resume(struct device *dev)
 {
 	struct gk20a_devfreq *gdevfreq = dev_to_gk20a_devfreq(dev);

@@ -40,6 +40,7 @@ static void nouveau_platform_remove(struct platform_device *pdev)
 {
 	struct nouveau_drm *drm = platform_get_drvdata(pdev);
 
+	gk20a_devfreq_fini(&pdev->dev);
 	nouveau_drm_device_remove(drm);
 }
 
