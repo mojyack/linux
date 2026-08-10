@@ -26,6 +26,7 @@ struct nvkm_timer {
 };
 
 u64 nvkm_timer_read(struct nvkm_timer *);
+u64 nvkm_timer_read_raw(struct nvkm_timer *);
 void nvkm_timer_alarm(struct nvkm_timer *, u32 nsec, struct nvkm_alarm *);
 
 struct nvkm_timer_wait {
@@ -80,4 +81,5 @@ int nv04_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct
 int nv40_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
 int nv41_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
 int gk20a_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
+int gm20b_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
 #endif
