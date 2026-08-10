@@ -185,7 +185,7 @@ nvkm_udevice_time(struct nvkm_udevice *udev, void *data, u32 size)
 	nvif_ioctl(object, "device time size %d\n", size);
 	if (!(ret = nvif_unpack(ret, &data, &size, args->v0, 0, 0, false))) {
 		nvif_ioctl(object, "device time vers %d\n", args->v0.version);
-		args->v0.time = nvkm_timer_read(device->timer);
+		args->v0.time = nvkm_timer_read_raw(device->timer);
 	}
 
 	return ret;

@@ -61,10 +61,10 @@ nv04_timer_alarm_fini(struct nvkm_timer *tmr)
 }
 
 void
-nv04_timer_alarm_init(struct nvkm_timer *tmr, u32 time)
+nv04_timer_alarm_init(struct nvkm_timer *tmr, u64 time)
 {
 	struct nvkm_device *device = tmr->subdev.device;
-	nvkm_wr32(device, NV04_PTIMER_ALARM_0, time);
+	nvkm_wr32(device, NV04_PTIMER_ALARM_0, lower_32_bits(time));
 	nvkm_wr32(device, NV04_PTIMER_INTR_EN_0, 0x00000001);
 }
 

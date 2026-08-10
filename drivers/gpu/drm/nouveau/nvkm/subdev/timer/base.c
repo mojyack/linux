@@ -65,6 +65,16 @@ nvkm_timer_read(struct nvkm_timer *tmr)
 	return tmr->func->read(tmr);
 }
 
+/* The counter as the GPU sees it, e.g. in the timestamps it writes. */
+u64
+nvkm_timer_read_raw(struct nvkm_timer *tmr)
+{
+	if (tmr->func->read_raw)
+		return tmr->func->read_raw(tmr);
+
+	return tmr->func->read(tmr);
+}
+
 void
 nvkm_timer_alarm_trigger(struct nvkm_timer *tmr)
 {
