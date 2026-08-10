@@ -316,6 +316,9 @@ void gk20a_devfreq_fini(struct device *dev)
 	/* devres would free it after remove(), when this is already gone. */
 	devm_devfreq_remove_device(dev, gdevfreq->devfreq);
 	gdevfreq->devfreq = NULL;
+
+	/* Added to the platform device, which outlives the module. */
+	dev_pm_opp_remove_all_dynamic(dev);
 }
 
 int gk20a_devfreq_resume(struct device *dev)
