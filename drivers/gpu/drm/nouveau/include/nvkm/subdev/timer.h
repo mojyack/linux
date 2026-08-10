@@ -80,4 +80,5 @@ int nv04_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct
 int nv40_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
 int nv41_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
 int gk20a_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
+int gm20b_timer_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_timer **);
 #endif
