@@ -401,6 +401,8 @@ nvkm_mmu_dtor(struct nvkm_subdev *subdev)
 
 	nvkm_vmm_unref(&mmu->vmm);
 
+	/* The cache is never emptied on teardown, so it leaks otherwise. */
+	nvkm_mmu_ptc_dump(mmu);
 	nvkm_mmu_ptc_fini(mmu);
 	mutex_destroy(&mmu->mutex);
 
