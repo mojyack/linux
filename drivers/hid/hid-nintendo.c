@@ -28,6 +28,8 @@
  *
  */
 
+#include <linux/nintendo-joycon.h>
+
 #include "hid-ids.h"
 #include <linux/unaligned.h>
 #include <linux/delay.h>
@@ -105,38 +107,6 @@
 #define JC_USB_PRE_HANDSHAKE		 0x91
 #define JC_USB_SEND_UART		 0x92
 
-/* Magic value denoting presence of user calibration */
-#define JC_CAL_USR_MAGIC_0		 0xB2
-#define JC_CAL_USR_MAGIC_1		 0xA1
-#define JC_CAL_USR_MAGIC_SIZE		 2
-
-/* SPI storage addresses of user calibration data */
-#define JC_CAL_USR_LEFT_MAGIC_ADDR	 0x8010
-#define JC_CAL_USR_LEFT_DATA_ADDR	 0x8012
-#define JC_CAL_USR_LEFT_DATA_END	 0x801A
-#define JC_CAL_USR_RIGHT_MAGIC_ADDR	 0x801B
-#define JC_CAL_USR_RIGHT_DATA_ADDR	 0x801D
-#define JC_CAL_STICK_DATA_SIZE \
-	(JC_CAL_USR_LEFT_DATA_END - JC_CAL_USR_LEFT_DATA_ADDR + 1)
-
-/* SPI storage addresses of factory calibration data */
-#define JC_CAL_FCT_DATA_LEFT_ADDR	 0x603d
-#define JC_CAL_FCT_DATA_RIGHT_ADDR	 0x6046
-
-/* SPI storage addresses of IMU factory calibration data */
-#define JC_IMU_CAL_FCT_DATA_ADDR	 0x6020
-#define JC_IMU_CAL_FCT_DATA_END	 0x6037
-#define JC_IMU_CAL_DATA_SIZE \
-	(JC_IMU_CAL_FCT_DATA_END - JC_IMU_CAL_FCT_DATA_ADDR + 1)
-/* SPI storage addresses of IMU user calibration data */
-#define JC_IMU_CAL_USR_MAGIC_ADDR	 0x8026
-#define JC_IMU_CAL_USR_DATA_ADDR	 0x8028
-
-/* The raw analog joystick values will be mapped in terms of this magnitude */
-#define JC_MAX_STICK_MAG		 32767
-#define JC_STICK_FUZZ			 250
-#define JC_STICK_FLAT			 500
-
 /* Hat values for pro controller's d-pad */
 #define JC_MAX_DPAD_MAG		1
 #define JC_DPAD_FUZZ		0
@@ -149,158 +119,6 @@
 /* Controls how many dropped IMU packets at once trigger a warning message */
 #define JC_IMU_DROPPED_PKT_WARNING	3
 
-/*
- * The controller's accelerometer has a sensor resolution of 16bits and is
- * configured with a range of +-8000 milliGs. Therefore, the resolution can be
- * calculated thus: (2^16-1)/(8000 * 2) = 4.096 digits per milliG
- * Resolution per G (rather than per millliG): 4.096 * 1000 = 4096 digits per G
- * Alternatively: 1/4096 = .0002441 Gs per digit
- */
-#define JC_IMU_MAX_ACCEL_MAG		32767
-#define JC_IMU_ACCEL_RES_PER_G		4096
-#define JC_IMU_ACCEL_FUZZ		10
-#define JC_IMU_ACCEL_FLAT		0
-
-/*
- * The controller's gyroscope has a sensor resolution of 16bits and is
- * configured with a range of +-2000 degrees/second.
- * Digits per dps: (2^16 -1)/(2000*2) = 16.38375
- * dps per digit: 16.38375E-1 = .0610
- *
- * STMicro recommends in the datasheet to add 15% to the dps/digit. This allows
- * the full sensitivity range to be saturated without clipping. This yields more
- * accurate results, so it's the technique this driver uses.
- * dps per digit (corrected): .0610 * 1.15 = .0702
- * digits per dps (corrected): .0702E-1 = 14.247
- *
- * Now, 14.247 truncating to 14 loses a lot of precision, so we rescale the
- * min/max range by 1000.
- */
-#define JC_IMU_PREC_RANGE_SCALE	1000
-/* Note: change mag and res_per_dps if prec_range_scale is ever altered */
-#define JC_IMU_MAX_GYRO_MAG		32767000 /* (2^16-1)*1000 */
-#define JC_IMU_GYRO_RES_PER_DPS		14247 /* (14.247*1000) */
-#define JC_IMU_GYRO_FUZZ		10
-#define JC_IMU_GYRO_FLAT		0
-
-/* frequency/amplitude tables for rumble */
-struct joycon_rumble_freq_data {
-	u16 high;
-	u8 low;
-	u16 freq; /* Hz*/
-};
-
-struct joycon_rumble_amp_data {
-	u8 high;
-	u16 low;
-	u16 amp;
-};
-
-#if IS_ENABLED(CONFIG_NINTENDO_FF)
-/*
- * These tables are from
- * https://github.com/dekuNukem/Nintendo_Switch_Reverse_Engineering/blob/master/rumble_data_table.md
- */
-static const struct joycon_rumble_freq_data joycon_rumble_frequencies[] = {
-	/* high, low, freq */
-	{ 0x0000, 0x01,   41 }, { 0x0000, 0x02,   42 }, { 0x0000, 0x03,   43 },
-	{ 0x0000, 0x04,   44 }, { 0x0000, 0x05,   45 }, { 0x0000, 0x06,   46 },
-	{ 0x0000, 0x07,   47 }, { 0x0000, 0x08,   48 }, { 0x0000, 0x09,   49 },
-	{ 0x0000, 0x0A,   50 }, { 0x0000, 0x0B,   51 }, { 0x0000, 0x0C,   52 },
-	{ 0x0000, 0x0D,   53 }, { 0x0000, 0x0E,   54 }, { 0x0000, 0x0F,   55 },
-	{ 0x0000, 0x10,   57 }, { 0x0000, 0x11,   58 }, { 0x0000, 0x12,   59 },
-	{ 0x0000, 0x13,   60 }, { 0x0000, 0x14,   62 }, { 0x0000, 0x15,   63 },
-	{ 0x0000, 0x16,   64 }, { 0x0000, 0x17,   66 }, { 0x0000, 0x18,   67 },
-	{ 0x0000, 0x19,   69 }, { 0x0000, 0x1A,   70 }, { 0x0000, 0x1B,   72 },
-	{ 0x0000, 0x1C,   73 }, { 0x0000, 0x1D,   75 }, { 0x0000, 0x1e,   77 },
-	{ 0x0000, 0x1f,   78 }, { 0x0000, 0x20,   80 }, { 0x0400, 0x21,   82 },
-	{ 0x0800, 0x22,   84 }, { 0x0c00, 0x23,   85 }, { 0x1000, 0x24,   87 },
-	{ 0x1400, 0x25,   89 }, { 0x1800, 0x26,   91 }, { 0x1c00, 0x27,   93 },
-	{ 0x2000, 0x28,   95 }, { 0x2400, 0x29,   97 }, { 0x2800, 0x2a,   99 },
-	{ 0x2c00, 0x2b,  102 }, { 0x3000, 0x2c,  104 }, { 0x3400, 0x2d,  106 },
-	{ 0x3800, 0x2e,  108 }, { 0x3c00, 0x2f,  111 }, { 0x4000, 0x30,  113 },
-	{ 0x4400, 0x31,  116 }, { 0x4800, 0x32,  118 }, { 0x4c00, 0x33,  121 },
-	{ 0x5000, 0x34,  123 }, { 0x5400, 0x35,  126 }, { 0x5800, 0x36,  129 },
-	{ 0x5c00, 0x37,  132 }, { 0x6000, 0x38,  135 }, { 0x6400, 0x39,  137 },
-	{ 0x6800, 0x3a,  141 }, { 0x6c00, 0x3b,  144 }, { 0x7000, 0x3c,  147 },
-	{ 0x7400, 0x3d,  150 }, { 0x7800, 0x3e,  153 }, { 0x7c00, 0x3f,  157 },
-	{ 0x8000, 0x40,  160 }, { 0x8400, 0x41,  164 }, { 0x8800, 0x42,  167 },
-	{ 0x8c00, 0x43,  171 }, { 0x9000, 0x44,  174 }, { 0x9400, 0x45,  178 },
-	{ 0x9800, 0x46,  182 }, { 0x9c00, 0x47,  186 }, { 0xa000, 0x48,  190 },
-	{ 0xa400, 0x49,  194 }, { 0xa800, 0x4a,  199 }, { 0xac00, 0x4b,  203 },
-	{ 0xb000, 0x4c,  207 }, { 0xb400, 0x4d,  212 }, { 0xb800, 0x4e,  217 },
-	{ 0xbc00, 0x4f,  221 }, { 0xc000, 0x50,  226 }, { 0xc400, 0x51,  231 },
-	{ 0xc800, 0x52,  236 }, { 0xcc00, 0x53,  241 }, { 0xd000, 0x54,  247 },
-	{ 0xd400, 0x55,  252 }, { 0xd800, 0x56,  258 }, { 0xdc00, 0x57,  263 },
-	{ 0xe000, 0x58,  269 }, { 0xe400, 0x59,  275 }, { 0xe800, 0x5a,  281 },
-	{ 0xec00, 0x5b,  287 }, { 0xf000, 0x5c,  293 }, { 0xf400, 0x5d,  300 },
-	{ 0xf800, 0x5e,  306 }, { 0xfc00, 0x5f,  313 }, { 0x0001, 0x60,  320 },
-	{ 0x0401, 0x61,  327 }, { 0x0801, 0x62,  334 }, { 0x0c01, 0x63,  341 },
-	{ 0x1001, 0x64,  349 }, { 0x1401, 0x65,  357 }, { 0x1801, 0x66,  364 },
-	{ 0x1c01, 0x67,  372 }, { 0x2001, 0x68,  381 }, { 0x2401, 0x69,  389 },
-	{ 0x2801, 0x6a,  397 }, { 0x2c01, 0x6b,  406 }, { 0x3001, 0x6c,  415 },
-	{ 0x3401, 0x6d,  424 }, { 0x3801, 0x6e,  433 }, { 0x3c01, 0x6f,  443 },
-	{ 0x4001, 0x70,  453 }, { 0x4401, 0x71,  462 }, { 0x4801, 0x72,  473 },
-	{ 0x4c01, 0x73,  483 }, { 0x5001, 0x74,  494 }, { 0x5401, 0x75,  504 },
-	{ 0x5801, 0x76,  515 }, { 0x5c01, 0x77,  527 }, { 0x6001, 0x78,  538 },
-	{ 0x6401, 0x79,  550 }, { 0x6801, 0x7a,  562 }, { 0x6c01, 0x7b,  574 },
-	{ 0x7001, 0x7c,  587 }, { 0x7401, 0x7d,  600 }, { 0x7801, 0x7e,  613 },
-	{ 0x7c01, 0x7f,  626 }, { 0x8001, 0x00,  640 }, { 0x8401, 0x00,  654 },
-	{ 0x8801, 0x00,  668 }, { 0x8c01, 0x00,  683 }, { 0x9001, 0x00,  698 },
-	{ 0x9401, 0x00,  713 }, { 0x9801, 0x00,  729 }, { 0x9c01, 0x00,  745 },
-	{ 0xa001, 0x00,  761 }, { 0xa401, 0x00,  778 }, { 0xa801, 0x00,  795 },
-	{ 0xac01, 0x00,  812 }, { 0xb001, 0x00,  830 }, { 0xb401, 0x00,  848 },
-	{ 0xb801, 0x00,  867 }, { 0xbc01, 0x00,  886 }, { 0xc001, 0x00,  905 },
-	{ 0xc401, 0x00,  925 }, { 0xc801, 0x00,  945 }, { 0xcc01, 0x00,  966 },
-	{ 0xd001, 0x00,  987 }, { 0xd401, 0x00, 1009 }, { 0xd801, 0x00, 1031 },
-	{ 0xdc01, 0x00, 1053 }, { 0xe001, 0x00, 1076 }, { 0xe401, 0x00, 1100 },
-	{ 0xe801, 0x00, 1124 }, { 0xec01, 0x00, 1149 }, { 0xf001, 0x00, 1174 },
-	{ 0xf401, 0x00, 1199 }, { 0xf801, 0x00, 1226 }, { 0xfc01, 0x00, 1253 }
-};
-
-#define joycon_max_rumble_amp	(1003)
-static const struct joycon_rumble_amp_data joycon_rumble_amplitudes[] = {
-	/* high, low, amp */
-	{ 0x00, 0x0040,    0 },
-	{ 0x02, 0x8040,   10 }, { 0x04, 0x0041,   12 }, { 0x06, 0x8041,   14 },
-	{ 0x08, 0x0042,   17 }, { 0x0a, 0x8042,   20 }, { 0x0c, 0x0043,   24 },
-	{ 0x0e, 0x8043,   28 }, { 0x10, 0x0044,   33 }, { 0x12, 0x8044,   40 },
-	{ 0x14, 0x0045,   47 }, { 0x16, 0x8045,   56 }, { 0x18, 0x0046,   67 },
-	{ 0x1a, 0x8046,   80 }, { 0x1c, 0x0047,   95 }, { 0x1e, 0x8047,  112 },
-	{ 0x20, 0x0048,  117 }, { 0x22, 0x8048,  123 }, { 0x24, 0x0049,  128 },
-	{ 0x26, 0x8049,  134 }, { 0x28, 0x004a,  140 }, { 0x2a, 0x804a,  146 },
-	{ 0x2c, 0x004b,  152 }, { 0x2e, 0x804b,  159 }, { 0x30, 0x004c,  166 },
-	{ 0x32, 0x804c,  173 }, { 0x34, 0x004d,  181 }, { 0x36, 0x804d,  189 },
-	{ 0x38, 0x004e,  198 }, { 0x3a, 0x804e,  206 }, { 0x3c, 0x004f,  215 },
-	{ 0x3e, 0x804f,  225 }, { 0x40, 0x0050,  230 }, { 0x42, 0x8050,  235 },
-	{ 0x44, 0x0051,  240 }, { 0x46, 0x8051,  245 }, { 0x48, 0x0052,  251 },
-	{ 0x4a, 0x8052,  256 }, { 0x4c, 0x0053,  262 }, { 0x4e, 0x8053,  268 },
-	{ 0x50, 0x0054,  273 }, { 0x52, 0x8054,  279 }, { 0x54, 0x0055,  286 },
-	{ 0x56, 0x8055,  292 }, { 0x58, 0x0056,  298 }, { 0x5a, 0x8056,  305 },
-	{ 0x5c, 0x0057,  311 }, { 0x5e, 0x8057,  318 }, { 0x60, 0x0058,  325 },
-	{ 0x62, 0x8058,  332 }, { 0x64, 0x0059,  340 }, { 0x66, 0x8059,  347 },
-	{ 0x68, 0x005a,  355 }, { 0x6a, 0x805a,  362 }, { 0x6c, 0x005b,  370 },
-	{ 0x6e, 0x805b,  378 }, { 0x70, 0x005c,  387 }, { 0x72, 0x805c,  395 },
-	{ 0x74, 0x005d,  404 }, { 0x76, 0x805d,  413 }, { 0x78, 0x005e,  422 },
-	{ 0x7a, 0x805e,  431 }, { 0x7c, 0x005f,  440 }, { 0x7e, 0x805f,  450 },
-	{ 0x80, 0x0060,  460 }, { 0x82, 0x8060,  470 }, { 0x84, 0x0061,  480 },
-	{ 0x86, 0x8061,  491 }, { 0x88, 0x0062,  501 }, { 0x8a, 0x8062,  512 },
-	{ 0x8c, 0x0063,  524 }, { 0x8e, 0x8063,  535 }, { 0x90, 0x0064,  547 },
-	{ 0x92, 0x8064,  559 }, { 0x94, 0x0065,  571 }, { 0x96, 0x8065,  584 },
-	{ 0x98, 0x0066,  596 }, { 0x9a, 0x8066,  609 }, { 0x9c, 0x0067,  623 },
-	{ 0x9e, 0x8067,  636 }, { 0xa0, 0x0068,  650 }, { 0xa2, 0x8068,  665 },
-	{ 0xa4, 0x0069,  679 }, { 0xa6, 0x8069,  694 }, { 0xa8, 0x006a,  709 },
-	{ 0xaa, 0x806a,  725 }, { 0xac, 0x006b,  741 }, { 0xae, 0x806b,  757 },
-	{ 0xb0, 0x006c,  773 }, { 0xb2, 0x806c,  790 }, { 0xb4, 0x006d,  808 },
-	{ 0xb6, 0x806d,  825 }, { 0xb8, 0x006e,  843 }, { 0xba, 0x806e,  862 },
-	{ 0xbc, 0x006f,  881 }, { 0xbe, 0x806f,  900 }, { 0xc0, 0x0070,  920 },
-	{ 0xc2, 0x8070,  940 }, { 0xc4, 0x0071,  960 }, { 0xc6, 0x8071,  981 },
-	{ 0xc8, 0x0072, joycon_max_rumble_amp }
-};
-static const u16 JC_RUMBLE_DFLT_LOW_FREQ = 160;
-static const u16 JC_RUMBLE_DFLT_HIGH_FREQ = 320;
-static const unsigned short JC_RUMBLE_ZERO_AMP_PKT_CNT = 5;
-#endif /* IS_ENABLED(CONFIG_NINTENDO_FF) */
 static const u16 JC_RUMBLE_PERIOD_MS = 50;
 
 /* States for controller state machine */
@@ -309,148 +127,6 @@ enum joycon_ctlr_state {
 	JOYCON_CTLR_STATE_READ,
 	JOYCON_CTLR_STATE_REMOVED,
 	JOYCON_CTLR_STATE_SUSPENDED,
-};
-
-/* Controller type received as part of device info */
-enum joycon_ctlr_type {
-	JOYCON_CTLR_TYPE_JCL  = 0x01,
-	JOYCON_CTLR_TYPE_JCR  = 0x02,
-	JOYCON_CTLR_TYPE_PRO  = 0x03,
-	JOYCON_CTLR_TYPE_LIC_PRO = 0x06,
-	JOYCON_CTLR_TYPE_NESL = 0x09,
-	JOYCON_CTLR_TYPE_NESR = 0x0A,
-	JOYCON_CTLR_TYPE_SNES = 0x0B,
-	JOYCON_CTLR_TYPE_GEN  = 0x0D,
-	JOYCON_CTLR_TYPE_N64  = 0x0C,
-};
-
-struct joycon_stick_cal {
-	s32 max;
-	s32 min;
-	s32 center;
-};
-
-struct joycon_imu_cal {
-	s16 offset[3];
-	s16 scale[3];
-};
-
-/*
- * All the controller's button values are stored in a u32.
- * They can be accessed with bitwise ANDs.
- */
-#define JC_BTN_Y	 BIT(0)
-#define JC_BTN_X	 BIT(1)
-#define JC_BTN_B	 BIT(2)
-#define JC_BTN_A	 BIT(3)
-#define JC_BTN_SR_R	 BIT(4)
-#define JC_BTN_SL_R	 BIT(5)
-#define JC_BTN_R	 BIT(6)
-#define JC_BTN_ZR	 BIT(7)
-#define JC_BTN_MINUS	 BIT(8)
-#define JC_BTN_PLUS	 BIT(9)
-#define JC_BTN_RSTICK	 BIT(10)
-#define JC_BTN_LSTICK	 BIT(11)
-#define JC_BTN_HOME	 BIT(12)
-#define JC_BTN_CAP	 BIT(13) /* capture button */
-#define JC_BTN_DOWN	 BIT(16)
-#define JC_BTN_UP	 BIT(17)
-#define JC_BTN_RIGHT	 BIT(18)
-#define JC_BTN_LEFT	 BIT(19)
-#define JC_BTN_SR_L	 BIT(20)
-#define JC_BTN_SL_L	 BIT(21)
-#define JC_BTN_L	 BIT(22)
-#define JC_BTN_ZL	 BIT(23)
-
-struct joycon_ctlr_button_mapping {
-	u32 code;
-	u32 bit;
-};
-
-/*
- * D-pad is configured as buttons for the left Joy-Con only!
- */
-static const struct joycon_ctlr_button_mapping left_joycon_button_mappings[] = {
-	{ BTN_TL,		JC_BTN_L,	},
-	{ BTN_TL2,		JC_BTN_ZL,	},
-	{ BTN_SELECT,		JC_BTN_MINUS,	},
-	{ BTN_THUMBL,		JC_BTN_LSTICK,	},
-	{ BTN_DPAD_UP,		JC_BTN_UP,	},
-	{ BTN_DPAD_DOWN,	JC_BTN_DOWN,	},
-	{ BTN_DPAD_LEFT,	JC_BTN_LEFT,	},
-	{ BTN_DPAD_RIGHT,	JC_BTN_RIGHT,	},
-	{ BTN_Z,		JC_BTN_CAP,	},
-	{ /* sentinel */ },
-};
-
-/*
- * The unused *right*-side triggers become the SL/SR triggers for the *left*
- * Joy-Con, if and only if we're not using a charging grip.
- */
-static const struct joycon_ctlr_button_mapping left_joycon_s_button_mappings[] = {
-	{ BTN_TR,	JC_BTN_SL_L,	},
-	{ BTN_TR2,	JC_BTN_SR_L,	},
-	{ /* sentinel */ },
-};
-
-static const struct joycon_ctlr_button_mapping right_joycon_button_mappings[] = {
-	{ BTN_EAST,	JC_BTN_A,	},
-	{ BTN_SOUTH,	JC_BTN_B,	},
-	{ BTN_NORTH,	JC_BTN_X,	},
-	{ BTN_WEST,	JC_BTN_Y,	},
-	{ BTN_TR,	JC_BTN_R,	},
-	{ BTN_TR2,	JC_BTN_ZR,	},
-	{ BTN_START,	JC_BTN_PLUS,	},
-	{ BTN_THUMBR,	JC_BTN_RSTICK,	},
-	{ BTN_MODE,	JC_BTN_HOME,	},
-	{ /* sentinel */ },
-};
-
-/*
- * The unused *left*-side triggers become the SL/SR triggers for the *right*
- * Joy-Con, if and only if we're not using a charging grip.
- */
-static const struct joycon_ctlr_button_mapping right_joycon_s_button_mappings[] = {
-	{ BTN_TL,	JC_BTN_SL_R,	},
-	{ BTN_TL2,	JC_BTN_SR_R,	},
-	{ /* sentinel */ },
-};
-
-static const struct joycon_ctlr_button_mapping procon_button_mappings[] = {
-	{ BTN_EAST,	JC_BTN_A,	},
-	{ BTN_SOUTH,	JC_BTN_B,	},
-	{ BTN_NORTH,	JC_BTN_X,	},
-	{ BTN_WEST,	JC_BTN_Y,	},
-	{ BTN_TL,	JC_BTN_L,	},
-	{ BTN_TR,	JC_BTN_R,	},
-	{ BTN_TL2,	JC_BTN_ZL,	},
-	{ BTN_TR2,	JC_BTN_ZR,	},
-	{ BTN_SELECT,	JC_BTN_MINUS,	},
-	{ BTN_START,	JC_BTN_PLUS,	},
-	{ BTN_THUMBL,	JC_BTN_LSTICK,	},
-	{ BTN_THUMBR,	JC_BTN_RSTICK,	},
-	{ BTN_MODE,	JC_BTN_HOME,	},
-	{ BTN_Z,	JC_BTN_CAP,	},
-	{ /* sentinel */ },
-};
-
-/* Licensed Pro Controllers (e.g. HORI) swap X/Y bits in the report */
-static const struct joycon_ctlr_button_mapping lic_procon_button_mappings[] = {
-	{ BTN_EAST,	JC_BTN_A,	},
-	{ BTN_SOUTH,	JC_BTN_B,	},
-	{ BTN_NORTH,	JC_BTN_Y,	},
-	{ BTN_WEST,	JC_BTN_X,	},
-	{ BTN_TL,	JC_BTN_L,	},
-	{ BTN_TR,	JC_BTN_R,	},
-	{ BTN_TL2,	JC_BTN_ZL,	},
-	{ BTN_TR2,	JC_BTN_ZR,	},
-	{ BTN_SELECT,	JC_BTN_MINUS,	},
-	{ BTN_START,	JC_BTN_PLUS,	},
-	{ BTN_THUMBL,	JC_BTN_LSTICK,	},
-	{ BTN_THUMBR,	JC_BTN_RSTICK,	},
-	{ BTN_MODE,	JC_BTN_HOME,	},
-	{ BTN_Z,	JC_BTN_CAP,	},
-	{ /* sentinel */ },
 };
 
 static const struct joycon_ctlr_button_mapping nescon_button_mappings[] = {
@@ -534,15 +210,6 @@ struct joycon_subcmd_reply {
 	u8 data[]; /* will be at most 35 bytes */
 } __packed;
 
-struct joycon_imu_data {
-	s16 accel_x;
-	s16 accel_y;
-	s16 accel_z;
-	s16 gyro_x;
-	s16 gyro_y;
-	s16 gyro_z;
-} __packed;
-
 struct joycon_input_report {
 	u8 id;
 	u8 timer;
@@ -560,7 +227,6 @@ struct joycon_input_report {
 } __packed;
 
 #define JC_MAX_RESP_SIZE	(sizeof(struct joycon_input_report) + 35)
-#define JC_RUMBLE_DATA_SIZE	8
 #define JC_RUMBLE_QUEUE_SIZE	8
 
 static const char * const joycon_player_led_names[] = {
@@ -620,10 +286,6 @@ struct joycon_ctlr {
 
 	struct joycon_imu_cal accel_cal;
 	struct joycon_imu_cal gyro_cal;
-
-	/* prevents needlessly recalculating these divisors every sample */
-	s32 imu_cal_accel_divisor[3];
-	s32 imu_cal_gyro_divisor[3];
 
 	/* power supply data */
 	struct power_supply *battery;
@@ -1098,10 +760,7 @@ static int joycon_read_stick_calibration(struct joycon_ctlr *ctlr, u16 cal_addr,
 					 struct joycon_stick_cal *cal_y,
 					 bool left_stick)
 {
-	s32 x_max_above;
-	s32 x_min_below;
-	s32 y_max_above;
-	s32 y_min_below;
+	struct joycon_stick_cal parsed_x, parsed_y;
 	u8 *raw_cal;
 	int ret;
 
@@ -1110,46 +769,14 @@ static int joycon_read_stick_calibration(struct joycon_ctlr *ctlr, u16 cal_addr,
 	if (ret)
 		return ret;
 
-	/* stick calibration parsing: note the order differs based on stick */
-	if (left_stick) {
-		x_max_above = hid_field_extract(ctlr->hdev, (raw_cal + 0), 0,
-						12);
-		y_max_above = hid_field_extract(ctlr->hdev, (raw_cal + 1), 4,
-						12);
-		cal_x->center = hid_field_extract(ctlr->hdev, (raw_cal + 3), 0,
-						  12);
-		cal_y->center = hid_field_extract(ctlr->hdev, (raw_cal + 4), 4,
-						  12);
-		x_min_below = hid_field_extract(ctlr->hdev, (raw_cal + 6), 0,
-						12);
-		y_min_below = hid_field_extract(ctlr->hdev, (raw_cal + 7), 4,
-						12);
-	} else {
-		cal_x->center = hid_field_extract(ctlr->hdev, (raw_cal + 0), 0,
-						  12);
-		cal_y->center = hid_field_extract(ctlr->hdev, (raw_cal + 1), 4,
-						  12);
-		x_min_below = hid_field_extract(ctlr->hdev, (raw_cal + 3), 0,
-						12);
-		y_min_below = hid_field_extract(ctlr->hdev, (raw_cal + 4), 4,
-						12);
-		x_max_above = hid_field_extract(ctlr->hdev, (raw_cal + 6), 0,
-						12);
-		y_max_above = hid_field_extract(ctlr->hdev, (raw_cal + 7), 4,
-						12);
-	}
+	joycon_parse_stick_cal(&parsed_x, &parsed_y, raw_cal, left_stick);
+	if (!joycon_stick_cal_valid(&parsed_x, &parsed_y))
+		return -EINVAL;
 
-	cal_x->max = cal_x->center + x_max_above;
-	cal_x->min = cal_x->center - x_min_below;
-	cal_y->max = cal_y->center + y_max_above;
-	cal_y->min = cal_y->center - y_min_below;
+	*cal_x = parsed_x;
+	*cal_y = parsed_y;
 
-	/* check if calibration values are plausible */
-	if (cal_x->min >= cal_x->center || cal_x->center >= cal_x->max ||
-	    cal_y->min >= cal_y->center || cal_y->center >= cal_y->max)
-		ret = -EINVAL;
-
-	return ret;
+	return 0;
 }
 
 static const u16 DFLT_STICK_CAL_CEN = 2000;
@@ -1236,46 +863,11 @@ static int joycon_request_calibration(struct joycon_ctlr *ctlr)
 	return 0;
 }
 
-/*
- * These divisors are calculated once rather than for each sample. They are only
- * dependent on the IMU calibration values. They are used when processing the
- * IMU input reports.
- */
-static void joycon_calc_imu_cal_divisors(struct joycon_ctlr *ctlr)
-{
-	int i, divz = 0;
-
-	for (i = 0; i < 3; i++) {
-		ctlr->imu_cal_accel_divisor[i] = ctlr->accel_cal.scale[i] -
-						ctlr->accel_cal.offset[i];
-		ctlr->imu_cal_gyro_divisor[i] = ctlr->gyro_cal.scale[i] -
-						ctlr->gyro_cal.offset[i];
-
-		if (ctlr->imu_cal_accel_divisor[i] == 0) {
-			ctlr->imu_cal_accel_divisor[i] = 1;
-			divz++;
-		}
-
-		if (ctlr->imu_cal_gyro_divisor[i] == 0) {
-			ctlr->imu_cal_gyro_divisor[i] = 1;
-			divz++;
-		}
-	}
-
-	if (divz)
-		hid_warn(ctlr->hdev, "inaccurate IMU divisors (%d)\n", divz);
-}
-
-static const s16 DFLT_ACCEL_OFFSET /*= 0*/;
-static const s16 DFLT_ACCEL_SCALE = 16384;
-static const s16 DFLT_GYRO_OFFSET /*= 0*/;
-static const s16 DFLT_GYRO_SCALE  = 13371;
 static int joycon_request_imu_calibration(struct joycon_ctlr *ctlr)
 {
 	u16 imu_cal_addr = JC_IMU_CAL_FCT_DATA_ADDR;
 	u8 *raw_cal;
 	int ret;
-	int i;
 
 	/* check if user calibration exists */
 	if (!joycon_check_for_cal_magic(ctlr, JC_IMU_CAL_USR_MAGIC_ADDR)) {
@@ -1294,27 +886,11 @@ static int joycon_request_imu_calibration(struct joycon_ctlr *ctlr)
 			 "Failed to read IMU cal, using defaults; ret=%d\n",
 			 ret);
 
-		for (i = 0; i < 3; i++) {
-			ctlr->accel_cal.offset[i] = DFLT_ACCEL_OFFSET;
-			ctlr->accel_cal.scale[i] = DFLT_ACCEL_SCALE;
-			ctlr->gyro_cal.offset[i] = DFLT_GYRO_OFFSET;
-			ctlr->gyro_cal.scale[i] = DFLT_GYRO_SCALE;
-		}
-		joycon_calc_imu_cal_divisors(ctlr);
+		joycon_imu_cal_defaults(&ctlr->accel_cal, &ctlr->gyro_cal);
 		return ret;
 	}
 
-	/* IMU calibration parsing */
-	for (i = 0; i < 3; i++) {
-		int j = i * 2;
-
-		ctlr->accel_cal.offset[i] = get_unaligned_le16(raw_cal + j);
-		ctlr->accel_cal.scale[i] = get_unaligned_le16(raw_cal + j + 6);
-		ctlr->gyro_cal.offset[i] = get_unaligned_le16(raw_cal + j + 12);
-		ctlr->gyro_cal.scale[i] = get_unaligned_le16(raw_cal + j + 18);
-	}
-
-	joycon_calc_imu_cal_divisors(ctlr);
+	joycon_parse_imu_cal(&ctlr->accel_cal, &ctlr->gyro_cal, raw_cal);
 
 	hid_dbg(ctlr->hdev, "IMU calibration:\n"
 			    "a_o[0]=%d a_o[1]=%d a_o[2]=%d\n"
@@ -1376,24 +952,6 @@ static int joycon_enable_imu(struct joycon_ctlr *ctlr)
 	return joycon_send_subcmd(ctlr, req, 1, HZ);
 }
 
-static s32 joycon_map_stick_val(struct joycon_stick_cal *cal, s32 val)
-{
-	s32 center = cal->center;
-	s32 min = cal->min;
-	s32 max = cal->max;
-	s32 new_val;
-
-	if (val > center) {
-		new_val = (val - center) * JC_MAX_STICK_MAG;
-		new_val /= (max - center);
-	} else {
-		new_val = (center - val) * -JC_MAX_STICK_MAG;
-		new_val /= (center - min);
-	}
-	new_val = clamp(new_val, (s32)-JC_MAX_STICK_MAG, (s32)JC_MAX_STICK_MAG);
-	return new_val;
-}
-
 static void joycon_input_report_parse_imu_data(struct joycon_ctlr *ctlr,
 					       struct joycon_input_report *rep,
 					       struct joycon_imu_data *imu_data)
@@ -1402,14 +960,7 @@ static void joycon_input_report_parse_imu_data(struct joycon_ctlr *ctlr,
 	int i;
 
 	for (i = 0; i < 3; i++) {
-		struct joycon_imu_data *data = &imu_data[i];
-
-		data->accel_x = get_unaligned_le16(raw + 0);
-		data->accel_y = get_unaligned_le16(raw + 2);
-		data->accel_z = get_unaligned_le16(raw + 4);
-		data->gyro_x = get_unaligned_le16(raw + 6);
-		data->gyro_y = get_unaligned_le16(raw + 8);
-		data->gyro_z = get_unaligned_le16(raw + 10);
+		joycon_parse_imu_data(raw, &imu_data[i]);
 		/* point to next imu sample */
 		raw += sizeof(struct joycon_imu_data);
 	}
@@ -1423,7 +974,6 @@ static void joycon_parse_imu_report(struct joycon_ctlr *ctlr,
 	unsigned int msecs = jiffies_to_msecs(jiffies);
 	unsigned int last_msecs = ctlr->imu_last_pkt_ms;
 	int i;
-	int value[6];
 
 	joycon_input_report_parse_imu_data(ctlr, rep, imu_data);
 
@@ -1524,53 +1074,6 @@ static void joycon_parse_imu_report(struct joycon_ctlr *ctlr,
 
 	/* Each IMU input report contains three samples */
 	for (i = 0; i < 3; i++) {
-		input_event(idev, EV_MSC, MSC_TIMESTAMP,
-			    ctlr->imu_timestamp_us);
-
-		/*
-		 * These calculations (which use the controller's calibration
-		 * settings to improve the final values) are based on those
-		 * found in the community's reverse-engineering repo (linked at
-		 * top of driver). For hid-nintendo, we make sure that the final
-		 * value given to userspace is always in terms of the axis
-		 * resolution we provided.
-		 *
-		 * Currently only the gyro calculations subtract the calibration
-		 * offsets from the raw value itself. In testing, doing the same
-		 * for the accelerometer raw values decreased accuracy.
-		 *
-		 * Note that the gyro values are multiplied by the
-		 * precision-saving scaling factor to prevent large inaccuracies
-		 * due to truncation of the resolution value which would
-		 * otherwise occur. To prevent overflow (without resorting to 64
-		 * bit integer math), the mult_frac macro is used.
-		 */
-		value[0] = mult_frac((JC_IMU_PREC_RANGE_SCALE *
-				      (imu_data[i].gyro_x -
-				       ctlr->gyro_cal.offset[0])),
-				     ctlr->gyro_cal.scale[0],
-				     ctlr->imu_cal_gyro_divisor[0]);
-		value[1] = mult_frac((JC_IMU_PREC_RANGE_SCALE *
-				      (imu_data[i].gyro_y -
-				       ctlr->gyro_cal.offset[1])),
-				     ctlr->gyro_cal.scale[1],
-				     ctlr->imu_cal_gyro_divisor[1]);
-		value[2] = mult_frac((JC_IMU_PREC_RANGE_SCALE *
-				      (imu_data[i].gyro_z -
-				       ctlr->gyro_cal.offset[2])),
-				     ctlr->gyro_cal.scale[2],
-				     ctlr->imu_cal_gyro_divisor[2]);
-
-		value[3] = ((s32)imu_data[i].accel_x *
-			    ctlr->accel_cal.scale[0]) /
-			    ctlr->imu_cal_accel_divisor[0];
-		value[4] = ((s32)imu_data[i].accel_y *
-			    ctlr->accel_cal.scale[1]) /
-			    ctlr->imu_cal_accel_divisor[1];
-		value[5] = ((s32)imu_data[i].accel_z *
-			    ctlr->accel_cal.scale[2]) /
-			    ctlr->imu_cal_accel_divisor[2];
-
 		hid_dbg(ctlr->hdev, "raw_gyro: g_x=%d g_y=%d g_z=%d\n",
 			imu_data[i].gyro_x, imu_data[i].gyro_y,
 			imu_data[i].gyro_z);
@@ -1578,34 +1081,12 @@ static void joycon_parse_imu_report(struct joycon_ctlr *ctlr,
 			imu_data[i].accel_x, imu_data[i].accel_y,
 			imu_data[i].accel_z);
 
-		/*
-		 * The right joy-con has 2 axes negated, Y and Z. This is due to
-		 * the orientation of the IMU in the controller. We negate those
-		 * axes' values in order to be consistent with the left joy-con
-		 * and the pro controller:
-		 *   X: positive is pointing toward the triggers
-		 *   Y: positive is pointing to the left
-		 *   Z: positive is pointing up (out of the buttons/sticks)
-		 * The axes follow the right-hand rule.
-		 */
-		if (jc_type_is_joycon(ctlr) && jc_type_has_right(ctlr)) {
-			int j;
+		joycon_report_imu_sample(idev, &ctlr->accel_cal, &ctlr->gyro_cal,
+					 &imu_data[i],
+					 jc_type_is_joycon(ctlr) &&
+					 jc_type_has_right(ctlr),
+					 ctlr->imu_timestamp_us);
 
-			/* negate all but x axis */
-			for (j = 1; j < 6; ++j) {
-				if (j == 3)
-					continue;
-				value[j] *= -1;
-			}
-		}
-
-		input_report_abs(idev, ABS_RX, value[0]);
-		input_report_abs(idev, ABS_RY, value[1]);
-		input_report_abs(idev, ABS_RZ, value[2]);
-		input_report_abs(idev, ABS_X, value[3]);
-		input_report_abs(idev, ABS_Y, value[4]);
-		input_report_abs(idev, ABS_Z, value[5]);
-		input_sync(idev);
 		/* convert to micros and divide by 3 (3 samples per report). */
 		ctlr->imu_timestamp_us += ctlr->imu_avg_delta_ms * 1000 / 3;
 	}
@@ -1893,54 +1374,6 @@ static void joycon_rumble_worker(struct work_struct *work)
 }
 
 #if IS_ENABLED(CONFIG_NINTENDO_FF)
-static struct joycon_rumble_freq_data joycon_find_rumble_freq(u16 freq)
-{
-	const size_t length = ARRAY_SIZE(joycon_rumble_frequencies);
-	const struct joycon_rumble_freq_data *data = joycon_rumble_frequencies;
-	int i = 0;
-
-	if (freq > data[0].freq) {
-		for (i = 1; i < length - 1; i++) {
-			if (freq > data[i - 1].freq && freq <= data[i].freq)
-				break;
-		}
-	}
-
-	return data[i];
-}
-
-static struct joycon_rumble_amp_data joycon_find_rumble_amp(u16 amp)
-{
-	const size_t length = ARRAY_SIZE(joycon_rumble_amplitudes);
-	const struct joycon_rumble_amp_data *data = joycon_rumble_amplitudes;
-	int i = 0;
-
-	if (amp > data[0].amp) {
-		for (i = 1; i < length - 1; i++) {
-			if (amp > data[i - 1].amp && amp <= data[i].amp)
-				break;
-		}
-	}
-
-	return data[i];
-}
-
-static void joycon_encode_rumble(u8 *data, u16 freq_low, u16 freq_high, u16 amp)
-{
-	struct joycon_rumble_freq_data freq_data_low;
-	struct joycon_rumble_freq_data freq_data_high;
-	struct joycon_rumble_amp_data amp_data;
-
-	freq_data_low = joycon_find_rumble_freq(freq_low);
-	freq_data_high = joycon_find_rumble_freq(freq_high);
-	amp_data = joycon_find_rumble_amp(amp);
-
-	data[0] = (freq_data_high.high >> 8) & 0xFF;
-	data[1] = (freq_data_high.high & 0xFF) + amp_data.high;
-	data[2] = freq_data_low.low + ((amp_data.low >> 8) & 0xFF);
-	data[3] = amp_data.low & 0xFF;
-}
-
 static const u16 JOYCON_MAX_RUMBLE_HIGH_FREQ	= 1253;
 static const u16 JOYCON_MIN_RUMBLE_HIGH_FREQ	= 82;
 static const u16 JOYCON_MAX_RUMBLE_LOW_FREQ	= 626;
@@ -2039,38 +1472,6 @@ static int joycon_play_effect(struct input_dev *dev, void *data,
 }
 #endif /* IS_ENABLED(CONFIG_NINTENDO_FF) */
 
-static void joycon_config_left_stick(struct input_dev *idev)
-{
-	input_set_abs_params(idev,
-			     ABS_X,
-			     -JC_MAX_STICK_MAG,
-			     JC_MAX_STICK_MAG,
-			     JC_STICK_FUZZ,
-			     JC_STICK_FLAT);
-	input_set_abs_params(idev,
-			     ABS_Y,
-			     -JC_MAX_STICK_MAG,
-			     JC_MAX_STICK_MAG,
-			     JC_STICK_FUZZ,
-			     JC_STICK_FLAT);
-}
-
-static void joycon_config_right_stick(struct input_dev *idev)
-{
-	input_set_abs_params(idev,
-			     ABS_RX,
-			     -JC_MAX_STICK_MAG,
-			     JC_MAX_STICK_MAG,
-			     JC_STICK_FUZZ,
-			     JC_STICK_FLAT);
-	input_set_abs_params(idev,
-			     ABS_RY,
-			     -JC_MAX_STICK_MAG,
-			     JC_MAX_STICK_MAG,
-			     JC_STICK_FUZZ,
-			     JC_STICK_FLAT);
-}
-
 static void joycon_config_dpad(struct input_dev *idev)
 {
 	input_set_abs_params(idev,
@@ -2085,15 +1486,6 @@ static void joycon_config_dpad(struct input_dev *idev)
 			     JC_MAX_DPAD_MAG,
 			     JC_DPAD_FUZZ,
 			     JC_DPAD_FLAT);
-}
-
-static void joycon_config_buttons(struct input_dev *idev,
-		 const struct joycon_ctlr_button_mapping button_mappings[])
-{
-	const struct joycon_ctlr_button_mapping *button;
-
-	for (button = button_mappings; button->code; button++)
-		input_set_capability(idev, EV_KEY, button->code);
 }
 
 static void joycon_config_rumble(struct joycon_ctlr *ctlr)
@@ -2140,37 +1532,7 @@ static int joycon_imu_input_create(struct joycon_ctlr *ctlr)
 
 	input_set_drvdata(ctlr->imu_input, ctlr);
 
-	/* configure imu axes */
-	input_set_abs_params(ctlr->imu_input, ABS_X,
-			     -JC_IMU_MAX_ACCEL_MAG, JC_IMU_MAX_ACCEL_MAG,
-			     JC_IMU_ACCEL_FUZZ, JC_IMU_ACCEL_FLAT);
-	input_set_abs_params(ctlr->imu_input, ABS_Y,
-			     -JC_IMU_MAX_ACCEL_MAG, JC_IMU_MAX_ACCEL_MAG,
-			     JC_IMU_ACCEL_FUZZ, JC_IMU_ACCEL_FLAT);
-	input_set_abs_params(ctlr->imu_input, ABS_Z,
-			     -JC_IMU_MAX_ACCEL_MAG, JC_IMU_MAX_ACCEL_MAG,
-			     JC_IMU_ACCEL_FUZZ, JC_IMU_ACCEL_FLAT);
-	input_abs_set_res(ctlr->imu_input, ABS_X, JC_IMU_ACCEL_RES_PER_G);
-	input_abs_set_res(ctlr->imu_input, ABS_Y, JC_IMU_ACCEL_RES_PER_G);
-	input_abs_set_res(ctlr->imu_input, ABS_Z, JC_IMU_ACCEL_RES_PER_G);
-
-	input_set_abs_params(ctlr->imu_input, ABS_RX,
-			     -JC_IMU_MAX_GYRO_MAG, JC_IMU_MAX_GYRO_MAG,
-			     JC_IMU_GYRO_FUZZ, JC_IMU_GYRO_FLAT);
-	input_set_abs_params(ctlr->imu_input, ABS_RY,
-			     -JC_IMU_MAX_GYRO_MAG, JC_IMU_MAX_GYRO_MAG,
-			     JC_IMU_GYRO_FUZZ, JC_IMU_GYRO_FLAT);
-	input_set_abs_params(ctlr->imu_input, ABS_RZ,
-			     -JC_IMU_MAX_GYRO_MAG, JC_IMU_MAX_GYRO_MAG,
-			     JC_IMU_GYRO_FUZZ, JC_IMU_GYRO_FLAT);
-
-	input_abs_set_res(ctlr->imu_input, ABS_RX, JC_IMU_GYRO_RES_PER_DPS);
-	input_abs_set_res(ctlr->imu_input, ABS_RY, JC_IMU_GYRO_RES_PER_DPS);
-	input_abs_set_res(ctlr->imu_input, ABS_RZ, JC_IMU_GYRO_RES_PER_DPS);
-
-	__set_bit(EV_MSC, ctlr->imu_input->evbit);
-	__set_bit(MSC_TIMESTAMP, ctlr->imu_input->mscbit);
-	__set_bit(INPUT_PROP_ACCELEROMETER, ctlr->imu_input->propbit);
+	joycon_config_imu(ctlr->imu_input);
 
 	ret = input_register_device(ctlr->imu_input);
 	if (ret)
