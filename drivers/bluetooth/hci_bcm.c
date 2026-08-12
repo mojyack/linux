@@ -596,7 +596,7 @@ static int bcm_setup(struct hci_uart *hu)
 		return err;
 
 	if (!fw_load_done)
-		return 0;
+		goto finalize;
 
 	/* Init speed if any */
 	if (bcm->dev && bcm->dev->init_speed)
@@ -635,6 +635,7 @@ static int bcm_setup(struct hci_uart *hu)
 		btbcm_write_pcm_int_params(hu->hdev, &params);
 	}
 
+finalize:
 	err = btbcm_finalize(hu->hdev, &fw_load_done, use_autobaud_mode);
 	if (err)
 		return err;
@@ -645,6 +646,9 @@ static int bcm_setup(struct hci_uart *hu)
 	 */
 	if (hci_test_quirk(hu->hdev, HCI_QUIRK_INVALID_BDADDR))
 		hci_set_quirk(hu->hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+
+	if (!fw_load_done)
+		return 0;
 
 	if (!bcm_request_irq(bcm))
 		err = bcm_setup_sleep(hu);
