@@ -89,6 +89,7 @@
 #define PWRGATE_TOGGLE			0x30
 #define  PWRGATE_TOGGLE_START		BIT(8)
 
+#define PWRGATE_CLAMP_STATUS		0x2c
 #define REMOVE_CLAMPING			0x34
 
 #define PWRGATE_STATUS			0x38
@@ -376,6 +377,7 @@ struct tegra_pmc_soc {
 
 	bool has_tsense_reset;
 	bool has_gpu_clamps;
+	bool has_clamp_status;
 	bool needs_mbist_war;
 	bool has_io_pad_wren;
 	bool maybe_tz_only;
@@ -714,7 +716,8 @@ static int tegra_powergate_set(struct tegra_pmc *pmc, unsigned int id,
 static int __tegra_powergate_remove_clamping(struct tegra_pmc *pmc,
 					     unsigned int id)
 {
-	u32 mask;
+	u32 mask, status;
+	int err = 0;
 
 	mutex_lock(&pmc->powergates_lock);
 
@@ -742,10 +745,15 @@ static int __tegra_powergate_remove_clamping(struct tegra_pmc *pmc,
 
 	tegra_pmc_writel(pmc, mask, REMOVE_CLAMPING);
 
+	if (pmc->soc->has_clamp_status)
+		err = read_poll_timeout(tegra_pmc_readl, status,
+					!(status & BIT(id)), 1, 100, false,
+					pmc, PWRGATE_CLAMP_STATUS);
+
 out:
 	mutex_unlock(&pmc->powergates_lock);
 
-	return 0;
+	return err;
 }
 
 static int tegra_powergate_prepare_clocks(struct tegra_powergate *pg)
@@ -3886,6 +3894,7 @@ static const struct tegra_pmc_soc tegra210_pmc_soc = {
 	.cpu_powergates = tegra210_cpu_powergates,
 	.has_tsense_reset = true,
 	.has_gpu_clamps = true,
+	.has_clamp_status = true,
 	.needs_mbist_war = true,
 	.has_io_pad_wren = true,
 	.maybe_tz_only = true,
