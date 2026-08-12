@@ -595,8 +595,17 @@ static int bcm_setup(struct hci_uart *hu)
 	if (err)
 		return err;
 
-	if (!fw_load_done)
+	if (!fw_load_done) {
+		/* No patch, but local-bd-address may carry the real one. */
+		err = btbcm_finalize(hu->hdev, &fw_load_done, use_autobaud_mode);
+		if (err)
+			return err;
+
+		if (hci_test_quirk(hu->hdev, HCI_QUIRK_INVALID_BDADDR))
+			hci_set_quirk(hu->hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+
 		return 0;
+	}
 
 	/* Init speed if any */
 	if (bcm->dev && bcm->dev->init_speed)
