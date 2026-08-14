@@ -111,6 +111,11 @@ struct tegra_pwm_soc {
 	unsigned int scale_width;
 };
 
+struct tegra_pwm_context {
+	u32 csr0;
+	u32 csr1;
+};
+
 struct tegra_pwm_chip {
 	struct clk *clk;
 	struct reset_control*rst;
@@ -122,6 +127,9 @@ struct tegra_pwm_chip {
 
 	/* Bitmask of the channels that are running in hardware. */
 	unsigned long enabled;
+
+	/* Registers of the running channels, saved across system suspend. */
+	struct tegra_pwm_context *ctx;
 
 	const struct tegra_pwm_soc *soc;
 };
@@ -380,6 +388,11 @@ static int tegra_pwm_probe(struct platform_device *pdev)
 
 	pc->soc = soc;
 
+	pc->ctx = devm_kcalloc(&pdev->dev, soc->num_channels, sizeof(*pc->ctx),
+			       GFP_KERNEL);
+	if (!pc->ctx)
+		return -ENOMEM;
+
 	pc->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pc->regs))
 		return PTR_ERR(pc->regs);
@@ -497,6 +510,45 @@ static int __maybe_unused tegra_pwm_runtime_resume(struct device *dev)
 	return 0;
 }
 
+static int __maybe_unused tegra_pwm_suspend(struct device *dev)
+{
+	struct pwm_chip *chip = dev_get_drvdata(dev);
+	struct tegra_pwm_chip *pc = to_tegra_pwm_chip(chip);
+	unsigned int i;
+
+	for_each_set_bit(i, &pc->enabled, chip->npwm) {
+		struct pwm_device *pwm = &chip->pwms[i];
+
+		pc->ctx[i].csr0 = tegra_pwm_readl(pwm, TEGRA_PWM_CSR_0);
+		if (pc->soc->enable_reg != TEGRA_PWM_CSR_0)
+			pc->ctx[i].csr1 = tegra_pwm_readl(pwm, pc->soc->enable_reg);
+	}
+
+	return pm_runtime_force_suspend(dev);
+}
+
+static int __maybe_unused tegra_pwm_resume(struct device *dev)
+{
+	struct pwm_chip *chip = dev_get_drvdata(dev);
+	struct tegra_pwm_chip *pc = to_tegra_pwm_chip(chip);
+	unsigned int i;
+	int err;
+
+	err = pm_runtime_force_resume(dev);
+	if (err)
+		return err;
+
+	for_each_set_bit(i, &pc->enabled, chip->npwm) {
+		struct pwm_device *pwm = &chip->pwms[i];
+
+		tegra_pwm_writel(pwm, TEGRA_PWM_CSR_0, pc->ctx[i].csr0);
+		if (pc->soc->enable_reg != TEGRA_PWM_CSR_0)
+			tegra_pwm_writel(pwm, pc->soc->enable_reg, pc->ctx[i].csr1);
+	}
+
+	return 0;
+}
+
 static const struct tegra_pwm_soc tegra20_pwm_soc = {
 	.num_channels = 4,
 	.enable_reg = TEGRA_PWM_CSR_0,
@@ -527,8 +579,7 @@ MODULE_DEVICE_TABLE(of, tegra_pwm_of_match);
 static const struct dev_pm_ops tegra_pwm_pm_ops = {
 	SET_RUNTIME_PM_OPS(tegra_pwm_runtime_suspend, tegra_pwm_runtime_resume,
 			   NULL)
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(tegra_pwm_suspend, tegra_pwm_resume)
 };
 
 static struct platform_driver tegra_pwm_driver = {
