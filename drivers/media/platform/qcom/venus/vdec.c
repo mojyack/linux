@@ -1230,6 +1230,25 @@ static int vdec_start_output(struct venus_inst *inst)
 
 done:
 	inst->streamon_out = 1;
+
+	/*
+	 * The client is allowed to restart the CAPTURE queue while OUTPUT is
+	 * stopped.  vdec_start_capture() bails out early in that case because
+	 * OUTPUT was not streaming yet, so it neither handed the queued capture
+	 * buffers to the firmware nor set streamon_cap - which in turn made the
+	 * SEEK branch above skip venus_helper_queue_dpb_bufs().  Finish the
+	 * capture setup now that OUTPUT is streaming again, otherwise the
+	 * decoder has nowhere to write and stalls forever.
+	 *
+	 * ffmpeg's v4l2_m2m decoder restarts after a drain exactly this way:
+	 * STREAMOFF(OUTPUT), STREAMOFF(CAPTURE), STREAMON(CAPTURE),
+	 * STREAMON(OUTPUT).
+	 */
+	if (!ret && !inst->streamon_cap &&
+	    vb2_is_streaming(v4l2_m2m_get_vq(inst->m2m_ctx,
+					     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)))
+		ret = vdec_start_capture(inst);
+
 	return ret;
 }
 
