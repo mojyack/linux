@@ -340,7 +340,9 @@ int tegra210_clk_emc_attach(struct clk *clk,
 		parent = clk_hw_get_parent_by_index(hw, src);
 		config->parent = src;
 
-		if (src == CLK_SRC_PLLM || src == CLK_SRC_PLLM_UD) {
+		/* ->set_rate() may swap PLLM for PLLMB, so accept either. */
+		if (src == CLK_SRC_PLLM || src == CLK_SRC_PLLM_UD ||
+		    src == CLK_SRC_PLLMB || src == CLK_SRC_PLLMB_UD) {
 			config->parent_rate = config->rate * (1 + div / 2);
 		} else {
 			unsigned long rate = config->rate * (1 + div / 2);
