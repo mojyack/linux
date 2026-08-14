@@ -1044,7 +1044,9 @@ static void tegra_clk_pll_restore_context(struct clk_hw *hw)
 	unsigned long parent_rate = clk_hw_get_rate(parent);
 	unsigned long rate = clk_hw_get_rate(hw);
 
-	if (clk_pll_is_enabled(hw))
+	/* Warm boot hands PLLM back at a rate of its own. */
+	if (clk_pll_is_enabled(hw) &&
+	    clk_pll_recalc_rate(hw, parent_rate) == rate)
 		return;
 
 	if (pll->params->set_defaults)
