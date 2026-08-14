@@ -2286,6 +2286,8 @@ static int __maybe_unused tegra210_emc_suspend(struct device *dev)
 static int __maybe_unused tegra210_emc_resume(struct device *dev)
 {
 	struct tegra210_emc *emc = dev_get_drvdata(dev);
+	unsigned long flags;
+	unsigned int index;
 	int err;
 
 	err = tegra210_clk_emc_attach(emc->clk, &emc->provider);
@@ -2293,6 +2295,14 @@ static int __maybe_unused tegra210_emc_resume(struct device *dev)
 		dev_err(dev, "failed to attach to EMC clock: %d\n", err);
 		return err;
 	}
+
+	/* Firmware retrained the SDRAM; rewrite the full register set once. */
+	spin_lock_irqsave(&emc->lock, flags);
+	index = emc->last - emc->timings;
+	emc->next = emc->last;
+	tegra210_emc_set_clock(emc, emc->provider.configs[index].value |
+				    EMC_CLK_FORCE_CC_TRIGGER);
+	spin_unlock_irqrestore(&emc->lock, flags);
 
 	clk_set_rate(emc->clk, emc->resume_rate);
 	clk_rate_exclusive_put(emc->clk);
