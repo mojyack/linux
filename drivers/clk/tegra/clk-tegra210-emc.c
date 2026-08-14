@@ -373,6 +373,10 @@ void tegra210_clk_emc_detach(struct clk *clk)
 {
 	struct tegra210_clk_emc *emc = to_tegra210_clk_emc(__clk_get_hw(clk));
 
+	/* nothing is attached if the attach failed, or if it never ran */
+	if (!emc->provider)
+		return;
+
 	module_put(emc->provider->owner);
 	emc->provider = NULL;
 }
