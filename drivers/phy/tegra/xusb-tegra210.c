@@ -418,6 +418,7 @@ struct tegra210_xusb_padctl_context {
 	u32 usb2_port_cap;
 	u32 ss_port_map;
 	u32 usb3_pad_mux;
+	u32 usb2_vbus_id;
 };
 
 struct tegra210_xusb_padctl {
@@ -3209,6 +3210,8 @@ static void tegra210_xusb_padctl_save(struct tegra_xusb_padctl *padctl)
 		padctl_readl(padctl, XUSB_PADCTL_SS_PORT_MAP);
 	priv->context.usb3_pad_mux =
 		padctl_readl(padctl, XUSB_PADCTL_USB3_PAD_MUX);
+	priv->context.usb2_vbus_id =
+		padctl_readl(padctl, XUSB_PADCTL_USB2_VBUS_ID);
 }
 
 static void tegra210_xusb_padctl_restore(struct tegra_xusb_padctl *padctl)
@@ -3222,6 +3225,9 @@ static void tegra210_xusb_padctl_restore(struct tegra_xusb_padctl *padctl)
 		XUSB_PADCTL_USB2_PORT_CAP);
 	padctl_writel(padctl, priv->context.ss_port_map,
 		XUSB_PADCTL_SS_PORT_MAP);
+	/* Programmed once, when the role switch settles, so SC7 loses it. */
+	padctl_writel(padctl, priv->context.usb2_vbus_id,
+		XUSB_PADCTL_USB2_VBUS_ID);
 
 	list_for_each_entry(lane, &padctl->lanes, list) {
 		if (lane->pad->ops->iddq_enable)
