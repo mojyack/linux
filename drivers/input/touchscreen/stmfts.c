@@ -389,20 +389,13 @@ static int stmfts_write_register(struct stmfts_data *sdata, const u16 reg,
 					      STMFTS_WRITE_REGISTER, 3, buf);
 }
 
-static int stmfts_input_open(struct input_dev *dev)
+static int stmfts_sense_on(struct stmfts_data *sdata)
 {
-	struct stmfts_data *sdata = input_get_drvdata(dev);
 	int err;
 
-	err = pm_runtime_resume_and_get(&sdata->client->dev);
+	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_ON);
 	if (err)
 		return err;
-
-	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_ON);
-	if (err) {
-		pm_runtime_put_sync(&sdata->client->dev);
-		return err;
-	}
 
 	scoped_guard(mutex, &sdata->mutex) {
 		sdata->running = true;
@@ -426,6 +419,22 @@ static int stmfts_input_open(struct input_dev *dev)
 	}
 
 	return 0;
+}
+
+static int stmfts_input_open(struct input_dev *dev)
+{
+	struct stmfts_data *sdata = input_get_drvdata(dev);
+	int err;
+
+	err = pm_runtime_resume_and_get(&sdata->client->dev);
+	if (err)
+		return err;
+
+	err = stmfts_sense_on(sdata);
+	if (err)
+		pm_runtime_put_sync(&sdata->client->dev);
+
+	return err;
 }
 
 static void stmfts_input_close(struct input_dev *dev)
@@ -715,10 +724,11 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 		goto err_disable_irq;
 
 	/*
-	 * At this point no one is using the touchscreen
-	 * and I don't really care about the return value
+	 * Unless we are resuming an already-open device, no one is using the
+	 * touchscreen at this point, and I don't really care about the return
+	 * value.
 	 */
-	if (!sdata->no_sleep_commands)
+	if (!sdata->no_sleep_commands && !sdata->running)
 		(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 
 	return 0;
@@ -946,8 +956,14 @@ static int stmfts_suspend(struct device *dev)
 static int stmfts_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+	int err;
 
-	return stmfts_power_on(sdata);
+	err = stmfts_power_on(sdata);
+	if (err || !sdata->running)
+		return err;
+
+	/* power_on() leaves the sensor gated, and open() is not called. */
+	return stmfts_sense_on(sdata);
 }
 
 static const struct dev_pm_ops stmfts_pm_ops = {
