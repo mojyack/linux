@@ -4,10 +4,12 @@
  * Copyright (C) 2017 Linaro Ltd.
  */
 #include <linux/clk.h>
+#include <linux/dma-mapping.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-event.h>
@@ -545,6 +547,38 @@ static int vdec_subscribe_event(struct v4l2_fh *fh,
 	}
 }
 
+/*
+ * Size of the empty input buffer enqueued to signal EOS.  Nothing is ever
+ * read from it, but the AR50 firmware walks the descriptor, so it has to be
+ * a real IOMMU mapping rather than a sentinel value.
+ */
+#define VDEC_EOS_BUF_SIZE	SZ_4K
+
+static int vdec_alloc_eos_buf(struct venus_inst *inst)
+{
+	if (inst->eos_buf_va)
+		return 0;
+
+	inst->eos_buf_attrs = DMA_ATTR_WRITE_COMBINE | DMA_ATTR_NO_KERNEL_MAPPING;
+	inst->eos_buf_va = dma_alloc_attrs(inst->core->dev, VDEC_EOS_BUF_SIZE,
+					   &inst->eos_buf_da, GFP_KERNEL,
+					   inst->eos_buf_attrs);
+	if (!inst->eos_buf_va)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void vdec_free_eos_buf(struct venus_inst *inst)
+{
+	if (!inst->eos_buf_va)
+		return;
+
+	dma_free_attrs(inst->core->dev, VDEC_EOS_BUF_SIZE, inst->eos_buf_va,
+		       inst->eos_buf_da, inst->eos_buf_attrs);
+	inst->eos_buf_va = NULL;
+}
+
 static int
 vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 {
@@ -573,12 +607,28 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		/* Send NULL EOS addr for only IRIS2 (SM8250),for firmware <= 1.0.87.
 		 * SC7280 also reports "1.0.<hash>" parsed as 1.0.0; restricting to IRIS2
 		 * avoids misapplying this quirk and breaking VP9 decode on SC7280.
+		 *
+		 * AR50 (v4) accepts neither form: it validates the sentinel address
+		 * against its content protection regions and faults fatally on
+		 * 0xdeadb000 (session error 0x1001), while a NULL address makes the
+		 * VP9 firmware dereference it and die (Err_Fatal, vpx_decoder.c).
+		 * Give it a real, empty, IOMMU-mapped buffer instead, the way the
+		 * downstream driver does for every target.
 		 */
 
-		if (IS_IRIS2(inst->core) && is_fw_rev_or_older(inst->core, 1, 0, 87))
+		if (IS_AR50(inst->core)) {
+			ret = vdec_alloc_eos_buf(inst);
+			if (ret)
+				goto unlock;
+
+			fdata.device_addr = inst->eos_buf_da;
+			fdata.alloc_len = VDEC_EOS_BUF_SIZE;
+		} else if (IS_IRIS2(inst->core) &&
+			   is_fw_rev_or_older(inst->core, 1, 0, 87)) {
 			fdata.device_addr = 0;
-		else
+		} else {
 			fdata.device_addr = 0xdeadb000;
+		}
 
 		ret = hfi_session_process_buf(inst, &fdata);
 
@@ -1763,6 +1813,7 @@ static int vdec_close(struct file *file)
 	vdec_pm_get(inst);
 	cancel_work_sync(&inst->delayed_process_work);
 	venus_close_common(inst, file);
+	vdec_free_eos_buf(inst);
 	ida_destroy(&inst->dpb_ids);
 	vdec_pm_put(inst, false);
 

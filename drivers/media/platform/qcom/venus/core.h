@@ -447,6 +447,9 @@ enum venus_inst_modes {
  * @pic_struct:		bitstream progressive vs interlaced
  * @next_buf_last: a flag to mark next queued capture buffer as last
  * @drain_active:	Drain sequence is in progress
+ * @eos_buf_va:		cookie of the empty buffer used to signal EOS, if any
+ * @eos_buf_da:		device address of the empty EOS buffer
+ * @eos_buf_attrs:	DMA attributes the empty EOS buffer was allocated with
  * @flags:	bitmask flags describing current instance mode
  * @dpb_ids:	DPB buffer ID's
  */
@@ -518,6 +521,9 @@ struct venus_inst {
 	unsigned int pic_struct;
 	bool next_buf_last;
 	bool drain_active;
+	void *eos_buf_va;
+	dma_addr_t eos_buf_da;
+	unsigned long eos_buf_attrs;
 	enum venus_inst_modes flags;
 	struct ida dpb_ids;
 };
