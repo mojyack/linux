@@ -2652,6 +2652,14 @@ static int __maybe_unused qca_suspend(struct device *dev)
 
 	set_bit(QCA_SUSPENDING, &qca->flags);
 
+	/* The serdev port is closed while the HCI device is down when
+	 * HCI_QUIRK_NON_PERSISTENT_SETUP is set, but this driver stays bound
+	 * and keeps getting PM callbacks.  There is no port to put to sleep
+	 * then, and the controller ops must not be called on a closed port.
+	 */
+	if (!test_bit(HCI_UART_PROTO_READY, &hu->flags))
+		return 0;
+
 	/* if BT SoC is running with default firmware then it does not
 	 * support in-band sleep
 	 */
