@@ -1513,13 +1513,23 @@ static void vdec_buf_done(struct venus_inst *inst, unsigned int buf_type,
 	if (hfi_flags & HFI_BUFFERFLAG_READONLY)
 		venus_helper_acquire_buf_ref(vbuf);
 
-	if (hfi_flags & HFI_BUFFERFLAG_DATACORRUPT)
-		state = VB2_BUF_STATE_ERROR;
+	/*
+	 * The buffer that carries the end-of-stream marker is empty by
+	 * definition, and the firmware flags it as a dropped frame as well.
+	 * That is not a decode failure and must not be reported as one: a
+	 * client that finds V4L2_BUF_FLAG_ERROR on it stops treating it as the
+	 * end of the stream and hands it on as a frame instead - one with no
+	 * timestamp, which is enough to wedge a media pipeline.
+	 */
+	if (!(vbuf->flags & V4L2_BUF_FLAG_LAST)) {
+		if (hfi_flags & HFI_BUFFERFLAG_DATACORRUPT)
+			state = VB2_BUF_STATE_ERROR;
 
-	if (hfi_flags & HFI_BUFFERFLAG_DROP_FRAME) {
-		state = VB2_BUF_STATE_ERROR;
-		vb2_set_plane_payload(vb, 0, 0);
-		vb->timestamp = 0;
+		if (hfi_flags & HFI_BUFFERFLAG_DROP_FRAME) {
+			state = VB2_BUF_STATE_ERROR;
+			vb2_set_plane_payload(vb, 0, 0);
+			vb->timestamp = 0;
+		}
 	}
 
 	v4l2_m2m_buf_done(vbuf, state);
