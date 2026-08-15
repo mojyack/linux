@@ -1464,6 +1464,22 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 		return;
 	}
 
+	/*
+	 * The client is allowed to stream the capture queue on while OUTPUT is
+	 * stopped, in which case vdec_start_capture() bailed out and the session
+	 * has not been told about the capture buffers yet.  vb2 is streaming
+	 * though, so venus_helper_vb2_buf_queue() would hand every buffer queued
+	 * from here on straight to the firmware, which faults fatally on output
+	 * buffers for a session it has not finished configuring (Err_Fatal,
+	 * vbuffer.c).  Park them instead - vdec_start_capture() hands the whole
+	 * queue over once the setup is complete.
+	 */
+	if (V4L2_TYPE_IS_CAPTURE(vb->vb2_queue->type) && !inst->streamon_cap) {
+		v4l2_m2m_buf_queue(inst->m2m_ctx, vbuf);
+		mutex_unlock(&inst->lock);
+		return;
+	}
+
 	venus_helper_vb2_buf_queue(vb);
 	mutex_unlock(&inst->lock);
 }
