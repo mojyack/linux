@@ -24,6 +24,7 @@
 #include <linux/pm.h>
 #include <linux/property.h>
 #include <linux/seq_file.h>
+#include <linux/syscore_ops.h>
 
 #define GPIO_BANK(x)		((x) >> 5)
 #define GPIO_PORT(x)		(((x) >> 3) & 0x3)
@@ -446,9 +447,8 @@ static int tegra_gpio_populate_parent_fwspec(struct gpio_chip *chip,
 }
 
 #ifdef CONFIG_PM_SLEEP
-static int tegra_gpio_resume(struct device *dev)
+static void tegra_gpio_restore(struct tegra_gpio_info *tgi)
 {
-	struct tegra_gpio_info *tgi = dev_get_drvdata(dev);
 	unsigned int b, p;
 
 	for (b = 0; b < tgi->bank_count; b++) {
@@ -477,6 +477,26 @@ static int tegra_gpio_resume(struct device *dev)
 					  GPIO_INT_ENB(tgi, gpio));
 		}
 	}
+}
+
+/* Runs before the noirq phase, where pinctrl releases the parked pads. */
+static void tegra_gpio_syscore_resume(void *data)
+{
+	tegra_gpio_restore(data);
+}
+
+static const struct syscore_ops tegra_gpio_syscore_ops = {
+	.resume = tegra_gpio_syscore_resume,
+};
+
+static struct syscore tegra_gpio_syscore = {
+	.ops = &tegra_gpio_syscore_ops,
+};
+
+/* Suspend-to-idle skips syscore, and this also unmasks the non-wake IRQs. */
+static int tegra_gpio_resume(struct device *dev)
+{
+	tegra_gpio_restore(dev_get_drvdata(dev));
 
 	return 0;
 }
@@ -782,6 +802,11 @@ static int tegra_gpio_probe(struct platform_device *pdev)
 	ret = devm_gpiochip_add_data(&pdev->dev, &tgi->gc, tgi);
 	if (ret < 0)
 		return ret;
+
+	if (IS_ENABLED(CONFIG_PM_SLEEP)) {
+		tegra_gpio_syscore.data = tgi;
+		register_syscore(&tegra_gpio_syscore);
+	}
 
 	tegra_gpio_debuginit(tgi);
 
