@@ -391,6 +391,23 @@ void host1x_syncpt_deinit(struct host1x *host)
 }
 
 /**
+ * host1x_syncpt_recover() - make a syncpoint usable after a job timeout
+ * @sp: host1x syncpoint
+ *
+ * A job timeout locks the syncpoint so that no further work reaches a possibly
+ * wedged engine, and leaves the maximum value counting the increments the
+ * cancelled jobs never made.  A client calls this once it has reset that
+ * engine: the maximum is resynchronised with the hardware value and
+ * submissions are allowed again.
+ */
+void host1x_syncpt_recover(struct host1x_syncpt *sp)
+{
+	atomic_set(&sp->max_val, host1x_syncpt_read(sp));
+	sp->locked = false;
+}
+EXPORT_SYMBOL(host1x_syncpt_recover);
+
+/**
  * host1x_syncpt_read_max() - read maximum syncpoint value
  * @sp: host1x syncpoint
  *
