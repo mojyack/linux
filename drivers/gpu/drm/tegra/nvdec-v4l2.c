@@ -16,6 +16,7 @@
 #include <media/v4l2-h264.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
+#include <media/v4l2-vp9.h>
 #include <media/videobuf2-dma-contig.h>
 
 #include "nvdec-engine.h"
@@ -34,6 +35,7 @@ static const struct nvdec_codec_size {
 	{ V4L2_PIX_FMT_H264_SLICE,   48,  16, 16 },
 	{ V4L2_PIX_FMT_HEVC_SLICE,  129, 129, NVDEC_HEVC_CTU_SIZE },
 	{ V4L2_PIX_FMT_VP8_FRAME,    48,  16, 16 },
+	{ V4L2_PIX_FMT_VP9_FRAME,   129, 129, NVDEC_HEVC_CTU_SIZE },
 };
 
 static const struct nvdec_codec_size *nvdec_codec_size(u32 pixelformat)
@@ -73,7 +75,18 @@ struct nvdec_v4l2_ctx {
 	struct nvdec_h264_request picture;
 	struct nvdec_hevc_request hevc;
 	struct nvdec_vp8_request vp8;
+	struct nvdec_vp9_request vp9;
 	u32 last_first_mb;
+	/* VP9 owns its probability model. */
+	struct v4l2_vp9_frame_context vp9_frame_context[4];
+	struct v4l2_vp9_frame_context vp9_probs;
+	/* 14 KiB of pointers into the firmware's count buffer; not a stack type. */
+	struct v4l2_vp9_frame_symbol_counts vp9_counts;
+	u32 vp9_cur_flags;
+	u32 vp9_last_flags;
+	u8 vp9_frame_context_idx;
+	bool vp9_cur_valid;
+	bool vp9_last_valid;
 };
 
 struct nvdec_v4l2_surface {
@@ -156,6 +169,12 @@ static const struct v4l2_ctrl_config nvdec_vp8_ctrls[] = {
 	{ .id = V4L2_CID_STATELESS_VP8_FRAME },
 };
 
+/* Both are required: without the deltas no inter frame can be decoded. */
+static const struct v4l2_ctrl_config nvdec_vp9_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_VP9_FRAME },
+	{ .id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR },
+};
+
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 {
 	return container_of(file_to_v4l2_fh(file), struct nvdec_v4l2_ctx, fh);
@@ -164,6 +183,21 @@ static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 static void nvdec_release_surface(struct nvdec_v4l2_ctx *ctx,
 				  struct vb2_buffer *vb);
 static void nvdec_release_surfaces(struct nvdec_v4l2_ctx *ctx);
+
+/* A VP9 stream begins with the four frame contexts at the spec's defaults. */
+static void nvdec_reset_vp9_contexts(struct nvdec_v4l2_ctx *ctx)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ctx->vp9_frame_context); i++)
+		ctx->vp9_frame_context[i] = v4l2_vp9_default_probs;
+	ctx->vp9_probs = v4l2_vp9_default_probs;
+	ctx->vp9_frame_context_idx = 0;
+	ctx->vp9_cur_valid = false;
+	ctx->vp9_last_valid = false;
+	ctx->vp9_cur_flags = 0;
+	ctx->vp9_last_flags = 0;
+}
 
 static void nvdec_reset_coded_fmt(struct nvdec_v4l2_ctx *ctx)
 {
@@ -342,6 +376,7 @@ static void nvdec_stop_streaming(struct vb2_queue *vq)
 		/* Drop the size-derived scratch so the next stream may differ. */
 		nvdec_engine_context_reset(ctx->decode);
 		nvdec_release_surfaces(ctx);
+		nvdec_reset_vp9_contexts(ctx);
 	} else {
 		nvdec_engine_discard_slices(ctx->decode);
 	}
@@ -1144,6 +1179,247 @@ static int nvdec_snapshot_vp8_request(struct nvdec_v4l2_ctx *ctx)
 	return 0;
 }
 
+static int nvdec_validate_vp9_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	const struct v4l2_ctrl_vp9_compressed_hdr *hdr;
+	const struct v4l2_ctrl_vp9_frame *frame;
+	u32 width, height, headers;
+	const char *why;
+	unsigned int i;
+
+	if (!nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_VP9_FRAME) ||
+	    !nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_VP9_COMPRESSED_HDR)) {
+		why = "a required control is missing from the request";
+		goto reject;
+	}
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+	hdr = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_COMPRESSED_HDR);
+	if (!frame || !hdr) {
+		why = "control handler lookup failed";
+		goto reject;
+	}
+
+	if (frame->profile || frame->bit_depth != 8 ||
+	    (frame->flags & (V4L2_VP9_FRAME_FLAG_X_SUBSAMPLING |
+			     V4L2_VP9_FRAME_FLAG_Y_SUBSAMPLING)) !=
+	    (V4L2_VP9_FRAME_FLAG_X_SUBSAMPLING |
+	     V4L2_VP9_FRAME_FLAG_Y_SUBSAMPLING)) {
+		why = "not Profile 0 8-bit 4:2:0";
+		goto reject;
+	}
+
+	width = frame->frame_width_minus_1 + 1;
+	height = frame->frame_height_minus_1 + 1;
+	if (ALIGN(width, NVDEC_VP9_SB_SIZE) != coded->width ||
+	    ALIGN(height, NVDEC_VP9_SB_SIZE) != coded->height) {
+		why = "frame dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	if (frame->tile_cols_log2 > 6 || frame->tile_rows_log2 > 2) {
+		why = "too many tiles";
+		goto reject;
+	}
+
+	if (check_add_overflow(frame->uncompressed_header_size,
+			       frame->compressed_header_size, &headers) ||
+	    !frame->uncompressed_header_size || !frame->compressed_header_size) {
+		why = "header sizes";
+		goto reject;
+	}
+
+	if (hdr->tx_mode > V4L2_VP9_TX_MODE_SELECT ||
+	    frame->reference_mode > V4L2_VP9_REFERENCE_MODE_SELECT ||
+	    frame->interpolation_filter > V4L2_VP9_INTERP_FILTER_SWITCHABLE ||
+	    frame->reset_frame_context > 3 || frame->frame_context_idx > 3) {
+		why = "frame parameters";
+		goto reject;
+	}
+
+	for (i = 0; i < 8; i++) {
+		if (frame->seg.feature_enabled[i] & ~0xf) {
+			why = "unknown segmentation feature";
+			goto reject;
+		}
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "vp9 reject: %s\n", why);
+	return -EINVAL;
+}
+
+/* 6.1 frame(sz): the driver owns the frame contexts and forward-updates them. */
+static int nvdec_snapshot_vp9_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *pix = &ctx->capture_fmt.fmt.pix_mp;
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	struct nvdec_vp9_request *request = &ctx->vp9;
+	const struct v4l2_ctrl_vp9_compressed_hdr *hdr;
+	const struct v4l2_ctrl_vp9_frame *frame;
+	unsigned int i, j;
+
+	if (nvdec_validate_vp9_request(ctx))
+		return -EINVAL;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+	hdr = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_COMPRESSED_HDR);
+
+	ctx->vp9_frame_context_idx = v4l2_vp9_reset_frame_ctx(frame,
+							      ctx->vp9_frame_context);
+	ctx->vp9_probs = ctx->vp9_frame_context[ctx->vp9_frame_context_idx];
+	v4l2_vp9_fw_update_probs(&ctx->vp9_probs, hdr, frame);
+
+	memset(request, 0, sizeof(*request));
+	request->width = frame->frame_width_minus_1 + 1;
+	request->height = frame->frame_height_minus_1 + 1;
+	request->coded_width = coded->width;
+	request->coded_height = coded->height;
+	request->crop_left = ctx->crop.left;
+	request->crop_top = ctx->crop.top;
+	request->crop_width = ctx->crop.width;
+	request->crop_height = ctx->crop.height;
+	request->luma_stride = nvdec_surface_stride(ctx);
+	request->chroma_offset = nvdec_surface_chroma_offset(ctx);
+	request->dst_stride = pix->plane_fmt[0].bytesperline;
+	request->dst_chroma_offset = request->dst_stride * pix->height;
+	request->tile_cols_log2 = frame->tile_cols_log2;
+	request->tile_rows_log2 = frame->tile_rows_log2;
+	request->base_q_idx = frame->quant.base_q_idx;
+	request->delta_q_y_dc = frame->quant.delta_q_y_dc;
+	request->delta_q_uv_dc = frame->quant.delta_q_uv_dc;
+	request->delta_q_uv_ac = frame->quant.delta_q_uv_ac;
+	request->lf_level = frame->lf.level;
+	request->lf_sharpness = frame->lf.sharpness;
+	memcpy(request->lf_ref_deltas, frame->lf.ref_deltas,
+	       sizeof(request->lf_ref_deltas));
+	memcpy(request->lf_mode_deltas, frame->lf.mode_deltas,
+	       sizeof(request->lf_mode_deltas));
+	request->tx_mode = hdr->tx_mode;
+	request->reference_mode = frame->reference_mode;
+	request->interpolation_filter = frame->interpolation_filter;
+	request->sign_bias[0] =
+		!!(frame->ref_frame_sign_bias & V4L2_VP9_SIGN_BIAS_LAST);
+	request->sign_bias[1] =
+		!!(frame->ref_frame_sign_bias & V4L2_VP9_SIGN_BIAS_GOLDEN);
+	request->sign_bias[2] =
+		!!(frame->ref_frame_sign_bias & V4L2_VP9_SIGN_BIAS_ALT);
+
+	for (i = 0; i < 8; i++) {
+		request->seg_feature_enabled[i] = frame->seg.feature_enabled[i];
+		for (j = 0; j < 3; j++)
+			request->seg_feature_data[i][j] =
+				frame->seg.feature_data[i][j];
+	}
+	memcpy(request->seg_tree_probs, frame->seg.tree_probs,
+	       sizeof(request->seg_tree_probs));
+	memcpy(request->seg_pred_probs, frame->seg.pred_probs,
+	       sizeof(request->seg_pred_probs));
+
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_KEY_FRAME)
+		request->flags |= NVDEC_VP9_REQ_KEY_FRAME;
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_ERROR_RESILIENT)
+		request->flags |= NVDEC_VP9_REQ_ERROR_RESILIENT;
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_INTRA_ONLY)
+		request->flags |= NVDEC_VP9_REQ_INTRA_ONLY;
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_ALLOW_HIGH_PREC_MV)
+		request->flags |= NVDEC_VP9_REQ_HIGH_PREC_MV;
+	if (!frame->quant.base_q_idx && !frame->quant.delta_q_y_dc &&
+	    !frame->quant.delta_q_uv_dc && !frame->quant.delta_q_uv_ac)
+		request->flags |= NVDEC_VP9_REQ_LOSSLESS;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_ENABLED)
+		request->flags |= NVDEC_VP9_REQ_SEG_ENABLED;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_UPDATE_MAP)
+		request->flags |= NVDEC_VP9_REQ_SEG_UPDATE_MAP;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_TEMPORAL_UPDATE)
+		request->flags |= NVDEC_VP9_REQ_SEG_TEMPORAL;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_ABS_OR_DELTA_UPDATE)
+		request->flags |= NVDEC_VP9_REQ_SEG_ABS_DELTA;
+	if (frame->lf.flags & V4L2_VP9_LOOP_FILTER_FLAG_DELTA_ENABLED)
+		request->flags |= NVDEC_VP9_REQ_LF_DELTA_ENABLED;
+	if (ctx->vp9_cur_valid) {
+		if (ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_KEY_FRAME)
+			request->flags |= NVDEC_VP9_REQ_PREV_KEY_FRAME;
+		if (ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_SHOW_FRAME)
+			request->flags |= NVDEC_VP9_REQ_PREV_SHOW_FRAME;
+	}
+
+	request->probs = ctx->vp9_probs;
+	ctx->vp9_last_flags = ctx->vp9_cur_flags;
+	ctx->vp9_last_valid = ctx->vp9_cur_valid;
+	ctx->vp9_cur_flags = frame->flags;
+	ctx->vp9_cur_valid = true;
+	return 0;
+}
+
+struct nvdec_vp9_tx_and_skip {
+	u8 tx8[2][1];
+	u8 tx16[2][2];
+	u8 tx32[2][3];
+	u8 skip[3];
+};
+
+static void nvdec_vp9_save_tx_skip(struct nvdec_vp9_tx_and_skip *to,
+				   const struct v4l2_vp9_frame_context *from)
+{
+	memcpy(to->tx8, from->tx8, sizeof(to->tx8));
+	memcpy(to->tx16, from->tx16, sizeof(to->tx16));
+	memcpy(to->tx32, from->tx32, sizeof(to->tx32));
+	memcpy(to->skip, from->skip, sizeof(to->skip));
+}
+
+static void nvdec_vp9_restore_tx_skip(struct v4l2_vp9_frame_context *to,
+				      const struct nvdec_vp9_tx_and_skip *from)
+{
+	memcpy(to->tx8, from->tx8, sizeof(from->tx8));
+	memcpy(to->tx16, from->tx16, sizeof(from->tx16));
+	memcpy(to->tx32, from->tx32, sizeof(from->tx32));
+	memcpy(to->skip, from->skip, sizeof(from->skip));
+}
+
+/* 6.1.2 refresh_probs(), after the firmware has written the symbol counts. */
+static void nvdec_vp9_refresh_probs(struct nvdec_v4l2_ctx *ctx)
+{
+	struct v4l2_vp9_frame_context *probs = &ctx->vp9_probs;
+	struct v4l2_vp9_frame_symbol_counts *counts = &ctx->vp9_counts;
+	bool intra;
+
+	if (!(ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_REFRESH_FRAME_CTX))
+		return;
+
+	if (!(ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_PARALLEL_DEC_MODE) &&
+	    !nvdec_engine_vp9_counts(ctx->decode, counts)) {
+		struct nvdec_vp9_tx_and_skip tx_skip;
+
+		intra = ctx->vp9_cur_flags & (V4L2_VP9_FRAME_FLAG_KEY_FRAME |
+					      V4L2_VP9_FRAME_FLAG_INTRA_ONLY);
+
+		/* load_probs() and load_probs2() undo the forward update... */
+		if (intra)
+			nvdec_vp9_save_tx_skip(&tx_skip, probs);
+		*probs = ctx->vp9_frame_context[ctx->vp9_frame_context_idx];
+		/* ...except for TX and skip on an intra frame. */
+		if (intra)
+			nvdec_vp9_restore_tx_skip(probs, &tx_skip);
+
+		v4l2_vp9_adapt_coef_probs(probs, counts,
+					  !ctx->vp9_last_valid ||
+					  ctx->vp9_last_flags &
+					  V4L2_VP9_FRAME_FLAG_KEY_FRAME, intra);
+		if (!intra)
+			v4l2_vp9_adapt_noncoef_probs(probs, counts,
+						     ctx->vp9.reference_mode,
+						     ctx->vp9.interpolation_filter,
+						     ctx->vp9.tx_mode,
+						     ctx->vp9_cur_flags);
+	}
+
+	ctx->vp9_frame_context[ctx->vp9_frame_context_idx] = *probs;
+}
+
 static void nvdec_job_cleanup_maps(struct nvdec_v4l2_job *job)
 {
 	unsigned int i;
@@ -1166,6 +1442,9 @@ static void nvdec_job_complete(void *data, bool error)
 	}
 	job->completed = true;
 	ctx->job = NULL;
+	/* The firmware has written the symbol counts by now. */
+	if (!error && !job->aborted && ctx->codec == NVDEC_CODEC_VP9)
+		nvdec_vp9_refresh_probs(ctx);
 	v4l2_m2m_buf_done_and_job_finish(ctx->nvdec->m2m_dev, ctx->fh.m2m_ctx,
 					 error || job->aborted ? VB2_BUF_STATE_ERROR :
 					 VB2_BUF_STATE_DONE);
@@ -1186,9 +1465,17 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 	unsigned long offset = 0;
 	int err;
 
-	/* VP8 reaches the firmware without its uncompressed data chunk. */
+	/* VP8 and VP9 reach the firmware with their frame headers removed. */
 	if (ctx->codec == NVDEC_CODEC_VP8) {
 		offset = ctx->vp8.flags & NVDEC_VP8_REQ_KEY_FRAME ? 10 : 3;
+	} else if (ctx->codec == NVDEC_CODEC_VP9) {
+		const struct v4l2_ctrl_vp9_frame *frame =
+			nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+
+		offset = frame->uncompressed_header_size +
+			 frame->compressed_header_size;
+	}
+	if (offset) {
 		if (payload <= offset)
 			return -EINVAL;
 		payload -= offset;
@@ -1237,6 +1524,21 @@ static int nvdec_resolve_dpb(struct nvdec_v4l2_ctx *ctx,
 			if (err)
 				return err;
 		}
+
+		return 0;
+	}
+
+	/* VP9 slots are roles too, in the order last, golden, altref. */
+	if (ctx->codec == NVDEC_CODEC_VP9) {
+		const struct v4l2_ctrl_vp9_frame *frame =
+			nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+		const u64 timestamps[NVDEC_VP9_REFS] = {
+			frame->last_frame_ts, frame->golden_frame_ts,
+			frame->alt_frame_ts,
+		};
+
+		for (i = 0; i < NVDEC_VP9_REFS; i++)
+			nvdec_pin_reference(ctx, job, i, timestamps[i]);
 
 		return 0;
 	}
@@ -1300,6 +1602,9 @@ static void nvdec_device_run(void *priv)
 	} else if (ctx->codec == NVDEC_CODEC_VP8) {
 		first = true;
 		err = nvdec_snapshot_vp8_request(ctx);
+	} else if (ctx->codec == NVDEC_CODEC_VP9) {
+		first = true;
+		err = nvdec_snapshot_vp9_request(ctx);
 	} else {
 		/* A picture starts at macroblock zero; m2m's new_frame is unreliable. */
 		slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
@@ -1358,6 +1663,12 @@ static void nvdec_device_run(void *priv)
 		break;
 	case NVDEC_CODEC_VP8:
 		err = nvdec_engine_vp8_submit(ctx->decode, &ctx->vp8,
+					      job->surface->map, job->capture,
+					      job->dpb, &job->fence,
+					      nvdec_job_complete, job);
+		break;
+	case NVDEC_CODEC_VP9:
+		err = nvdec_engine_vp9_submit(ctx->decode, &ctx->vp9,
 					      job->surface->map, job->capture,
 					      job->dpb, &job->fence,
 					      nvdec_job_complete, job);
@@ -1432,6 +1743,7 @@ static int nvdec_enum_fmt(struct file *file, void *priv,
 		V4L2_PIX_FMT_H264_SLICE,
 		V4L2_PIX_FMT_HEVC_SLICE,
 		V4L2_PIX_FMT_VP8_FRAME,
+		V4L2_PIX_FMT_VP9_FRAME,
 	};
 
 	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
@@ -1483,6 +1795,8 @@ static int nvdec_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 			codec = NVDEC_CODEC_HEVC;
 		else if (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_VP8_FRAME)
 			codec = NVDEC_CODEC_VP8;
+		else if (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_VP9_FRAME)
+			codec = NVDEC_CODEC_VP9;
 
 		if (vb2_is_busy(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx)))
 			return -EBUSY;
@@ -1627,7 +1941,8 @@ static int nvdec_open(struct file *file)
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	v4l2_ctrl_handler_init(&ctx->ctrl_hdl, ARRAY_SIZE(nvdec_h264_ctrls) +
 			       ARRAY_SIZE(nvdec_hevc_ctrls) +
-			       ARRAY_SIZE(nvdec_vp8_ctrls));
+			       ARRAY_SIZE(nvdec_vp8_ctrls) +
+			       ARRAY_SIZE(nvdec_vp9_ctrls));
 	for (i = 0; i < ARRAY_SIZE(nvdec_h264_ctrls); i++) {
 		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &nvdec_h264_ctrls[i], NULL);
 		if (ctx->ctrl_hdl.error)
@@ -1643,6 +1958,11 @@ static int nvdec_open(struct file *file)
 		if (ctx->ctrl_hdl.error)
 			goto free_ctrls;
 	}
+	for (i = 0; i < ARRAY_SIZE(nvdec_vp9_ctrls); i++) {
+		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &nvdec_vp9_ctrls[i], NULL);
+		if (ctx->ctrl_hdl.error)
+			goto free_ctrls;
+	}
 	ctx->fh.ctrl_handler = &ctx->ctrl_hdl;
 	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(nvdec->m2m_dev, ctx, nvdec_queue_init);
 	if (IS_ERR(ctx->fh.m2m_ctx)) {
@@ -1651,6 +1971,7 @@ static int nvdec_open(struct file *file)
 	}
 	nvdec_reset_coded_fmt(ctx);
 	nvdec_reset_capture_fmt(ctx);
+	nvdec_reset_vp9_contexts(ctx);
 	v4l2_fh_add(&ctx->fh, file);
 	return 0;
 

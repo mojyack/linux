@@ -8,6 +8,8 @@
 #include <linux/of.h>
 #include <linux/pm.h>
 
+#include <media/v4l2-vp9.h>
+
 struct host1x_job;
 struct platform_device;
 struct tegra_drm_client;
@@ -232,10 +234,67 @@ struct nvdec_vp8_request {
 #define NVDEC_VP8_REQ_KEY_FRAME		BIT(0)
 #define NVDEC_VP8_REQ_SEGMENT_UPDATE	BIT(1)
 
+/* Last, golden and altref; the current picture takes the fourth slot. */
+#define NVDEC_VP9_REFS		3
+/* The largest superblock, which the coded size is padded up to. */
+#define NVDEC_VP9_SB_SIZE	64
+
+/* Copied, validated VP9 state. This is not a V4L2 control layout. */
+struct nvdec_vp9_request {
+	u16 width;
+	u16 height;
+	u16 coded_width;
+	u16 coded_height;
+	/* Visible rectangle VIC detiles out of the coded picture. */
+	u16 crop_left;
+	u16 crop_top;
+	u16 crop_width;
+	u16 crop_height;
+	u16 luma_stride;
+	u32 chroma_offset;
+	u32 dst_stride;
+	u32 dst_chroma_offset;
+	u32 output_payload_size;
+	u32 flags;
+	u8 tile_cols_log2;
+	u8 tile_rows_log2;
+	u8 base_q_idx;
+	s8 delta_q_y_dc;
+	s8 delta_q_uv_dc;
+	s8 delta_q_uv_ac;
+	u8 lf_level;
+	u8 lf_sharpness;
+	s8 lf_ref_deltas[4];
+	s8 lf_mode_deltas[2];
+	u8 tx_mode;
+	u8 reference_mode;
+	u8 interpolation_filter;
+	u8 sign_bias[NVDEC_VP9_REFS];
+	u8 seg_feature_enabled[8];
+	s16 seg_feature_data[8][4];
+	u8 seg_tree_probs[7];
+	u8 seg_pred_probs[3];
+	struct v4l2_vp9_frame_context probs;
+};
+
+#define NVDEC_VP9_REQ_KEY_FRAME		BIT(0)
+#define NVDEC_VP9_REQ_PREV_KEY_FRAME	BIT(1)
+#define NVDEC_VP9_REQ_ERROR_RESILIENT	BIT(2)
+#define NVDEC_VP9_REQ_PREV_SHOW_FRAME	BIT(3)
+#define NVDEC_VP9_REQ_INTRA_ONLY	BIT(4)
+#define NVDEC_VP9_REQ_LOSSLESS		BIT(5)
+#define NVDEC_VP9_REQ_HIGH_PREC_MV	BIT(6)
+#define NVDEC_VP9_REQ_SEG_ENABLED	BIT(7)
+#define NVDEC_VP9_REQ_SEG_UPDATE_MAP	BIT(8)
+#define NVDEC_VP9_REQ_SEG_TEMPORAL	BIT(9)
+#define NVDEC_VP9_REQ_SEG_ABS_DELTA	BIT(10)
+#define NVDEC_VP9_REQ_LF_DELTA_ENABLED	BIT(11)
+
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
 	NVDEC_CODEC_HEVC,
 	NVDEC_CODEC_VP8,
+	NVDEC_CODEC_VP9,
 };
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,
@@ -315,6 +374,15 @@ int nvdec_engine_vp8_submit(struct nvdec_decode_context *ctx,
 			    struct nvdec_engine_map * const refs[NVDEC_VP8_REFS],
 			    struct dma_fence **fence,
 			    nvdec_engine_complete_t complete, void *data);
+int nvdec_engine_vp9_submit(struct nvdec_decode_context *ctx,
+			    const struct nvdec_vp9_request *request,
+			    struct nvdec_engine_map *surface,
+			    struct nvdec_engine_map *capture,
+			    struct nvdec_engine_map * const refs[NVDEC_VP9_REFS],
+			    struct dma_fence **fence,
+			    nvdec_engine_complete_t complete, void *data);
+int nvdec_engine_vp9_counts(struct nvdec_decode_context *ctx,
+			    struct v4l2_vp9_frame_symbol_counts *counts);
 
 extern const struct dev_pm_ops nvdec_engine_pm_ops;
 extern const struct of_device_id nvdec_engine_of_match[];

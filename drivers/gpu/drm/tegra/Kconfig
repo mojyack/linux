@@ -49,11 +49,12 @@ config DRM_TEGRA_NVDEC_V4L2
 	select MEDIA_CONTROLLER
 	select VIDEO_DEV
 	select V4L2_MEM2MEM_DEV
+	select V4L2_VP9
 	select VIDEOBUF2_DMA_CONTIG
 	help
 	  Enable a stateless V4L2 mem2mem decoder on top of the NVDEC engine,
-	  exposing one media device and one video node that decode H.264 to
-	  linear NV12 through the V4L2 Request API.
+	  exposing one media device and one video node that decode H.264,
+	  HEVC, VP8 and VP9 to linear NV12 through the V4L2 Request API.
 
 	  The adapter shares the single NVDEC platform binding with Tegra DRM,
 	  and drives VIC as well in order to detile the decoded frames.

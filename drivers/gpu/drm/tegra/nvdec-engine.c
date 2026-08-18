@@ -66,6 +66,14 @@
 #define NVDEC_HEVC_METHOD_TILE_SIZES		0x161
 #define NVDEC_HEVC_METHOD_FILTER		0x162
 #define NVDEC_VP8_METHOD_PROB_DATA		0x150
+#define NVDEC_VP9_METHOD_PROB_TAB		0x170
+#define NVDEC_VP9_METHOD_CTX_COUNTER		0x171
+#define NVDEC_VP9_METHOD_SEGMENT_READ		0x172
+#define NVDEC_VP9_METHOD_SEGMENT_WRITE		0x173
+#define NVDEC_VP9_METHOD_TILE_SIZE		0x174
+#define NVDEC_VP9_METHOD_COL_MVWRITE		0x175
+#define NVDEC_VP9_METHOD_COL_MVREAD		0x176
+#define NVDEC_VP9_METHOD_FILTER		0x177
 
 #define NVDEC_HEVC_SETUP_SIZE			0x114
 #define NVDEC_HEVC_STATUS_OFFSET		0x200
@@ -96,6 +104,25 @@
 #define NVDEC_VP8_MAX_PICTURES			4
 #define NVDEC_VP8_HISTORY_PER_MB		0x200
 #define NVDEC_VP8_PROB_SIZE			0x4b00
+
+#define NVDEC_VP9_SETUP_SIZE			0x100
+#define NVDEC_VP9_STATUS_OFFSET		0x100
+#define NVDEC_VP9_PROBS_OFFSET			0x200
+#define NVDEC_VP9_TILES_OFFSET			0x1100
+#define NVDEC_VP9_TILES_SIZE			0x700
+/* Two unexplained u16 constants the oracle plants in the tile-size buffer. */
+#define NVDEC_VP9_TILES_MAGIC			0x37a
+#define NVDEC_VP9_VIC_CONFIG_OFFSET		0x1800
+#define NVDEC_VP9_STATE_SIZE			0x2000
+#define NVDEC_VP9_GATHER_WORDS			69
+#define NVDEC_VP9_VIC_OFFSET			(NVDEC_VP9_GATHER_WORDS + \
+						 NVDEC_DONE_WORDS)
+#define NVDEC_VP9_TOTAL_GATHER_WORDS		(NVDEC_VP9_VIC_OFFSET + \
+						 VIC_DETILE_WORDS + \
+						 NVDEC_DONE_WORDS)
+
+#define NVDEC_VP9_FILTER_PER_ROW		988
+#define NVDEC_VP9_BSD_PER_ROW			912
 
 /* Per aligned luma row, as the oracle sizes them. */
 #define NVDEC_MAX_DPB_ENTRIES			NVDEC_H264_DPB_ENTRIES
@@ -338,6 +365,159 @@ static_assert(sizeof(struct nvdec_vp8_probs) == 0x4cc);
 #define NVDEC_VP8_SURFACE_TILEFORMAT		GENMASK(1, 0)
 #define NVDEC_VP8_SURFACE_GOB_HEIGHT		GENMASK(4, 2)
 
+struct nvdec_vp9_reference {
+	__le16 width;
+	__le16 height;
+	__le16 stride[2];
+};
+
+struct nvdec_vp9_setup {
+	u8 encryption[0x30];
+	__le32 stream_len;
+	__le32 enable_encryption;
+	__le32 key_control;
+	__le32 gptimer_timeout_value;
+	__le32 surface_format;
+	__le32 bsd_control_offset;
+	struct nvdec_vp9_reference ref[3];
+	__le16 width;
+	__le16 height;
+	__le16 framestride[2];
+	__le32 picture_flags;
+	u8 ref_frame_sign_bias[4];
+	s8 loop_filter_level;
+	s8 loop_filter_sharpness;
+	u8 qp_y_ac;
+	s8 qp_y_dc;
+	s8 qp_ch_ac;
+	s8 qp_ch_dc;
+	s8 lossless;
+	s8 transform_mode;
+	s8 allow_high_precision_mv;
+	s8 mcomp_filter_type;
+	s8 comp_pred_mode;
+	s8 comp_fixed_ref;
+	s8 comp_var_ref[2];
+	s8 log2_tile_columns;
+	s8 log2_tile_rows;
+	u8 segment_enabled;
+	u8 segment_map_update;
+	u8 segment_map_temporal_update;
+	u8 segment_feature_mode;
+	u8 segment_feature_enable[8][4];
+	__le16 segment_feature_data[8][4];
+	s8 mode_ref_lf_enabled;
+	s8 mb_ref_lf_delta[4];
+	s8 mb_mode_lf_delta[2];
+	s8 reserved;
+	u8 v1[8];
+	u8 ssm[0xc];
+};
+
+static_assert(offsetof(struct nvdec_vp9_setup, bsd_control_offset) == 0x44);
+static_assert(offsetof(struct nvdec_vp9_setup, width) == 0x60);
+static_assert(offsetof(struct nvdec_vp9_setup, picture_flags) == 0x68);
+static_assert(offsetof(struct nvdec_vp9_setup, qp_y_ac) == 0x72);
+static_assert(offsetof(struct nvdec_vp9_setup, segment_feature_enable) == 0x84);
+static_assert(offsetof(struct nvdec_vp9_setup, mode_ref_lf_enabled) == 0xe4);
+static_assert(sizeof(struct nvdec_vp9_setup) == NVDEC_VP9_SETUP_SIZE);
+
+#define NVDEC_VP9_PIC_KEY_FRAME		BIT(0)
+#define NVDEC_VP9_PIC_PREV_KEY_FRAME		BIT(1)
+#define NVDEC_VP9_PIC_RESOLUTION_CHANGE	BIT(2)
+#define NVDEC_VP9_PIC_ERROR_RESILIENT		BIT(3)
+#define NVDEC_VP9_PIC_PREV_SHOW_FRAME		BIT(4)
+#define NVDEC_VP9_PIC_INTRA_ONLY		BIT(5)
+
+struct nvdec_vp9_nmv_probs {
+	u8 joints[3];
+	u8 sign[2];
+	u8 class0[2][1];
+	u8 fp[2][3];
+	u8 class0_hp[2];
+	u8 hp[2];
+	u8 classes[2][10];
+	u8 class0_fp[2][2][3];
+	u8 bits[2][10];
+};
+
+struct nvdec_vp9_probs {
+	u8 kf_bmode_prob[10][10][8];
+	u8 kf_bmode_prob_b[10][10][1];
+	u8 ref_pred_probs[3];
+	u8 mb_segment_tree_probs[7];
+	u8 segment_pred_probs[3];
+	u8 ref_scores[4];
+	u8 prob_comppred[2];
+	u8 pad0[9];
+	u8 kf_uv_mode_prob[10][8];
+	u8 kf_uv_mode_prob_b[10][1];
+	u8 pad1[6];
+	u8 inter_mode_prob[7][4];
+	u8 intra_inter_prob[4];
+	u8 uv_mode_prob[10][8];
+	u8 tx8x8_prob[2][1];
+	u8 tx16x16_prob[2][2];
+	u8 tx32x32_prob[2][3];
+	u8 sb_ymode_prob_b[4][1];
+	u8 sb_ymode_prob[4][8];
+	u8 partition_prob[2][16][4];
+	u8 uv_mode_prob_b[10][1];
+	u8 switchable_interp_prob[4][2];
+	u8 comp_inter_prob[5];
+	u8 mbskip_probs[3];
+	u8 pad2[1];
+	struct nvdec_vp9_nmv_probs nmvc;
+	u8 single_ref_prob[5][2];
+	u8 comp_ref_prob[5];
+	u8 pad3[17];
+	u8 coeff[4][2][2][6][6][4];
+};
+
+static_assert(offsetof(struct nvdec_vp9_probs, kf_uv_mode_prob) == 0x3a0);
+static_assert(offsetof(struct nvdec_vp9_probs, inter_mode_prob) == 0x400);
+static_assert(offsetof(struct nvdec_vp9_probs, partition_prob) == 0x4a0);
+static_assert(offsetof(struct nvdec_vp9_probs, nmvc) == 0x53b);
+static_assert(offsetof(struct nvdec_vp9_probs, coeff) == 0x5a0);
+static_assert(sizeof(struct nvdec_vp9_probs) == 0xea0);
+
+/* Written by the firmware; v4l2_vp9_frame_symbol_counts points into it. */
+struct nvdec_vp9_nmv_counts {
+	u32 joints[4];
+	u32 sign[2][2];
+	u32 classes[2][11];
+	u32 class0[2][2];
+	u32 bits[2][10][2];
+	u32 class0_fp[2][2][4];
+	u32 fp[2][4];
+	u32 class0_hp[2][2];
+	u32 hp[2][2];
+};
+
+struct nvdec_vp9_counts {
+	u32 inter_mode[7][3][2];
+	u32 y_mode[4][10];
+	u32 uv_mode[10][10];
+	u32 partition[16][4];
+	u32 interp_filter[4][3];
+	u32 intra_inter[4][2];
+	u32 comp_inter[5][2];
+	u32 single_ref[5][2][2];
+	u32 comp_ref[5][2];
+	u32 tx32x32[2][4];
+	u32 tx16x16[2][3];
+	u32 tx8x8[2][2];
+	u32 skip[3][2];
+	struct nvdec_vp9_nmv_counts mv;
+	u32 coeff[4][2][2][6][6][4];
+	u32 eob[4][2][2][6][6];
+};
+
+static_assert(offsetof(struct nvdec_vp9_counts, mv) == 0x528);
+static_assert(offsetof(struct nvdec_vp9_counts, coeff) == 0x6d0);
+static_assert(offsetof(struct nvdec_vp9_counts, eob) == 0x2ad0);
+static_assert(sizeof(struct nvdec_vp9_counts) == 0x33d0);
+
 struct nvdec_buffer {
 	struct host1x_bo bo;
 	struct kref ref;
@@ -387,6 +567,14 @@ struct nvdec_decode_context {
 	struct nvdec_buffer *input;
 	/* VP8 entropy context, seeded by the driver and updated by firmware. */
 	struct nvdec_buffer *probs;
+	/* VP9 symbol counts the firmware writes, plus its two odd members. */
+	struct nvdec_buffer *counts;
+	u32 mv_mode[7][4];
+	u32 tx16p[2][4];
+	u32 seg_read_offset;
+	u32 seg_write_offset;
+	u32 colmv_offset[2];
+	bool frame_parity;
 	u16 width_in_mbs;
 	u16 height_in_mbs;
 	u16 coded_width;
@@ -414,9 +602,11 @@ struct nvdec_decode_job {
 	struct nvdec_h264_request request;
 	struct nvdec_hevc_request hevc;
 	struct nvdec_vp8_request vp8;
+	struct nvdec_vp9_request vp9;
 	struct nvdec_buffer *state;
 	struct nvdec_buffer *input;
 	struct nvdec_buffer *probs;
+	struct nvdec_buffer *counts;
 	struct nvdec_buffer *gather;
 	struct nvdec_engine_map *scratch;
 	struct nvdec_engine_map *surface;
@@ -1625,6 +1815,10 @@ void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 		nvdec_buffer_put(&ctx->probs->bo);
 		ctx->probs = NULL;
 	}
+	if (ctx->counts) {
+		nvdec_buffer_put(&ctx->counts->bo);
+		ctx->counts = NULL;
+	}
 	ctx->width_in_mbs = 0;
 	ctx->height_in_mbs = 0;
 	ctx->coded_width = 0;
@@ -2038,6 +2232,8 @@ static void nvdec_context_release(struct kref *ref)
 		nvdec_buffer_put(&ctx->input->bo);
 	if (ctx->probs)
 		nvdec_buffer_put(&ctx->probs->bo);
+	if (ctx->counts)
+		nvdec_buffer_put(&ctx->counts->bo);
 	nvdec_engine_map_put(ctx->scratch);
 	kfree(ctx->slice_offsets);
 	kfree(ctx);
@@ -2078,6 +2274,8 @@ static void nvdec_decode_job_release(struct host1x_job *job)
 	nvdec_buffer_put(&hjob->state->bo);
 	if (hjob->probs)
 		nvdec_buffer_put(&hjob->probs->bo);
+	if (hjob->counts)
+		nvdec_buffer_put(&hjob->counts->bo);
 	nvdec_engine_map_put(hjob->scratch);
 	nvdec_engine_map_put(hjob->surface);
 	nvdec_engine_map_put(hjob->capture);
@@ -2147,6 +2345,8 @@ static void nvdec_free_job(struct nvdec_decode_job *hjob)
 		nvdec_buffer_put(&hjob->input->bo);
 	if (hjob->probs)
 		nvdec_buffer_put(&hjob->probs->bo);
+	if (hjob->counts)
+		nvdec_buffer_put(&hjob->counts->bo);
 	if (hjob->state)
 		nvdec_buffer_put(&hjob->state->bo);
 	nvdec_engine_map_put(hjob->scratch);
@@ -3569,6 +3769,631 @@ int nvdec_engine_vp8_submit(struct nvdec_decode_context *ctx,
 			       NVDEC_VP8_VIC_OFFSET, fence);
 	if (err)
 		goto free_hjob;
+	mutex_unlock(&ctx->lock);
+	return 0;
+
+free_hjob:
+	nvdec_free_job(hjob);
+unlock:
+	mutex_unlock(&ctx->lock);
+	return err;
+}
+
+static void nvdec_vp9_fill_probs(void *mem, const struct nvdec_vp9_request *r)
+{
+	const struct v4l2_vp9_frame_context *p = &r->probs;
+	struct nvdec_vp9_probs *probs = mem;
+	unsigned int i, j, k, l;
+
+	memset(probs, 0, sizeof(*probs));
+
+	for (i = 0; i < 10; i++) {
+		for (j = 0; j < 10; j++) {
+			memcpy(probs->kf_bmode_prob[i][j],
+			       v4l2_vp9_kf_y_mode_prob[i][j], 8);
+			probs->kf_bmode_prob_b[i][j][0] =
+				v4l2_vp9_kf_y_mode_prob[i][j][8];
+		}
+		memcpy(probs->kf_uv_mode_prob[i], v4l2_vp9_kf_uv_mode_prob[i], 8);
+		probs->kf_uv_mode_prob_b[i][0] = v4l2_vp9_kf_uv_mode_prob[i][8];
+		memcpy(probs->uv_mode_prob[i], p->uv_mode[i], 8);
+		probs->uv_mode_prob_b[i][0] = p->uv_mode[i][8];
+	}
+
+	memcpy(probs->mb_segment_tree_probs, r->seg_tree_probs,
+	       sizeof(probs->mb_segment_tree_probs));
+	memcpy(probs->segment_pred_probs, r->seg_pred_probs,
+	       sizeof(probs->segment_pred_probs));
+
+	for (i = 0; i < 7; i++)
+		memcpy(probs->inter_mode_prob[i], p->inter_mode[i], 3);
+	memcpy(probs->intra_inter_prob, p->is_inter, sizeof(probs->intra_inter_prob));
+	memcpy(probs->tx8x8_prob, p->tx8, sizeof(probs->tx8x8_prob));
+	memcpy(probs->tx16x16_prob, p->tx16, sizeof(probs->tx16x16_prob));
+	memcpy(probs->tx32x32_prob, p->tx32, sizeof(probs->tx32x32_prob));
+	for (i = 0; i < 4; i++) {
+		memcpy(probs->sb_ymode_prob[i], p->y_mode[i], 8);
+		probs->sb_ymode_prob_b[i][0] = p->y_mode[i][8];
+	}
+	for (i = 0; i < 16; i++) {
+		memcpy(probs->partition_prob[0][i], v4l2_vp9_kf_partition_probs[i], 3);
+		memcpy(probs->partition_prob[1][i], p->partition[i], 3);
+	}
+	memcpy(probs->switchable_interp_prob, p->interp_filter,
+	       sizeof(probs->switchable_interp_prob));
+	memcpy(probs->comp_inter_prob, p->comp_mode, sizeof(probs->comp_inter_prob));
+	memcpy(probs->mbskip_probs, p->skip, sizeof(probs->mbskip_probs));
+	memcpy(probs->single_ref_prob, p->single_ref, sizeof(probs->single_ref_prob));
+	memcpy(probs->comp_ref_prob, p->comp_ref, sizeof(probs->comp_ref_prob));
+
+	memcpy(probs->nmvc.joints, p->mv.joint, sizeof(probs->nmvc.joints));
+	memcpy(probs->nmvc.sign, p->mv.sign, sizeof(probs->nmvc.sign));
+	memcpy(probs->nmvc.class0, p->mv.class0_bit, sizeof(probs->nmvc.class0));
+	memcpy(probs->nmvc.fp, p->mv.fr, sizeof(probs->nmvc.fp));
+	memcpy(probs->nmvc.class0_hp, p->mv.class0_hp, sizeof(probs->nmvc.class0_hp));
+	memcpy(probs->nmvc.hp, p->mv.hp, sizeof(probs->nmvc.hp));
+	memcpy(probs->nmvc.classes, p->mv.classes, sizeof(probs->nmvc.classes));
+	memcpy(probs->nmvc.class0_fp, p->mv.class0_fr, sizeof(probs->nmvc.class0_fp));
+	memcpy(probs->nmvc.bits, p->mv.bits, sizeof(probs->nmvc.bits));
+
+	for (i = 0; i < 4; i++)
+		for (j = 0; j < 2; j++)
+			for (k = 0; k < 2; k++)
+				for (l = 0; l < 6; l++) {
+					unsigned int m;
+
+					for (m = 0; m < 6; m++)
+						memcpy(probs->coeff[i][j][k][l][m],
+						       p->coef[i][j][k][l][m], 3);
+				}
+}
+
+static void nvdec_vp9_fill_tile_sizes(void *mem, const struct nvdec_vp9_request *r)
+{
+	unsigned int cols = 1U << r->tile_cols_log2;
+	unsigned int rows = 1U << r->tile_rows_log2;
+	unsigned int sb_cols = DIV_ROUND_UP(r->width, NVDEC_VP9_SB_SIZE);
+	unsigned int sb_rows = DIV_ROUND_UP(r->height, NVDEC_VP9_SB_SIZE);
+	__le16 *sizes = mem;
+	unsigned int i, j, n = 0;
+
+	memset(mem, 0, NVDEC_VP9_TILES_SIZE);
+	for (i = 0; i < rows; i++) {
+		for (j = 0; j < cols; j++) {
+			sizes[n++] = cpu_to_le16((sb_cols * (j + 1) >> r->tile_cols_log2) -
+						 (sb_cols * j >> r->tile_cols_log2));
+			sizes[n++] = cpu_to_le16((sb_rows * (i + 1) >> r->tile_rows_log2) -
+						 (sb_rows * i >> r->tile_rows_log2));
+		}
+	}
+	sizes[NVDEC_VP9_TILES_MAGIC] = cpu_to_le16(9);
+	sizes[NVDEC_VP9_TILES_MAGIC + 1] = cpu_to_le16(1);
+}
+
+/* No V4L2 control carries these; 6.2 setup_compound_reference_mode() does. */
+static void nvdec_vp9_compound_refs(const struct nvdec_vp9_request *r,
+				    u8 *fixed, u8 *var)
+{
+	const u8 *bias = r->sign_bias;
+
+	if (bias[0] == bias[1] && bias[0] == bias[2]) {
+		*fixed = 0;
+		var[0] = 0;
+		var[1] = 0;
+	} else if (bias[0] == bias[1]) {
+		*fixed = 3;
+		var[0] = 1;
+		var[1] = 2;
+	} else if (bias[0] == bias[2]) {
+		*fixed = 2;
+		var[0] = 1;
+		var[1] = 3;
+	} else {
+		*fixed = 1;
+		var[0] = 2;
+		var[1] = 3;
+	}
+}
+
+static void nvdec_vp9_fill_setup(struct nvdec_decode_job *hjob)
+{
+	const struct nvdec_vp9_request *r = &hjob->vp9;
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	struct nvdec_vp9_setup *setup = hjob->state->cpu;
+	u8 fixed_ref, var_ref[2];
+	unsigned int i;
+	u32 word;
+
+	memset(setup, 0, sizeof(*setup));
+	setup->stream_len = cpu_to_le32(r->output_payload_size);
+	setup->bsd_control_offset =
+		cpu_to_le32(ALIGN(r->coded_height, NVDEC_VP9_SB_SIZE) *
+			    NVDEC_VP9_BSD_PER_ROW / SZ_256);
+
+	/* The surface pool is per context, so no reference can be scaled. */
+	for (i = 0; i < NVDEC_VP9_REFS; i++) {
+		setup->ref[i].width = cpu_to_le16(r->width);
+		setup->ref[i].height = cpu_to_le16(r->height);
+		setup->ref[i].stride[0] = cpu_to_le16(r->luma_stride);
+		setup->ref[i].stride[1] = cpu_to_le16(r->luma_stride);
+	}
+	setup->width = cpu_to_le16(r->width);
+	setup->height = cpu_to_le16(r->height);
+	setup->framestride[0] = cpu_to_le16(r->luma_stride);
+	setup->framestride[1] = cpu_to_le16(r->luma_stride);
+
+	word = 0;
+	if (r->flags & NVDEC_VP9_REQ_KEY_FRAME)
+		word |= NVDEC_VP9_PIC_KEY_FRAME;
+	if (r->flags & NVDEC_VP9_REQ_PREV_KEY_FRAME)
+		word |= NVDEC_VP9_PIC_PREV_KEY_FRAME;
+	if (r->flags & NVDEC_VP9_REQ_ERROR_RESILIENT)
+		word |= NVDEC_VP9_PIC_ERROR_RESILIENT;
+	if (r->flags & NVDEC_VP9_REQ_PREV_SHOW_FRAME)
+		word |= NVDEC_VP9_PIC_PREV_SHOW_FRAME;
+	if (r->flags & NVDEC_VP9_REQ_INTRA_ONLY)
+		word |= NVDEC_VP9_PIC_INTRA_ONLY;
+	setup->picture_flags = cpu_to_le32(word);
+
+	for (i = 0; i < NVDEC_VP9_REFS; i++)
+		setup->ref_frame_sign_bias[i + 1] = r->sign_bias[i];
+
+	setup->loop_filter_level = r->lf_level;
+	setup->loop_filter_sharpness = r->lf_sharpness;
+	setup->qp_y_ac = r->base_q_idx;
+	setup->qp_y_dc = r->delta_q_y_dc;
+	setup->qp_ch_dc = r->delta_q_uv_dc;
+	setup->qp_ch_ac = r->delta_q_uv_ac;
+
+	setup->lossless = !!(r->flags & NVDEC_VP9_REQ_LOSSLESS);
+	setup->transform_mode = r->tx_mode;
+	setup->allow_high_precision_mv = !!(r->flags & NVDEC_VP9_REQ_HIGH_PREC_MV);
+	/* The firmware orders SMOOTH before EIGHTTAP; the spec is the reverse. */
+	setup->mcomp_filter_type = r->interpolation_filter ^
+				   (r->interpolation_filter <= 1);
+	setup->comp_pred_mode = r->reference_mode;
+	nvdec_vp9_compound_refs(r, &fixed_ref, var_ref);
+	setup->comp_fixed_ref = fixed_ref;
+	setup->comp_var_ref[0] = var_ref[0];
+	setup->comp_var_ref[1] = var_ref[1];
+	setup->log2_tile_columns = r->tile_cols_log2;
+	setup->log2_tile_rows = r->tile_rows_log2;
+
+	setup->segment_enabled = !!(r->flags & NVDEC_VP9_REQ_SEG_ENABLED);
+	setup->segment_map_update = !!(r->flags & NVDEC_VP9_REQ_SEG_UPDATE_MAP);
+	setup->segment_map_temporal_update =
+		!!(r->flags & NVDEC_VP9_REQ_SEG_TEMPORAL);
+	setup->segment_feature_mode = !!(r->flags & NVDEC_VP9_REQ_SEG_ABS_DELTA);
+	for (i = 0; i < 8; i++) {
+		unsigned int j;
+
+		for (j = 0; j < 4; j++) {
+			setup->segment_feature_enable[i][j] =
+				!!(r->seg_feature_enabled[i] & BIT(j));
+			setup->segment_feature_data[i][j] =
+				cpu_to_le16(r->seg_feature_data[i][j]);
+		}
+	}
+	setup->mode_ref_lf_enabled = !!(r->flags & NVDEC_VP9_REQ_LF_DELTA_ENABLED);
+	memcpy(setup->mb_ref_lf_delta, r->lf_ref_deltas,
+	       sizeof(setup->mb_ref_lf_delta));
+	memcpy(setup->mb_mode_lf_delta, r->lf_mode_deltas,
+	       sizeof(setup->mb_mode_lf_delta));
+
+	nvdec_vp9_fill_probs(hjob->state->cpu + NVDEC_VP9_PROBS_OFFSET, r);
+	nvdec_vp9_fill_tile_sizes(hjob->state->cpu + NVDEC_VP9_TILES_OFFSET, r);
+	memset(ctx->counts->cpu, 0, sizeof(struct nvdec_vp9_counts));
+}
+
+static int nvdec_vp9_prepare_scratch(struct nvdec_decode_context *ctx,
+				     const struct nvdec_vp9_request *request)
+{
+	u32 aligned_height, superblocks, segment, filter, colmv, offset, size;
+	struct nvdec_engine_map *scratch;
+	struct nvdec_buffer *counts;
+
+	if (ctx->scratch) {
+		if (ctx->coded_width != request->coded_width ||
+		    ctx->coded_height != request->coded_height)
+			return -EBUSY;
+		return 0;
+	}
+
+	aligned_height = ALIGN(request->coded_height, NVDEC_VP9_SB_SIZE);
+	superblocks = (request->coded_width / NVDEC_VP9_SB_SIZE) *
+		      (aligned_height / NVDEC_VP9_SB_SIZE);
+	segment = ALIGN(superblocks * 32, SZ_256);
+	filter = aligned_height * NVDEC_VP9_FILTER_PER_ROW;
+	colmv = superblocks * SZ_1K;
+
+	offset = 0;
+	ctx->seg_read_offset = offset;
+	offset += segment;
+	ctx->seg_write_offset = offset;
+	offset += segment;
+	ctx->filter_offset = offset;
+	offset = ALIGN(offset + filter, SZ_256);
+	ctx->colmv_offset[0] = offset;
+	offset += colmv;
+	ctx->colmv_offset[1] = offset;
+	size = ALIGN(offset + colmv, SZ_4K);
+
+	counts = nvdec_buffer_alloc(ctx->engine,
+				    ALIGN(sizeof(struct nvdec_vp9_counts), SZ_256));
+	if (IS_ERR(counts))
+		return PTR_ERR(counts);
+	scratch = nvdec_engine_surface_create(ctx->engine, size);
+	if (IS_ERR(scratch)) {
+		nvdec_buffer_put(&counts->bo);
+		return PTR_ERR(scratch);
+	}
+	if (upper_32_bits(counts->iova) || upper_32_bits(scratch->iova)) {
+		nvdec_engine_map_put(scratch);
+		nvdec_buffer_put(&counts->bo);
+		return -ERANGE;
+	}
+
+	ctx->counts = counts;
+	ctx->scratch = scratch;
+	ctx->coded_width = request->coded_width;
+	ctx->coded_height = request->coded_height;
+	ctx->frame_parity = 0;
+	return 0;
+}
+
+static int nvdec_vp9_validate_request(struct device *dev,
+				      const struct nvdec_vp9_request *request,
+				      const struct nvdec_engine_map *surface,
+				      const struct nvdec_engine_map *capture,
+				      struct nvdec_engine_map * const refs[])
+{
+	u32 luma_size, chroma_size, surface_size, dst_size, tiles;
+	unsigned int i;
+
+	dev_dbg(dev,
+		"vp9 request: %ux%u coded=%ux%u crop=%ux%u flags=0x%x q=%u tx=%u refmode=%u filter=%u tiles=%u/%u stride=%u coff=%u payload=%u\n",
+		request->width, request->height, request->coded_width,
+		request->coded_height, request->crop_width, request->crop_height,
+		request->flags, request->base_q_idx, request->tx_mode,
+		request->reference_mode, request->interpolation_filter,
+		request->tile_cols_log2, request->tile_rows_log2,
+		request->luma_stride, request->chroma_offset,
+		request->output_payload_size);
+
+	if (!request->width || !request->height ||
+	    request->width > request->coded_width ||
+	    request->height > request->coded_height ||
+	    request->coded_width > 4096 || request->coded_height > 4096 ||
+	    !IS_ALIGNED(request->coded_width, NVDEC_VP9_SB_SIZE) ||
+	    !IS_ALIGNED(request->coded_height, NVDEC_VP9_SB_SIZE) ||
+	    !request->output_payload_size ||
+	    request->tx_mode > V4L2_VP9_TX_MODE_SELECT ||
+	    request->reference_mode > V4L2_VP9_REFERENCE_MODE_SELECT ||
+	    request->interpolation_filter > V4L2_VP9_INTERP_FILTER_SWITCHABLE ||
+	    request->base_q_idx > 255 ||
+	    !IS_ALIGNED(request->luma_stride, 16)) {
+		dev_dbg(dev, "vp9 reject: syntax\n");
+		return -EINVAL;
+	}
+
+	tiles = (1U << request->tile_cols_log2) * (1U << request->tile_rows_log2);
+	if (request->tile_cols_log2 > 6 || request->tile_rows_log2 > 2 ||
+	    tiles * 2 * sizeof(__le16) > NVDEC_VP9_TILES_MAGIC * sizeof(__le16)) {
+		dev_dbg(dev, "vp9 reject: tiles\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow((u32)request->luma_stride,
+			       (u32)ALIGN(request->coded_height, 32), &luma_size) ||
+	    check_mul_overflow((u32)request->luma_stride,
+			       (u32)ALIGN(request->coded_height / 2, 16),
+			       &chroma_size) ||
+	    check_add_overflow(request->chroma_offset, chroma_size, &surface_size) ||
+	    request->chroma_offset < luma_size ||
+	    !nvdec_map_is_valid(surface, DMA_BIDIRECTIONAL, surface_size)) {
+		dev_dbg(dev, "vp9 reject: surface geometry/map\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow(request->dst_stride,
+			       (u32)request->crop_height / 2, &dst_size) ||
+	    check_add_overflow(request->dst_chroma_offset, dst_size, &dst_size) ||
+	    !request->crop_width || !request->crop_height ||
+	    (request->crop_width | request->crop_height |
+	     request->crop_left | request->crop_top) & 1 ||
+	    request->crop_left + request->crop_width > request->coded_width ||
+	    request->crop_top + request->crop_height > request->coded_height ||
+	    request->dst_chroma_offset < request->dst_stride *
+					 (u32)request->crop_height ||
+	    !IS_ALIGNED(request->dst_stride, SZ_256) ||
+	    request->dst_stride < request->crop_width ||
+	    !nvdec_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
+		dev_dbg(dev, "vp9 reject: detile destination\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < NVDEC_VP9_REFS; i++) {
+		if (refs[i] &&
+		    !nvdec_map_is_valid(refs[i], DMA_TO_DEVICE, surface_size)) {
+			dev_dbg(dev, "vp9 reject: reference %u\n", i);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static int nvdec_vp9_build_gather(struct nvdec_decode_job *hjob)
+{
+	struct nvdec_engine_map *pictures[NVDEC_VP9_REFS + 1];
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	u32 *gather = hjob->gather->cpu;
+	unsigned int i, word = 0;
+	u32 syncpt_id, write, read;
+	int err;
+
+	/* Slots are roles, not pinned indices: last, golden, altref, current. */
+	for (i = 0; i < NVDEC_VP9_REFS; i++)
+		pictures[i] = hjob->dpb[i] ?: hjob->surface;
+	pictures[NVDEC_VP9_REFS] = hjob->surface;
+
+	write = ctx->colmv_offset[ctx->frame_parity];
+	read = ctx->colmv_offset[!ctx->frame_parity];
+
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_APPLICATION, 9);
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_CONTROL, 0x59);
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_PICTURE_INDEX,
+			  NVDEC_VP9_REFS);
+	err = nvdec_emit_address(gather, &word, NVDEC_METHOD_SETUP,
+				 hjob->state->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_INPUT,
+					 hjob->input->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_STATUS,
+					 hjob->state->iova +
+					 NVDEC_VP9_STATUS_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_PROB_TAB,
+					 hjob->state->iova +
+					 NVDEC_VP9_PROBS_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_CTX_COUNTER,
+					 ctx->counts->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_TILE_SIZE,
+					 hjob->state->iova +
+					 NVDEC_VP9_TILES_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_COL_MVWRITE,
+					 hjob->scratch->iova + write);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_COL_MVREAD,
+					 hjob->scratch->iova + read);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_SEGMENT_READ,
+					 hjob->scratch->iova + ctx->seg_read_offset);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_SEGMENT_WRITE,
+					 hjob->scratch->iova + ctx->seg_write_offset);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_VP9_METHOD_FILTER,
+					 hjob->scratch->iova + ctx->filter_offset);
+	for (i = 0; !err && i < NVDEC_VP9_REFS + 1; i++) {
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_LUMA + i,
+					 pictures[i]->iova);
+		if (!err)
+			err = nvdec_emit_address(gather, &word,
+						 NVDEC_METHOD_CHROMA + i,
+						 pictures[i]->iova +
+						 hjob->vp9.chroma_offset);
+	}
+	if (err)
+		return err;
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_EXECUTE, 0x100);
+	if (WARN_ON_ONCE(word != NVDEC_VP9_GATHER_WORDS))
+		return -EINVAL;
+
+	syncpt_id = host1x_syncpt_id(ctx->engine->client.base.syncpts[0]);
+	gather[word++] = 0x20000001;
+	gather[word++] = syncpt_id | 0x100;
+
+	err = vic_engine_emit_detile(gather, &word,
+				     hjob->state->iova +
+				     NVDEC_VP9_VIC_CONFIG_OFFSET,
+				     hjob->surface->iova,
+				     hjob->surface->iova + hjob->vp9.chroma_offset,
+				     hjob->capture->iova,
+				     hjob->capture->iova +
+				     hjob->vp9.dst_chroma_offset);
+	if (err)
+		return err;
+
+	gather[word++] = 0x20000001;
+	gather[word++] = syncpt_id | 0x100;
+	WARN_ON_ONCE(word != NVDEC_VP9_TOTAL_GATHER_WORDS);
+
+	print_hex_dump_debug("nvdec vp9 setup: ", DUMP_PREFIX_OFFSET, 16, 4,
+			     hjob->state->cpu, NVDEC_VP9_SETUP_SIZE, false);
+	return 0;
+}
+
+/* Only the inter-mode tree and the TX16 row stride need converting. */
+int nvdec_engine_vp9_counts(struct nvdec_decode_context *ctx,
+			    struct v4l2_vp9_frame_symbol_counts *counts)
+{
+	unsigned int i, j, k, l, m;
+	struct nvdec_vp9_counts *c;
+
+	if (!ctx || !counts || ctx->codec != NVDEC_CODEC_VP9 || !ctx->counts)
+		return -EINVAL;
+
+	c = ctx->counts->cpu;
+	/* The firmware counts the three nodes of the inter-mode tree. */
+	for (i = 0; i < 7; i++) {
+		ctx->mv_mode[i][0] = c->inter_mode[i][1][0];
+		ctx->mv_mode[i][1] = c->inter_mode[i][2][0];
+		ctx->mv_mode[i][2] = c->inter_mode[i][0][0];
+		ctx->mv_mode[i][3] = c->inter_mode[i][2][1];
+	}
+	/* Same values as tx16x16, but V4L2 indexes rows of four. */
+	for (i = 0; i < 2; i++)
+		for (j = 0; j < 3; j++)
+			ctx->tx16p[i][j] = c->tx16x16[i][j];
+
+	counts->partition = &c->partition;
+	counts->skip = &c->skip;
+	counts->intra_inter = &c->intra_inter;
+	counts->tx32p = &c->tx32x32;
+	counts->tx16p = &ctx->tx16p;
+	counts->tx8p = &c->tx8x8;
+	counts->y_mode = &c->y_mode;
+	counts->uv_mode = &c->uv_mode;
+	counts->comp = &c->comp_inter;
+	counts->comp_ref = &c->comp_ref;
+	counts->single_ref = &c->single_ref;
+	counts->mv_mode = &ctx->mv_mode;
+	counts->filter = &c->interp_filter;
+	counts->mv_joint = &c->mv.joints;
+	counts->sign = &c->mv.sign;
+	counts->classes = &c->mv.classes;
+	counts->class0 = &c->mv.class0;
+	counts->bits = &c->mv.bits;
+	counts->class0_fp = &c->mv.class0_fp;
+	counts->fp = &c->mv.fp;
+	counts->class0_hp = &c->mv.class0_hp;
+	counts->hp = &c->mv.hp;
+
+	for (i = 0; i < 4; i++)
+		for (j = 0; j < 2; j++)
+			for (k = 0; k < 2; k++)
+				for (l = 0; l < 6; l++)
+					for (m = 0; m < 6; m++) {
+						counts->coeff[i][j][k][l][m] =
+							(u32 (*)[3])c->coeff[i][j][k][l][m];
+						counts->eob[i][j][k][l][m][0] =
+							&c->eob[i][j][k][l][m];
+						counts->eob[i][j][k][l][m][1] =
+							&c->coeff[i][j][k][l][m][3];
+					}
+
+	return 0;
+}
+
+int nvdec_engine_vp9_submit(struct nvdec_decode_context *ctx,
+			    const struct nvdec_vp9_request *request,
+			    struct nvdec_engine_map *surface,
+			    struct nvdec_engine_map *capture,
+			    struct nvdec_engine_map * const refs[NVDEC_VP9_REFS],
+			    struct dma_fence **fence,
+			    nvdec_engine_complete_t complete, void *data)
+{
+	struct nvdec_decode_job *hjob;
+	unsigned int i;
+	int err;
+
+	if (!ctx || !request || !surface || !capture || !refs || !fence ||
+	    ctx->codec != NVDEC_CODEC_VP9)
+		return -EINVAL;
+	*fence = NULL;
+
+	mutex_lock(&ctx->lock);
+	if (ctx->in_flight) {
+		err = -EBUSY;
+		goto unlock;
+	}
+	if (!ctx->slice_count) {
+		err = -EINVAL;
+		goto unlock;
+	}
+	hjob = kzalloc_obj(*hjob);
+	if (!hjob) {
+		err = -ENOMEM;
+		goto unlock;
+	}
+	hjob->ctx = ctx;
+	kref_get(&ctx->ref);
+	hjob->vp9 = *request;
+	hjob->vp9.output_payload_size = ctx->staged;
+	hjob->complete = complete;
+	hjob->complete_data = data;
+	err = nvdec_vp9_validate_request(ctx->engine->dev, &hjob->vp9, surface,
+					 capture, refs);
+	if (err)
+		goto free_hjob;
+
+	err = nvdec_vp9_prepare_scratch(ctx, &hjob->vp9);
+	if (err)
+		goto free_hjob;
+	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
+	hjob->counts = nvdec_buffer_ref(ctx->counts);
+
+	hjob->vic = vic_engine_find(ctx->engine->client.drm);
+	if (!hjob->vic) {
+		err = -ENODEV;
+		goto free_hjob;
+	}
+	hjob->state = nvdec_buffer_alloc(ctx->engine, NVDEC_VP9_STATE_SIZE);
+	if (IS_ERR(hjob->state)) {
+		err = PTR_ERR(hjob->state);
+		hjob->state = NULL;
+		goto free_hjob;
+	}
+	hjob->input = nvdec_buffer_ref(ctx->input);
+	hjob->gather = nvdec_buffer_alloc(ctx->engine,
+					  NVDEC_VP9_TOTAL_GATHER_WORDS * sizeof(u32));
+	if (IS_ERR(hjob->gather)) {
+		err = PTR_ERR(hjob->gather);
+		hjob->gather = NULL;
+		goto free_hjob;
+	}
+	if (upper_32_bits(hjob->state->iova) || upper_32_bits(hjob->input->iova) ||
+	    upper_32_bits(hjob->gather->iova)) {
+		err = -ERANGE;
+		goto free_hjob;
+	}
+
+	hjob->surface = nvdec_engine_map_get(surface);
+	hjob->capture = nvdec_engine_map_get(capture);
+	for (i = 0; i < NVDEC_VP9_REFS; i++) {
+		if (refs[i])
+			hjob->dpb[i] = nvdec_engine_map_get(refs[i]);
+	}
+	hjob->fence = nvdec_fence_create(ctx->engine);
+	if (IS_ERR(hjob->fence)) {
+		err = PTR_ERR(hjob->fence);
+		hjob->fence = NULL;
+		goto free_hjob;
+	}
+	err = nvdec_install_fences(hjob);
+	if (err)
+		goto free_hjob;
+
+	nvdec_vp9_fill_setup(hjob);
+	vic_engine_fill_detile_config(hjob->state->cpu + NVDEC_VP9_VIC_CONFIG_OFFSET,
+				      &(struct vic_detile_params){
+					.width = hjob->vp9.coded_width,
+					.height = hjob->vp9.coded_height,
+					.left = hjob->vp9.crop_left,
+					.top = hjob->vp9.crop_top,
+					.out_width = hjob->vp9.crop_width,
+					.out_height = hjob->vp9.crop_height,
+					.src_stride = hjob->vp9.luma_stride,
+					.dst_stride = hjob->vp9.dst_stride,
+				      });
+	err = nvdec_vp9_build_gather(hjob);
+	if (err)
+		goto free_hjob;
+
+	err = nvdec_launch_job(hjob, NVDEC_VP9_GATHER_WORDS,
+			       NVDEC_VP9_VIC_OFFSET, fence);
+	if (err)
+		goto free_hjob;
+
+	/* Colocated alternates per frame; the segment map only after a write. */
+	ctx->frame_parity = !ctx->frame_parity;
+	if (hjob->vp9.flags & NVDEC_VP9_REQ_SEG_UPDATE_MAP)
+		swap(ctx->seg_read_offset, ctx->seg_write_offset);
 	mutex_unlock(&ctx->lock);
 	return 0;
 
