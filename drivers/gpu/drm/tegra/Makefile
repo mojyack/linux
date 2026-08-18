@@ -24,6 +24,7 @@ tegra-drm-y := \
 	gr3d.o \
 	falcon.o \
 	vic.o \
+	nvdec-engine.o \
 	nvdec.o \
 	nvjpg.o \
 	riscv.o
