@@ -207,9 +207,35 @@ struct nvdec_hevc_request {
 #define NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION	BIT(19)
 #define NVDEC_HEVC_PPS_UNIFORM_SPACING		BIT(20)
 
+/* Golden, altref and last; the current picture takes the fourth slot. */
+#define NVDEC_VP8_REFS		3
+
+/* Copied, validated VP8 state. This is not a V4L2 control layout. */
+struct nvdec_vp8_request {
+	u16 coded_width;
+	u16 coded_height;
+	/* Visible rectangle VIC detiles out of the coded picture. */
+	u16 crop_left;
+	u16 crop_top;
+	u16 crop_width;
+	u16 crop_height;
+	u16 luma_stride;
+	u8 version;
+	u8 flags;
+	u32 chroma_offset;
+	u32 dst_stride;
+	u32 dst_chroma_offset;
+	u32 first_part_size;
+	u32 output_payload_size;
+};
+
+#define NVDEC_VP8_REQ_KEY_FRAME		BIT(0)
+#define NVDEC_VP8_REQ_SEGMENT_UPDATE	BIT(1)
+
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
 	NVDEC_CODEC_HEVC,
+	NVDEC_CODEC_VP8,
 };
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,
@@ -282,6 +308,13 @@ int nvdec_engine_hevc_submit(struct nvdec_decode_context *ctx,
 			     struct nvdec_engine_map * const dpb[NVDEC_HEVC_DPB_ENTRIES],
 			     struct dma_fence **fence,
 			     nvdec_engine_complete_t complete, void *data);
+int nvdec_engine_vp8_submit(struct nvdec_decode_context *ctx,
+			    const struct nvdec_vp8_request *request,
+			    struct nvdec_engine_map *surface,
+			    struct nvdec_engine_map *capture,
+			    struct nvdec_engine_map * const refs[NVDEC_VP8_REFS],
+			    struct dma_fence **fence,
+			    nvdec_engine_complete_t complete, void *data);
 
 extern const struct dev_pm_ops nvdec_engine_pm_ops;
 extern const struct of_device_id nvdec_engine_of_match[];

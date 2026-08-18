@@ -33,6 +33,7 @@ static const struct nvdec_codec_size {
 } nvdec_codec_sizes[] = {
 	{ V4L2_PIX_FMT_H264_SLICE,   48,  16, 16 },
 	{ V4L2_PIX_FMT_HEVC_SLICE,  129, 129, NVDEC_HEVC_CTU_SIZE },
+	{ V4L2_PIX_FMT_VP8_FRAME,    48,  16, 16 },
 };
 
 static const struct nvdec_codec_size *nvdec_codec_size(u32 pixelformat)
@@ -71,6 +72,7 @@ struct nvdec_v4l2_ctx {
 	/* Picture being assembled; slices of one picture share it. */
 	struct nvdec_h264_request picture;
 	struct nvdec_hevc_request hevc;
+	struct nvdec_vp8_request vp8;
 	u32 last_first_mb;
 };
 
@@ -147,6 +149,11 @@ static const struct v4l2_ctrl_config nvdec_hevc_ctrls[] = {
 		.min = V4L2_MPEG_VIDEO_HEVC_LEVEL_1,
 		.max = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1,
 	},
+};
+
+/* The firmware parses the frame header, so one control is the whole ABI. */
+static const struct v4l2_ctrl_config nvdec_vp8_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_VP8_FRAME },
 };
 
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
@@ -618,16 +625,19 @@ static int nvdec_capture_surface(struct nvdec_v4l2_ctx *ctx,
 
 static int nvdec_map_buffer(struct nvdec_v4l2_ctx *ctx, struct vb2_buffer *vb,
 			    enum dma_data_direction direction,
+			    unsigned long offset,
 			    struct nvdec_engine_map **result)
 {
 	struct dma_buf *dmabuf;
 	struct nvdec_engine_map *map;
 
+	if (offset >= vb2_plane_size(vb, 0))
+		return -EINVAL;
 	dmabuf = nvdec_plane_dmabuf(vb);
 	if (!dmabuf)
 		return -ENOMEM;
-	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf, 0,
-				      vb2_plane_size(vb, 0), direction);
+	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf, offset,
+				      vb2_plane_size(vb, 0) - offset, direction);
 	dma_buf_put(dmabuf);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
@@ -1053,6 +1063,87 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx)
 	return 0;
 }
 
+static int nvdec_validate_vp8_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	const struct v4l2_ctrl_vp8_frame *frame;
+	const char *why;
+
+	if (!nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_VP8_FRAME)) {
+		why = "the frame control is missing from the request";
+		goto reject;
+	}
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	if (!frame) {
+		why = "control handler lookup failed";
+		goto reject;
+	}
+
+	if (frame->version > 3) {
+		why = "unsupported bitstream version";
+		goto reject;
+	}
+
+	/* The decoded picture is the coded size; there is no upscaler. */
+	if (frame->horizontal_scale || frame->vertical_scale) {
+		why = "upscaling is not supported";
+		goto reject;
+	}
+
+	if (ALIGN(frame->width, 16) != coded->width ||
+	    ALIGN(frame->height, 16) != coded->height) {
+		why = "frame dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	if (!frame->first_part_size) {
+		why = "empty first partition";
+		goto reject;
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "vp8 reject: %s\n", why);
+	return -EINVAL;
+}
+
+/* The firmware re-parses the header, so little of the control is used. */
+static int nvdec_snapshot_vp8_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *pix = &ctx->capture_fmt.fmt.pix_mp;
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	struct nvdec_vp8_request *request = &ctx->vp8;
+	const struct v4l2_ctrl_vp8_frame *frame;
+
+	if (nvdec_validate_vp8_request(ctx))
+		return -EINVAL;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+
+	memset(request, 0, sizeof(*request));
+	request->coded_width = coded->width;
+	request->coded_height = coded->height;
+	request->crop_left = ctx->crop.left;
+	request->crop_top = ctx->crop.top;
+	request->crop_width = ctx->crop.width;
+	request->crop_height = ctx->crop.height;
+	request->luma_stride = nvdec_surface_stride(ctx);
+	request->chroma_offset = nvdec_surface_chroma_offset(ctx);
+	request->dst_stride = pix->plane_fmt[0].bytesperline;
+	request->dst_chroma_offset = request->dst_stride * pix->height;
+	request->version = frame->version;
+	request->first_part_size = frame->first_part_size;
+	if (frame->flags & V4L2_VP8_FRAME_FLAG_KEY_FRAME)
+		request->flags |= NVDEC_VP8_REQ_KEY_FRAME;
+	if ((frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_ENABLED) &&
+	    (frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_UPDATE_FEATURE_DATA))
+		request->flags |= NVDEC_VP8_REQ_SEGMENT_UPDATE;
+
+	return 0;
+}
+
 static void nvdec_job_cleanup_maps(struct nvdec_v4l2_job *job)
 {
 	unsigned int i;
@@ -1087,19 +1178,28 @@ static void nvdec_job_complete(void *data, bool error)
 static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 			     struct vb2_v4l2_buffer *src, bool first)
 {
-	/* HEVC stages a whole picture at once; H.264 one slice at a time. */
-	unsigned int max_slices = ctx->codec == NVDEC_CODEC_HEVC ? 1 :
+	/* Only H.264 stages one slice at a time; the others a whole picture. */
+	unsigned int max_slices = ctx->codec != NVDEC_CODEC_H264 ? 1 :
 		ctx->picture.pic_width_in_mbs * ctx->picture.frame_height_in_mbs;
+	u32 payload = vb2_get_plane_payload(&src->vb2_buf, 0);
 	struct nvdec_engine_map *output;
+	unsigned long offset = 0;
 	int err;
 
-	err = nvdec_map_buffer(ctx, &src->vb2_buf, DMA_TO_DEVICE, &output);
+	/* VP8 reaches the firmware without its uncompressed data chunk. */
+	if (ctx->codec == NVDEC_CODEC_VP8) {
+		offset = ctx->vp8.flags & NVDEC_VP8_REQ_KEY_FRAME ? 10 : 3;
+		if (payload <= offset)
+			return -EINVAL;
+		payload -= offset;
+	}
+
+	err = nvdec_map_buffer(ctx, &src->vb2_buf, DMA_TO_DEVICE, offset, &output);
 	if (err)
 		return err;
 	err = nvdec_engine_map_wait(output, false);
 	if (!err)
-		err = nvdec_engine_stage_slice(ctx->decode, output,
-					       vb2_get_plane_payload(&src->vb2_buf, 0),
+		err = nvdec_engine_stage_slice(ctx->decode, output, payload,
 					       first, max_slices);
 	nvdec_engine_map_put(output);
 	return err;
@@ -1137,6 +1237,22 @@ static int nvdec_resolve_dpb(struct nvdec_v4l2_ctx *ctx,
 			if (err)
 				return err;
 		}
+
+		return 0;
+	}
+
+	/* VP8 slots are roles, not DPB entries: golden, altref, last. */
+	if (ctx->codec == NVDEC_CODEC_VP8) {
+		const struct v4l2_ctrl_vp8_frame *frame =
+			nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+		const u64 timestamps[NVDEC_VP8_REFS] = {
+			frame->golden_frame_ts, frame->alt_frame_ts,
+			frame->last_frame_ts,
+		};
+
+		/* A reference the client does not name is the current picture. */
+		for (i = 0; i < NVDEC_VP8_REFS; i++)
+			nvdec_pin_reference(ctx, job, i, timestamps[i]);
 
 		return 0;
 	}
@@ -1181,6 +1297,9 @@ static void nvdec_device_run(void *priv)
 		/* Frame-based: one request carries the whole picture. */
 		first = true;
 		err = nvdec_snapshot_hevc_request(ctx);
+	} else if (ctx->codec == NVDEC_CODEC_VP8) {
+		first = true;
+		err = nvdec_snapshot_vp8_request(ctx);
 	} else {
 		/* A picture starts at macroblock zero; m2m's new_frame is unreliable. */
 		slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
@@ -1215,7 +1334,8 @@ static void nvdec_device_run(void *priv)
 	err = nvdec_capture_surface(ctx, &dst->vb2_buf, &job->surface);
 	if (err)
 		goto free_job;
-	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, &job->capture);
+	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, 0,
+			       &job->capture);
 	if (err)
 		goto free_job;
 	err = nvdec_resolve_dpb(ctx, job);
@@ -1229,16 +1349,26 @@ static void nvdec_device_run(void *priv)
 	if (err)
 		goto free_job;
 	ctx->job = job;
-	if (ctx->codec == NVDEC_CODEC_HEVC)
+	switch (ctx->codec) {
+	case NVDEC_CODEC_HEVC:
 		err = nvdec_engine_hevc_submit(ctx->decode, &ctx->hevc,
 					       job->surface->map, job->capture,
 					       job->dpb, &job->fence,
 					       nvdec_job_complete, job);
-	else
+		break;
+	case NVDEC_CODEC_VP8:
+		err = nvdec_engine_vp8_submit(ctx->decode, &ctx->vp8,
+					      job->surface->map, job->capture,
+					      job->dpb, &job->fence,
+					      nvdec_job_complete, job);
+		break;
+	default:
 		err = nvdec_engine_h264_submit(ctx->decode, &ctx->picture,
 					       job->surface->map, job->capture,
 					       job->dpb, &job->fence,
 					       nvdec_job_complete, job);
+		break;
+	}
 	if (err) {
 		ctx->job = NULL;
 		goto free_job;
@@ -1301,6 +1431,7 @@ static int nvdec_enum_fmt(struct file *file, void *priv,
 	static const u32 coded[] = {
 		V4L2_PIX_FMT_H264_SLICE,
 		V4L2_PIX_FMT_HEVC_SLICE,
+		V4L2_PIX_FMT_VP8_FRAME,
 	};
 
 	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
@@ -1346,9 +1477,12 @@ static int nvdec_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	if (err)
 		return err;
 	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
-		enum nvdec_codec codec =
-			f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_HEVC_SLICE ?
-			NVDEC_CODEC_HEVC : NVDEC_CODEC_H264;
+		enum nvdec_codec codec = NVDEC_CODEC_H264;
+
+		if (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_HEVC_SLICE)
+			codec = NVDEC_CODEC_HEVC;
+		else if (f->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_VP8_FRAME)
+			codec = NVDEC_CODEC_VP8;
 
 		if (vb2_is_busy(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx)))
 			return -EBUSY;
@@ -1492,7 +1626,8 @@ static int nvdec_open(struct file *file)
 	}
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
 	v4l2_ctrl_handler_init(&ctx->ctrl_hdl, ARRAY_SIZE(nvdec_h264_ctrls) +
-			       ARRAY_SIZE(nvdec_hevc_ctrls));
+			       ARRAY_SIZE(nvdec_hevc_ctrls) +
+			       ARRAY_SIZE(nvdec_vp8_ctrls));
 	for (i = 0; i < ARRAY_SIZE(nvdec_h264_ctrls); i++) {
 		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &nvdec_h264_ctrls[i], NULL);
 		if (ctx->ctrl_hdl.error)
@@ -1500,6 +1635,11 @@ static int nvdec_open(struct file *file)
 	}
 	for (i = 0; i < ARRAY_SIZE(nvdec_hevc_ctrls); i++) {
 		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &nvdec_hevc_ctrls[i], NULL);
+		if (ctx->ctrl_hdl.error)
+			goto free_ctrls;
+	}
+	for (i = 0; i < ARRAY_SIZE(nvdec_vp8_ctrls); i++) {
+		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &nvdec_vp8_ctrls[i], NULL);
 		if (ctx->ctrl_hdl.error)
 			goto free_ctrls;
 	}

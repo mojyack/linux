@@ -65,6 +65,7 @@
 #define NVDEC_HEVC_METHOD_SCALING_LIST		0x160
 #define NVDEC_HEVC_METHOD_TILE_SIZES		0x161
 #define NVDEC_HEVC_METHOD_FILTER		0x162
+#define NVDEC_VP8_METHOD_PROB_DATA		0x150
 
 #define NVDEC_HEVC_SETUP_SIZE			0x114
 #define NVDEC_HEVC_STATUS_OFFSET		0x200
@@ -79,6 +80,22 @@
 #define NVDEC_HEVC_TOTAL_GATHER_WORDS		(NVDEC_HEVC_VIC_OFFSET + \
 						 VIC_DETILE_WORDS + \
 						 NVDEC_DONE_WORDS)
+
+#define NVDEC_VP8_SETUP_SIZE			0xc0
+#define NVDEC_VP8_STATUS_OFFSET		0x100
+#define NVDEC_VP8_VIC_CONFIG_OFFSET		0x400
+#define NVDEC_VP8_STATE_SIZE			0x1000
+#define NVDEC_VP8_GATHER_WORDS			51
+#define NVDEC_VP8_VIC_OFFSET			(NVDEC_VP8_GATHER_WORDS + \
+						 NVDEC_DONE_WORDS)
+#define NVDEC_VP8_TOTAL_GATHER_WORDS		(NVDEC_VP8_VIC_OFFSET + \
+						 VIC_DETILE_WORDS + \
+						 NVDEC_DONE_WORDS)
+
+/* Firmware picture slots: golden, altref, last, current. */
+#define NVDEC_VP8_MAX_PICTURES			4
+#define NVDEC_VP8_HISTORY_PER_MB		0x200
+#define NVDEC_VP8_PROB_SIZE			0x4b00
 
 /* Per aligned luma row, as the oracle sizes them. */
 #define NVDEC_MAX_DPB_ENTRIES			NVDEC_H264_DPB_ENTRIES
@@ -269,6 +286,58 @@ static_assert(sizeof(struct nvdec_hevc_scaling_list) == 0x3f0);
 #define NVDEC_HEVC_PPS1_LOG2_PARALLEL_MERGE	GENMASK(24, 22)
 #define NVDEC_HEVC_PPS1_SLICE_HDR_EXTENSION	BIT(25)
 
+struct nvdec_vp8_setup {
+	u8 encryption[0x34];
+	__le32 gptimer_timeout_value;
+	__le16 frame_width;
+	__le16 frame_height;
+	u8 key_frame;
+	u8 version;
+	u8 surface_format;
+	u8 error_conceal_on;
+	__le32 first_part_size;
+	__le32 history_buffer_size;
+	__le32 vld_buffer_size;
+	__le32 framestride[2];
+	__le32 luma_top_offset;
+	__le32 luma_bot_offset;
+	__le32 luma_frame_offset;
+	__le32 chroma_top_offset;
+	__le32 chroma_bot_offset;
+	__le32 chroma_frame_offset;
+	u8 display[0x1c];
+	u8 current_output_memory_layout;
+	u8 output_memory_layout[3];
+	u8 segmentation_feature_data_update;
+	u8 reserved1[3];
+	__le32 result_value;
+	__le32 partition_offset[8];
+	u8 ssm[0xc];
+};
+
+static_assert(offsetof(struct nvdec_vp8_setup, frame_width) == 0x38);
+static_assert(offsetof(struct nvdec_vp8_setup, first_part_size) == 0x40);
+static_assert(offsetof(struct nvdec_vp8_setup, framestride) == 0x4c);
+static_assert(offsetof(struct nvdec_vp8_setup, display) == 0x6c);
+static_assert(offsetof(struct nvdec_vp8_setup, segmentation_feature_data_update) == 0x8c);
+static_assert(sizeof(struct nvdec_vp8_setup) == NVDEC_VP8_SETUP_SIZE);
+
+/* The entropy context the firmware reads, updates and writes back. */
+struct nvdec_vp8_probs {
+	u8 coeff[4][8][3][12];
+	u8 y_mode[4];
+	u8 uv_mode[4];
+	u8 mv[2][20];
+	u8 reserved[0x1c];
+};
+
+static_assert(offsetof(struct nvdec_vp8_probs, y_mode) == 0x480);
+static_assert(offsetof(struct nvdec_vp8_probs, mv) == 0x488);
+static_assert(sizeof(struct nvdec_vp8_probs) == 0x4cc);
+
+#define NVDEC_VP8_SURFACE_TILEFORMAT		GENMASK(1, 0)
+#define NVDEC_VP8_SURFACE_GOB_HEIGHT		GENMASK(4, 2)
+
 struct nvdec_buffer {
 	struct host1x_bo bo;
 	struct kref ref;
@@ -316,6 +385,8 @@ struct nvdec_decode_context {
 	enum nvdec_codec codec;
 	struct nvdec_engine_map *scratch;
 	struct nvdec_buffer *input;
+	/* VP8 entropy context, seeded by the driver and updated by firmware. */
+	struct nvdec_buffer *probs;
 	u16 width_in_mbs;
 	u16 height_in_mbs;
 	u16 coded_width;
@@ -342,8 +413,10 @@ struct nvdec_decode_job {
 	struct nvdec_decode_context *ctx;
 	struct nvdec_h264_request request;
 	struct nvdec_hevc_request hevc;
+	struct nvdec_vp8_request vp8;
 	struct nvdec_buffer *state;
 	struct nvdec_buffer *input;
+	struct nvdec_buffer *probs;
 	struct nvdec_buffer *gather;
 	struct nvdec_engine_map *scratch;
 	struct nvdec_engine_map *surface;
@@ -1424,14 +1497,13 @@ static int nvdec_prepare_input(struct nvdec_decode_context *ctx, size_t size)
 	return 0;
 }
 
-/*
- * HEVC carries a whole picture in one payload and the firmware finds its
- * slices by scanning start codes, so staging is a copy behind one zero byte.
- */
-static int nvdec_hevc_stage(struct nvdec_decode_context *ctx,
-			    struct nvdec_engine_map *output, u32 payload_size)
+/* Only HEVC needs a lead zero byte, so its scan sees 00 00 00 01. */
+static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
+			     struct nvdec_engine_map *output, u32 payload_size)
 {
-	u32 staged = payload_size + 1;
+	bool hevc = ctx->codec == NVDEC_CODEC_HEVC;
+	u32 lead = hevc ? 1 : 0;
+	u32 staged = payload_size + lead;
 	int err;
 
 	if (staged < payload_size ||
@@ -1442,12 +1514,13 @@ static int nvdec_hevc_stage(struct nvdec_decode_context *ctx,
 	if (err)
 		return err;
 
-	*(u8 *)ctx->input->cpu = 0;
-	err = nvdec_copy_output(ctx->input, 1, output, payload_size);
+	if (lead)
+		*(u8 *)ctx->input->cpu = 0;
+	err = nvdec_copy_output(ctx->input, lead, output, payload_size);
 	if (err)
 		return err;
 
-	if (memcmp(ctx->input->cpu + 1, "\x00\x00\x01", 3))
+	if (hevc && memcmp(ctx->input->cpu + 1, "\x00\x00\x01", 3))
 		return -EINVAL;
 
 	ctx->slice_count = 1;
@@ -1467,9 +1540,9 @@ int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
 	if (!ctx || !output || payload_size < 3 || !max_slices)
 		return -EINVAL;
 
-	if (ctx->codec == NVDEC_CODEC_HEVC) {
+	if (ctx->codec != NVDEC_CODEC_H264) {
 		mutex_lock(&ctx->lock);
-		err = nvdec_hevc_stage(ctx, output, payload_size);
+		err = nvdec_frame_stage(ctx, output, payload_size);
 		mutex_unlock(&ctx->lock);
 		return err;
 	}
@@ -1547,6 +1620,11 @@ void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 	mutex_lock(&ctx->lock);
 	nvdec_engine_map_put(ctx->scratch);
 	ctx->scratch = NULL;
+	/* VP8 probabilities are stream state; the next stream starts at defaults. */
+	if (ctx->probs) {
+		nvdec_buffer_put(&ctx->probs->bo);
+		ctx->probs = NULL;
+	}
 	ctx->width_in_mbs = 0;
 	ctx->height_in_mbs = 0;
 	ctx->coded_width = 0;
@@ -1958,6 +2036,8 @@ static void nvdec_context_release(struct kref *ref)
 		nvdec_engine_map_put(ctx->surfaces[i].map);
 	if (ctx->input)
 		nvdec_buffer_put(&ctx->input->bo);
+	if (ctx->probs)
+		nvdec_buffer_put(&ctx->probs->bo);
 	nvdec_engine_map_put(ctx->scratch);
 	kfree(ctx->slice_offsets);
 	kfree(ctx);
@@ -1996,6 +2076,8 @@ static void nvdec_decode_job_release(struct host1x_job *job)
 	nvdec_buffer_put(&hjob->gather->bo);
 	nvdec_buffer_put(&hjob->input->bo);
 	nvdec_buffer_put(&hjob->state->bo);
+	if (hjob->probs)
+		nvdec_buffer_put(&hjob->probs->bo);
 	nvdec_engine_map_put(hjob->scratch);
 	nvdec_engine_map_put(hjob->surface);
 	nvdec_engine_map_put(hjob->capture);
@@ -2063,6 +2145,8 @@ static void nvdec_free_job(struct nvdec_decode_job *hjob)
 		nvdec_buffer_put(&hjob->gather->bo);
 	if (hjob->input)
 		nvdec_buffer_put(&hjob->input->bo);
+	if (hjob->probs)
+		nvdec_buffer_put(&hjob->probs->bo);
 	if (hjob->state)
 		nvdec_buffer_put(&hjob->state->bo);
 	nvdec_engine_map_put(hjob->scratch);
@@ -2950,6 +3034,539 @@ int nvdec_engine_hevc_submit(struct nvdec_decode_context *ctx,
 
 	err = nvdec_launch_job(hjob, NVDEC_HEVC_GATHER_WORDS,
 			       NVDEC_HEVC_VIC_OFFSET, fence);
+	if (err)
+		goto free_hjob;
+	mutex_unlock(&ctx->lock);
+	return 0;
+
+free_hjob:
+	nvdec_free_job(hjob);
+unlock:
+	mutex_unlock(&ctx->lock);
+	return err;
+}
+
+/* RFC 6386's default entropy context, in the firmware's layout. */
+static const u8 nvdec_vp8_default_coeff_probs[4][8][3][11] = {
+	{
+		{
+			{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+		{
+			{ 253, 136, 254, 255, 228, 219, 128, 128, 128, 128, 128 },
+			{ 189, 129, 242, 255, 227, 213, 255, 219, 128, 128, 128 },
+			{ 106, 126, 227, 252, 214, 209, 255, 255, 128, 128, 128 },
+		},
+		{
+			{   1,  98, 248, 255, 236, 226, 255, 255, 128, 128, 128 },
+			{ 181, 133, 238, 254, 221, 234, 255, 154, 128, 128, 128 },
+			{  78, 134, 202, 247, 198, 180, 255, 219, 128, 128, 128 },
+		},
+		{
+			{   1, 185, 249, 255, 243, 255, 128, 128, 128, 128, 128 },
+			{ 184, 150, 247, 255, 236, 224, 128, 128, 128, 128, 128 },
+			{  77, 110, 216, 255, 236, 230, 128, 128, 128, 128, 128 },
+		},
+		{
+			{   1, 101, 251, 255, 241, 255, 128, 128, 128, 128, 128 },
+			{ 170, 139, 241, 252, 236, 209, 255, 255, 128, 128, 128 },
+			{  37, 116, 196, 243, 228, 255, 255, 255, 128, 128, 128 },
+		},
+		{
+			{   1, 204, 254, 255, 245, 255, 128, 128, 128, 128, 128 },
+			{ 207, 160, 250, 255, 238, 128, 128, 128, 128, 128, 128 },
+			{ 102, 103, 231, 255, 211, 171, 128, 128, 128, 128, 128 },
+		},
+		{
+			{   1, 152, 252, 255, 240, 255, 128, 128, 128, 128, 128 },
+			{ 177, 135, 243, 255, 234, 225, 128, 128, 128, 128, 128 },
+			{  80, 129, 211, 255, 194, 224, 128, 128, 128, 128, 128 },
+		},
+		{
+			{   1,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 246,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 255, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+	},
+	{
+		{
+			{ 198,  35, 237, 223, 193, 187, 162, 160, 145, 155,  62 },
+			{ 131,  45, 198, 221, 172, 176, 220, 157, 252, 221,   1 },
+			{  68,  47, 146, 208, 149, 167, 221, 162, 255, 223, 128 },
+		},
+		{
+			{   1, 149, 241, 255, 221, 224, 255, 255, 128, 128, 128 },
+			{ 184, 141, 234, 253, 222, 220, 255, 199, 128, 128, 128 },
+			{  81,  99, 181, 242, 176, 190, 249, 202, 255, 255, 128 },
+		},
+		{
+			{   1, 129, 232, 253, 214, 197, 242, 196, 255, 255, 128 },
+			{  99, 121, 210, 250, 201, 198, 255, 202, 128, 128, 128 },
+			{  23,  91, 163, 242, 170, 187, 247, 210, 255, 255, 128 },
+		},
+		{
+			{   1, 200, 246, 255, 234, 255, 128, 128, 128, 128, 128 },
+			{ 109, 178, 241, 255, 231, 245, 255, 255, 128, 128, 128 },
+			{  44, 130, 201, 253, 205, 192, 255, 255, 128, 128, 128 },
+		},
+		{
+			{   1, 132, 239, 251, 219, 209, 255, 165, 128, 128, 128 },
+			{  94, 136, 225, 251, 218, 190, 255, 255, 128, 128, 128 },
+			{  22, 100, 174, 245, 186, 161, 255, 199, 128, 128, 128 },
+		},
+		{
+			{   1, 182, 249, 255, 232, 235, 128, 128, 128, 128, 128 },
+			{ 124, 143, 241, 255, 227, 234, 128, 128, 128, 128, 128 },
+			{  35,  77, 181, 251, 193, 211, 255, 205, 128, 128, 128 },
+		},
+		{
+			{   1, 157, 247, 255, 236, 231, 255, 255, 128, 128, 128 },
+			{ 121, 141, 235, 255, 225, 227, 255, 255, 128, 128, 128 },
+			{  45,  99, 188, 251, 195, 217, 255, 224, 128, 128, 128 },
+		},
+		{
+			{   1,   1, 251, 255, 213, 255, 128, 128, 128, 128, 128 },
+			{ 203,   1, 248, 255, 255, 128, 128, 128, 128, 128, 128 },
+			{ 137,   1, 177, 255, 224, 255, 128, 128, 128, 128, 128 },
+		},
+	},
+	{
+		{
+			{ 253,   9, 248, 251, 207, 208, 255, 192, 128, 128, 128 },
+			{ 175,  13, 224, 243, 193, 185, 249, 198, 255, 255, 128 },
+			{  73,  17, 171, 221, 161, 179, 236, 167, 255, 234, 128 },
+		},
+		{
+			{   1,  95, 247, 253, 212, 183, 255, 255, 128, 128, 128 },
+			{ 239,  90, 244, 250, 211, 209, 255, 255, 128, 128, 128 },
+			{ 155,  77, 195, 248, 188, 195, 255, 255, 128, 128, 128 },
+		},
+		{
+			{   1,  24, 239, 251, 218, 219, 255, 205, 128, 128, 128 },
+			{ 201,  51, 219, 255, 196, 186, 128, 128, 128, 128, 128 },
+			{  69,  46, 190, 239, 201, 218, 255, 228, 128, 128, 128 },
+		},
+		{
+			{   1, 191, 251, 255, 255, 128, 128, 128, 128, 128, 128 },
+			{ 223, 165, 249, 255, 213, 255, 128, 128, 128, 128, 128 },
+			{ 141, 124, 248, 255, 255, 128, 128, 128, 128, 128, 128 },
+		},
+		{
+			{   1,  16, 248, 255, 255, 128, 128, 128, 128, 128, 128 },
+			{ 190,  36, 230, 255, 236, 255, 128, 128, 128, 128, 128 },
+			{ 149,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+		{
+			{   1, 226, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 247, 192, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 240, 128, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+		{
+			{   1, 134, 252, 255, 255, 128, 128, 128, 128, 128, 128 },
+			{ 213,  62, 250, 255, 255, 128, 128, 128, 128, 128, 128 },
+			{  55,  93, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+		{
+			{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+	},
+	{
+		{
+			{ 202,  24, 213, 235, 186, 191, 220, 160, 240, 175, 255 },
+			{ 126,  38, 182, 232, 169, 184, 228, 174, 255, 187, 128 },
+			{  61,  46, 138, 219, 151, 178, 240, 170, 255, 216, 128 },
+		},
+		{
+			{   1, 112, 230, 250, 199, 191, 247, 159, 255, 255, 128 },
+			{ 166, 109, 228, 252, 211, 215, 255, 174, 128, 128, 128 },
+			{  39,  77, 162, 232, 172, 180, 245, 178, 255, 255, 128 },
+		},
+		{
+			{   1,  52, 220, 246, 198, 199, 249, 220, 255, 255, 128 },
+			{ 124,  74, 191, 243, 183, 193, 250, 221, 255, 255, 128 },
+			{  24,  71, 130, 219, 154, 170, 243, 182, 255, 255, 128 },
+		},
+		{
+			{   1, 182, 225, 249, 219, 240, 255, 224, 128, 128, 128 },
+			{ 149, 150, 226, 252, 216, 205, 255, 171, 128, 128, 128 },
+			{  28, 108, 170, 242, 183, 194, 254, 223, 255, 255, 128 },
+		},
+		{
+			{   1,  81, 230, 252, 204, 203, 255, 192, 128, 128, 128 },
+			{ 123, 102, 209, 247, 188, 196, 255, 233, 128, 128, 128 },
+			{  20,  95, 153, 243, 164, 173, 255, 203, 128, 128, 128 },
+		},
+		{
+			{   1, 222, 248, 255, 216, 213, 128, 128, 128, 128, 128 },
+			{ 168, 175, 246, 252, 235, 205, 255, 255, 128, 128, 128 },
+			{  47, 116, 215, 255, 211, 212, 255, 255, 128, 128, 128 },
+		},
+		{
+			{   1, 121, 236, 253, 212, 214, 255, 255, 128, 128, 128 },
+			{ 141,  84, 213, 252, 201, 202, 255, 219, 128, 128, 128 },
+			{  42,  80, 160, 240, 162, 185, 255, 205, 128, 128, 128 },
+		},
+		{
+			{   1,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 244,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+			{ 238,   1, 255, 128, 128, 128, 128, 128, 128, 128, 128 },
+		},
+	},
+};
+
+static const u8 nvdec_vp8_default_y_mode_probs[4] = { 112, 86, 140, 37 };
+static const u8 nvdec_vp8_default_uv_mode_probs[3] = { 162, 101, 204 };
+static const u8 nvdec_vp8_default_mv_probs[2][19] = {
+	{ 162, 128, 225, 146, 172, 147, 214,  39, 156, 128,
+	  129, 132,  75, 145, 178, 206, 239, 254, 254 },
+	{ 164, 128, 204, 170, 119, 235, 140, 230, 228, 128,
+	  130, 130,  74, 148, 180, 203, 236, 254, 254 },
+};
+
+/* A key frame resets the entropy context, so this runs on every one. */
+static void nvdec_vp8_init_probs(struct nvdec_decode_context *ctx)
+{
+	struct nvdec_vp8_probs *probs = ctx->probs->cpu;
+	unsigned int i, j, k;
+
+	memset(probs, 0, sizeof(*probs));
+	for (i = 0; i < 4; i++) {
+		for (j = 0; j < 8; j++) {
+			for (k = 0; k < 3; k++)
+				memcpy(probs->coeff[i][j][k],
+				       nvdec_vp8_default_coeff_probs[i][j][k],
+				       sizeof(nvdec_vp8_default_coeff_probs[i][j][k]));
+		}
+	}
+	memcpy(probs->y_mode, nvdec_vp8_default_y_mode_probs,
+	       sizeof(nvdec_vp8_default_y_mode_probs));
+	memcpy(probs->uv_mode, nvdec_vp8_default_uv_mode_probs,
+	       sizeof(nvdec_vp8_default_uv_mode_probs));
+	for (i = 0; i < 2; i++)
+		memcpy(probs->mv[i], nvdec_vp8_default_mv_probs[i],
+		       sizeof(nvdec_vp8_default_mv_probs[i]));
+}
+
+static int nvdec_vp8_prepare_scratch(struct nvdec_decode_context *ctx,
+				     const struct nvdec_vp8_request *request)
+{
+	struct nvdec_engine_map *scratch;
+	struct nvdec_buffer *probs;
+	u32 mbs, history;
+
+	if (ctx->scratch) {
+		if (ctx->coded_width != request->coded_width ||
+		    ctx->coded_height != request->coded_height)
+			return -EBUSY;
+		return 0;
+	}
+
+	mbs = request->coded_width / 16;
+	history = mbs * NVDEC_VP8_HISTORY_PER_MB;
+
+	probs = nvdec_buffer_alloc(ctx->engine, NVDEC_VP8_PROB_SIZE);
+	if (IS_ERR(probs))
+		return PTR_ERR(probs);
+	scratch = nvdec_engine_surface_create(ctx->engine, ALIGN(history, SZ_4K));
+	if (IS_ERR(scratch)) {
+		nvdec_buffer_put(&probs->bo);
+		return PTR_ERR(scratch);
+	}
+	if (upper_32_bits(probs->iova) || upper_32_bits(scratch->iova)) {
+		nvdec_engine_map_put(scratch);
+		nvdec_buffer_put(&probs->bo);
+		return -ERANGE;
+	}
+
+	ctx->probs = probs;
+	ctx->scratch = scratch;
+	ctx->coded_width = request->coded_width;
+	ctx->coded_height = request->coded_height;
+	ctx->history_offset = 0;
+	ctx->history_size = history;
+	memset(probs->cpu, 0, NVDEC_VP8_PROB_SIZE);
+	nvdec_vp8_init_probs(ctx);
+	return 0;
+}
+
+static int nvdec_vp8_validate_request(struct device *dev,
+				      const struct nvdec_vp8_request *request,
+				      const struct nvdec_engine_map *surface,
+				      const struct nvdec_engine_map *capture,
+				      struct nvdec_engine_map * const refs[])
+{
+	u32 luma_size, chroma_size, surface_size, dst_size;
+	unsigned int i;
+
+	dev_dbg(dev,
+		"vp8 request: coded=%ux%u crop=%ux%u version=%u flags=0x%x firstpart=%u stride=%u coff=%u payload=%u\n",
+		request->coded_width, request->coded_height,
+		request->crop_width, request->crop_height, request->version,
+		request->flags, request->first_part_size, request->luma_stride,
+		request->chroma_offset, request->output_payload_size);
+
+	if (request->version > 3 || !request->coded_width ||
+	    !request->coded_height || request->coded_width > 4096 ||
+	    request->coded_height > 4096 ||
+	    !IS_ALIGNED(request->coded_width, 16) ||
+	    !IS_ALIGNED(request->coded_height, 16) ||
+	    !request->output_payload_size ||
+	    !request->first_part_size ||
+	    request->first_part_size > request->output_payload_size ||
+	    !IS_ALIGNED(request->luma_stride, 16)) {
+		dev_dbg(dev, "vp8 reject: syntax\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow((u32)request->luma_stride,
+			       (u32)ALIGN(request->coded_height, 32), &luma_size) ||
+	    check_mul_overflow((u32)request->luma_stride,
+			       (u32)ALIGN(request->coded_height / 2, 16),
+			       &chroma_size) ||
+	    check_add_overflow(request->chroma_offset, chroma_size, &surface_size) ||
+	    request->chroma_offset < luma_size ||
+	    !nvdec_map_is_valid(surface, DMA_BIDIRECTIONAL, surface_size)) {
+		dev_dbg(dev, "vp8 reject: surface geometry/map\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow(request->dst_stride,
+			       (u32)request->crop_height / 2, &dst_size) ||
+	    check_add_overflow(request->dst_chroma_offset, dst_size, &dst_size) ||
+	    !request->crop_width || !request->crop_height ||
+	    (request->crop_width | request->crop_height |
+	     request->crop_left | request->crop_top) & 1 ||
+	    request->crop_left + request->crop_width > request->coded_width ||
+	    request->crop_top + request->crop_height > request->coded_height ||
+	    request->dst_chroma_offset < request->dst_stride *
+					 (u32)request->crop_height ||
+	    !IS_ALIGNED(request->dst_stride, SZ_256) ||
+	    request->dst_stride < request->crop_width ||
+	    !nvdec_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
+		dev_dbg(dev, "vp8 reject: detile destination\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < NVDEC_VP8_REFS; i++) {
+		if (refs[i] &&
+		    !nvdec_map_is_valid(refs[i], DMA_TO_DEVICE, surface_size)) {
+			dev_dbg(dev, "vp8 reject: reference %u\n", i);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+static void nvdec_vp8_fill_setup(struct nvdec_decode_job *hjob)
+{
+	const struct nvdec_vp8_request *r = &hjob->vp8;
+	struct nvdec_vp8_setup *setup = hjob->state->cpu;
+	u8 segment_update = !!(r->flags & NVDEC_VP8_REQ_SEGMENT_UPDATE);
+
+	memset(setup, 0, sizeof(*setup));
+	setup->frame_width = cpu_to_le16(r->coded_width);
+	setup->frame_height = cpu_to_le16(r->coded_height);
+	setup->key_frame = !!(r->flags & NVDEC_VP8_REQ_KEY_FRAME);
+	setup->version = r->version;
+	setup->error_conceal_on = 1;
+	setup->first_part_size = cpu_to_le32(r->first_part_size);
+	setup->history_buffer_size = cpu_to_le32(hjob->ctx->history_size / SZ_256);
+	setup->vld_buffer_size = cpu_to_le32(r->output_payload_size);
+	/* The one stride in this ABI that is not a byte count. */
+	setup->framestride[0] = cpu_to_le32(r->luma_stride / 16);
+	setup->framestride[1] = cpu_to_le32(r->luma_stride / 16);
+	setup->segmentation_feature_data_update = segment_update;
+	/* NVIDIA's driver writes this field one byte later than its header says. */
+	setup->reserved1[0] = segment_update;
+}
+
+static int nvdec_vp8_build_gather(struct nvdec_decode_job *hjob)
+{
+	struct nvdec_engine_map *pictures[NVDEC_VP8_MAX_PICTURES];
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	u32 *gather = hjob->gather->cpu;
+	unsigned int i, word = 0;
+	u32 syncpt_id;
+	int err;
+
+	/* Slots are roles, not pinned indices: golden, altref, last, current. */
+	for (i = 0; i < NVDEC_VP8_REFS; i++)
+		pictures[i] = hjob->dpb[i] ?: hjob->surface;
+	pictures[NVDEC_VP8_REFS] = hjob->surface;
+
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_APPLICATION, 5);
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_CONTROL, 0x55);
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_PICTURE_INDEX,
+			  NVDEC_VP8_REFS);
+	err = nvdec_emit_address(gather, &word, NVDEC_METHOD_SETUP,
+				 hjob->state->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_INPUT,
+					 hjob->input->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_STATUS,
+					 hjob->state->iova +
+					 NVDEC_VP8_STATUS_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word,
+					 NVDEC_VP8_METHOD_PROB_DATA,
+					 hjob->probs->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_H264_METHOD_HISTORY,
+					 hjob->scratch->iova + ctx->history_offset);
+	for (i = 0; !err && i < NVDEC_VP8_MAX_PICTURES; i++) {
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_LUMA + i,
+					 pictures[i]->iova);
+		if (!err)
+			err = nvdec_emit_address(gather, &word,
+						 NVDEC_METHOD_CHROMA + i,
+						 pictures[i]->iova +
+						 hjob->vp8.chroma_offset);
+	}
+	if (err)
+		return err;
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_EXECUTE, 0x100);
+	if (WARN_ON_ONCE(word != NVDEC_VP8_GATHER_WORDS))
+		return -EINVAL;
+
+	syncpt_id = host1x_syncpt_id(ctx->engine->client.base.syncpts[0]);
+	gather[word++] = 0x20000001;
+	gather[word++] = syncpt_id | 0x100;
+
+	err = vic_engine_emit_detile(gather, &word,
+				     hjob->state->iova +
+				     NVDEC_VP8_VIC_CONFIG_OFFSET,
+				     hjob->surface->iova,
+				     hjob->surface->iova + hjob->vp8.chroma_offset,
+				     hjob->capture->iova,
+				     hjob->capture->iova +
+				     hjob->vp8.dst_chroma_offset);
+	if (err)
+		return err;
+
+	gather[word++] = 0x20000001;
+	gather[word++] = syncpt_id | 0x100;
+	WARN_ON_ONCE(word != NVDEC_VP8_TOTAL_GATHER_WORDS);
+
+	print_hex_dump_debug("nvdec vp8 setup: ", DUMP_PREFIX_OFFSET, 16, 4,
+			     hjob->state->cpu, NVDEC_VP8_SETUP_SIZE, false);
+	return 0;
+}
+
+int nvdec_engine_vp8_submit(struct nvdec_decode_context *ctx,
+			    const struct nvdec_vp8_request *request,
+			    struct nvdec_engine_map *surface,
+			    struct nvdec_engine_map *capture,
+			    struct nvdec_engine_map * const refs[NVDEC_VP8_REFS],
+			    struct dma_fence **fence,
+			    nvdec_engine_complete_t complete, void *data)
+{
+	struct nvdec_decode_job *hjob;
+	unsigned int i;
+	int err;
+
+	if (!ctx || !request || !surface || !capture || !refs || !fence ||
+	    ctx->codec != NVDEC_CODEC_VP8)
+		return -EINVAL;
+	*fence = NULL;
+
+	mutex_lock(&ctx->lock);
+	if (ctx->in_flight) {
+		err = -EBUSY;
+		goto unlock;
+	}
+	if (!ctx->slice_count) {
+		err = -EINVAL;
+		goto unlock;
+	}
+	hjob = kzalloc_obj(*hjob);
+	if (!hjob) {
+		err = -ENOMEM;
+		goto unlock;
+	}
+	hjob->ctx = ctx;
+	kref_get(&ctx->ref);
+	hjob->vp8 = *request;
+	hjob->vp8.output_payload_size = ctx->staged;
+	hjob->complete = complete;
+	hjob->complete_data = data;
+	err = nvdec_vp8_validate_request(ctx->engine->dev, &hjob->vp8, surface,
+					 capture, refs);
+	if (err)
+		goto free_hjob;
+
+	err = nvdec_vp8_prepare_scratch(ctx, &hjob->vp8);
+	if (err)
+		goto free_hjob;
+	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
+	hjob->probs = nvdec_buffer_ref(ctx->probs);
+
+	hjob->vic = vic_engine_find(ctx->engine->client.drm);
+	if (!hjob->vic) {
+		err = -ENODEV;
+		goto free_hjob;
+	}
+	hjob->state = nvdec_buffer_alloc(ctx->engine, NVDEC_VP8_STATE_SIZE);
+	if (IS_ERR(hjob->state)) {
+		err = PTR_ERR(hjob->state);
+		hjob->state = NULL;
+		goto free_hjob;
+	}
+	hjob->input = nvdec_buffer_ref(ctx->input);
+	hjob->gather = nvdec_buffer_alloc(ctx->engine,
+					  NVDEC_VP8_TOTAL_GATHER_WORDS * sizeof(u32));
+	if (IS_ERR(hjob->gather)) {
+		err = PTR_ERR(hjob->gather);
+		hjob->gather = NULL;
+		goto free_hjob;
+	}
+	if (upper_32_bits(hjob->state->iova) || upper_32_bits(hjob->input->iova) ||
+	    upper_32_bits(hjob->gather->iova)) {
+		err = -ERANGE;
+		goto free_hjob;
+	}
+
+	hjob->surface = nvdec_engine_map_get(surface);
+	hjob->capture = nvdec_engine_map_get(capture);
+	for (i = 0; i < NVDEC_VP8_REFS; i++) {
+		if (refs[i])
+			hjob->dpb[i] = nvdec_engine_map_get(refs[i]);
+	}
+	hjob->fence = nvdec_fence_create(ctx->engine);
+	if (IS_ERR(hjob->fence)) {
+		err = PTR_ERR(hjob->fence);
+		hjob->fence = NULL;
+		goto free_hjob;
+	}
+	err = nvdec_install_fences(hjob);
+	if (err)
+		goto free_hjob;
+
+	if (hjob->vp8.flags & NVDEC_VP8_REQ_KEY_FRAME)
+		nvdec_vp8_init_probs(ctx);
+	nvdec_vp8_fill_setup(hjob);
+	vic_engine_fill_detile_config(hjob->state->cpu + NVDEC_VP8_VIC_CONFIG_OFFSET,
+				      &(struct vic_detile_params){
+					.width = hjob->vp8.coded_width,
+					.height = hjob->vp8.coded_height,
+					.left = hjob->vp8.crop_left,
+					.top = hjob->vp8.crop_top,
+					.out_width = hjob->vp8.crop_width,
+					.out_height = hjob->vp8.crop_height,
+					.src_stride = hjob->vp8.luma_stride,
+					.dst_stride = hjob->vp8.dst_stride,
+				      });
+	err = nvdec_vp8_build_gather(hjob);
+	if (err)
+		goto free_hjob;
+
+	err = nvdec_launch_job(hjob, NVDEC_VP8_GATHER_WORDS,
+			       NVDEC_VP8_VIC_OFFSET, fence);
 	if (err)
 		goto free_hjob;
 	mutex_unlock(&ctx->lock);
