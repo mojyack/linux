@@ -81,13 +81,15 @@
 #define NVDEC_HEVC_TILES_OFFSET		0x700
 #define NVDEC_HEVC_TILES_SIZE			0x900
 #define NVDEC_HEVC_VIC_CONFIG_OFFSET		0x1000
+/* Main10 detiles one plane per pass, so it needs a second VIC config. */
+#define NVDEC_HEVC_VIC_CHROMA_CONFIG_OFFSET	0x1800
 #define NVDEC_HEVC_STATE_SIZE			0x2000
 #define NVDEC_HEVC_GATHER_WORDS		129
 #define NVDEC_HEVC_VIC_OFFSET			(NVDEC_HEVC_GATHER_WORDS + \
 						 NVDEC_DONE_WORDS)
 #define NVDEC_HEVC_TOTAL_GATHER_WORDS		(NVDEC_HEVC_VIC_OFFSET + \
-						 VIC_DETILE_WORDS + \
-						 NVDEC_DONE_WORDS)
+						 2 * (VIC_DETILE_WORDS + \
+						      NVDEC_DONE_WORDS))
 
 #define NVDEC_VP8_SETUP_SIZE			0xc0
 #define NVDEC_VP8_STATUS_OFFSET		0x100
@@ -2358,16 +2360,17 @@ static void nvdec_free_job(struct nvdec_decode_job *hjob)
 	kfree(hjob);
 }
 
-/* One host1x job: NVDEC gather, OP_DONE, wait into VIC, VIC gather, OP_DONE. */
+/* One host1x job: NVDEC gather, OP_DONE, then per VIC pass wait, gather, OP_DONE. */
 static int nvdec_launch_job(struct nvdec_decode_job *hjob,
 			    unsigned int gather_words, unsigned int vic_offset,
-			    struct dma_fence **fence)
+			    unsigned int vic_passes, struct dma_fence **fence)
 {
 	struct nvdec_decode_context *ctx = hjob->ctx;
 	struct host1x_job *job;
+	unsigned int i;
 	int err;
 
-	job = host1x_job_alloc(ctx->engine->channel, 5, 0, true);
+	job = host1x_job_alloc(ctx->engine->channel, 2 + 3 * vic_passes, 0, true);
 	if (!job)
 		return -ENOMEM;
 
@@ -2375,19 +2378,23 @@ static int nvdec_launch_job(struct nvdec_decode_job *hjob,
 	job->class = HOST1X_CLASS_NVDEC;
 	job->serialize = true;
 	job->syncpt = host1x_syncpt_get(ctx->engine->client.base.syncpts[0]);
-	job->syncpt_incrs = 2;	/* NVDEC OP_DONE, then VIC OP_DONE */
+	job->syncpt_incrs = 1 + vic_passes;	/* NVDEC, then one per VIC pass */
 	job->timeout = 10000;
 	job->release = nvdec_decode_job_release;
 	job->user_data = hjob;
 	host1x_job_add_gather(job, &hjob->gather->bo, gather_words, 0);
 	host1x_job_add_gather(job, &hjob->gather->bo, NVDEC_DONE_WORDS,
 			      gather_words * sizeof(u32));
-	host1x_job_add_wait(job, host1x_syncpt_id(job->syncpt), 1, true,
-			    HOST1X_CLASS_VIC);
-	host1x_job_add_gather(job, &hjob->gather->bo, VIC_DETILE_WORDS,
-			      vic_offset * sizeof(u32));
-	host1x_job_add_gather(job, &hjob->gather->bo, NVDEC_DONE_WORDS,
-			      (vic_offset + VIC_DETILE_WORDS) * sizeof(u32));
+	for (i = 0; i < vic_passes; i++) {
+		host1x_job_add_wait(job, host1x_syncpt_id(job->syncpt), 1 + i,
+				    true, HOST1X_CLASS_VIC);
+		host1x_job_add_gather(job, &hjob->gather->bo, VIC_DETILE_WORDS,
+				      vic_offset * sizeof(u32));
+		host1x_job_add_gather(job, &hjob->gather->bo, NVDEC_DONE_WORDS,
+				      (vic_offset + VIC_DETILE_WORDS) *
+				      sizeof(u32));
+		vic_offset += VIC_DETILE_WORDS + NVDEC_DONE_WORDS;
+	}
 
 	err = pm_runtime_resume_and_get(ctx->engine->dev);
 	if (err < 0)
@@ -2559,7 +2566,7 @@ int nvdec_engine_h264_submit(struct nvdec_decode_context *ctx,
 		goto free_hjob;
 
 	err = nvdec_launch_job(hjob, NVDEC_H264_GATHER_WORDS,
-			       NVDEC_H264_VIC_OFFSET, fence);
+			       NVDEC_H264_VIC_OFFSET, 1, fence);
 	if (err)
 		goto free_hjob;
 	mutex_unlock(&ctx->lock);
@@ -2629,6 +2636,7 @@ static int nvdec_hevc_validate_request(struct device *dev,
 				       struct nvdec_engine_map * const dpb[])
 {
 	u32 luma_size, chroma_size, surface_size, dst_size;
+	u32 sample_bytes = request->bit_depth > 8 ? 2 : 1;
 	unsigned int i, tiles;
 
 	dev_dbg(dev,
@@ -2646,7 +2654,7 @@ static int nvdec_hevc_validate_request(struct device *dev,
 		request->luma_stride, request->chroma_offset,
 		request->output_payload_size);
 
-	if (request->bit_depth != 8 ||
+	if ((request->bit_depth != 8 && request->bit_depth != 10) ||
 	    !request->pic_width_in_luma_samples ||
 	    !request->pic_height_in_luma_samples ||
 	    request->pic_width_in_luma_samples > request->coded_width ||
@@ -2700,6 +2708,7 @@ static int nvdec_hevc_validate_request(struct device *dev,
 			       &chroma_size) ||
 	    check_add_overflow(request->chroma_offset, chroma_size, &surface_size) ||
 	    request->chroma_offset < luma_size ||
+	    request->luma_stride < request->coded_width * sample_bytes ||
 	    !nvdec_map_is_valid(surface, DMA_BIDIRECTIONAL, surface_size)) {
 		dev_dbg(dev, "hevc reject: surface geometry/map\n");
 		return -EINVAL;
@@ -2716,7 +2725,7 @@ static int nvdec_hevc_validate_request(struct device *dev,
 	    request->dst_chroma_offset < request->dst_stride *
 					 (u32)request->crop_height ||
 	    !IS_ALIGNED(request->dst_stride, SZ_256) ||
-	    request->dst_stride < request->crop_width ||
+	    request->dst_stride < request->crop_width * sample_bytes ||
 	    !nvdec_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
 		dev_dbg(dev, "hevc reject: detile destination\n");
 		return -EINVAL;
@@ -2840,9 +2849,14 @@ static void nvdec_hevc_fill_setup(struct nvdec_decode_job *hjob, u8 current_inde
 	u32 word;
 
 	setup->stream_len = cpu_to_le32(r->output_payload_size);
-	setup->surface_format = cpu_to_le32(FIELD_PREP(NVDEC_HEVC_SURFACE_START_CODE, 1));
-	setup->framestride[0] = cpu_to_le32(r->luma_stride);
-	setup->framestride[1] = cpu_to_le32(r->luma_stride);
+	word = FIELD_PREP(NVDEC_HEVC_SURFACE_START_CODE, 1);
+	if (r->bit_depth > 8)
+		word |= FIELD_PREP(NVDEC_HEVC_SURFACE_OUTPUT_MODE, 1);
+	setup->surface_format = cpu_to_le32(word);
+	/* 10-bit output counts the stride in samples, not bytes. */
+	word = r->bit_depth > 8 ? r->luma_stride / 2 : r->luma_stride;
+	setup->framestride[0] = cpu_to_le32(word);
+	setup->framestride[1] = cpu_to_le32(word);
 	setup->coloc_buffer_size = cpu_to_le32(ctx->colmv_size / 256);
 	setup->sao_buffer_offset = cpu_to_le32(ctx->sao_offset / 256);
 	setup->bsd_control_offset = cpu_to_le32(ctx->bsd_offset / 256);
@@ -3087,7 +3101,27 @@ static int nvdec_hevc_build_gather(struct nvdec_decode_job *hjob,
 
 	gather[word++] = 0x20000001;
 	gather[word++] = syncpt_id | 0x100;
-	WARN_ON_ONCE(word != NVDEC_HEVC_TOTAL_GATHER_WORDS);
+
+	/* The P010 chroma plane takes a second pass through the luma methods. */
+	if (hjob->hevc.bit_depth > 8) {
+		err = vic_engine_emit_detile(gather, &word,
+					     hjob->state->iova +
+					     NVDEC_HEVC_VIC_CHROMA_CONFIG_OFFSET,
+					     hjob->surface->iova +
+					     hjob->hevc.chroma_offset,
+					     hjob->surface->iova +
+					     hjob->hevc.chroma_offset,
+					     hjob->capture->iova +
+					     hjob->hevc.dst_chroma_offset,
+					     hjob->capture->iova +
+					     hjob->hevc.dst_chroma_offset);
+		if (err)
+			return err;
+
+		gather[word++] = 0x20000001;
+		gather[word++] = syncpt_id | 0x100;
+		WARN_ON_ONCE(word != NVDEC_HEVC_TOTAL_GATHER_WORDS);
+	}
 
 	print_hex_dump_debug("nvdec hevc setup: ", DUMP_PREFIX_OFFSET, 16, 4,
 			     hjob->state->cpu, NVDEC_HEVC_SETUP_SIZE, false);
@@ -3217,23 +3251,37 @@ int nvdec_engine_hevc_submit(struct nvdec_decode_context *ctx,
 
 	nvdec_hevc_fill_setup(hjob, current_index, picture_indices,
 			      scratch_diff_poc);
-	vic_engine_fill_detile_config(hjob->state->cpu + NVDEC_HEVC_VIC_CONFIG_OFFSET,
-				      &(struct vic_detile_params){
-					.width = hjob->hevc.coded_width,
-					.height = hjob->hevc.coded_height,
-					.left = hjob->hevc.crop_left,
-					.top = hjob->hevc.crop_top,
-					.out_width = hjob->hevc.crop_width,
-					.out_height = hjob->hevc.crop_height,
-					.src_stride = hjob->hevc.luma_stride,
-					.dst_stride = hjob->hevc.dst_stride,
-				      });
+	{
+		struct vic_detile_params detile = {
+			.width = hjob->hevc.coded_width,
+			.height = hjob->hevc.coded_height,
+			.left = hjob->hevc.crop_left,
+			.top = hjob->hevc.crop_top,
+			.out_width = hjob->hevc.crop_width,
+			.out_height = hjob->hevc.crop_height,
+			.src_stride = hjob->hevc.luma_stride,
+			.dst_stride = hjob->hevc.dst_stride,
+			.pass = hjob->hevc.bit_depth > 8 ?
+				VIC_DETILE_P010_LUMA : VIC_DETILE_NV12,
+		};
+
+		vic_engine_fill_detile_config(hjob->state->cpu +
+					      NVDEC_HEVC_VIC_CONFIG_OFFSET,
+					      &detile);
+		if (hjob->hevc.bit_depth > 8) {
+			detile.pass = VIC_DETILE_P010_CHROMA;
+			vic_engine_fill_detile_config(hjob->state->cpu +
+						      NVDEC_HEVC_VIC_CHROMA_CONFIG_OFFSET,
+						      &detile);
+		}
+	}
 	err = nvdec_hevc_build_gather(hjob, current_index, picture_indices);
 	if (err)
 		goto free_hjob;
 
 	err = nvdec_launch_job(hjob, NVDEC_HEVC_GATHER_WORDS,
-			       NVDEC_HEVC_VIC_OFFSET, fence);
+			       NVDEC_HEVC_VIC_OFFSET,
+			       hjob->hevc.bit_depth > 8 ? 2 : 1, fence);
 	if (err)
 		goto free_hjob;
 	mutex_unlock(&ctx->lock);
@@ -3766,7 +3814,7 @@ int nvdec_engine_vp8_submit(struct nvdec_decode_context *ctx,
 		goto free_hjob;
 
 	err = nvdec_launch_job(hjob, NVDEC_VP8_GATHER_WORDS,
-			       NVDEC_VP8_VIC_OFFSET, fence);
+			       NVDEC_VP8_VIC_OFFSET, 1, fence);
 	if (err)
 		goto free_hjob;
 	mutex_unlock(&ctx->lock);
@@ -4386,7 +4434,7 @@ int nvdec_engine_vp9_submit(struct nvdec_decode_context *ctx,
 		goto free_hjob;
 
 	err = nvdec_launch_job(hjob, NVDEC_VP9_GATHER_WORDS,
-			       NVDEC_VP9_VIC_OFFSET, fence);
+			       NVDEC_VP9_VIC_OFFSET, 1, fence);
 	if (err)
 		goto free_hjob;
 

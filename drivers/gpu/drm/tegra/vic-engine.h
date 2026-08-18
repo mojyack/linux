@@ -29,6 +29,13 @@ struct vic_engine;
 
 struct tegra_drm;
 
+/* P010 has no VIC pixel format and takes one pass per plane instead. */
+enum vic_detile_pass {
+	VIC_DETILE_NV12,
+	VIC_DETILE_P010_LUMA,
+	VIC_DETILE_P010_CHROMA,
+};
+
 struct vic_detile_params {
 	u32 width;		/* block-linear source, coded size */
 	u32 height;
@@ -36,8 +43,9 @@ struct vic_detile_params {
 	u32 top;
 	u32 out_width;		/* pitch-linear destination, == visible size */
 	u32 out_height;
-	u32 src_stride;
-	u32 dst_stride;
+	u32 src_stride;		/* bytes */
+	u32 dst_stride;		/* bytes */
+	enum vic_detile_pass pass;
 };
 
 struct vic_engine *vic_engine_find(struct tegra_drm *tegra);

@@ -427,7 +427,8 @@ struct vic_pipe_config {
 };
 
 struct vic_output_config {
-	u8 reserved0[0x08];		/* alpha fill, background, regamma */
+	__le32 alpha_fill;		/* AlphaFillMode | slot << 3 | background */
+	u8 reserved0[0x04];		/* background, regamma */
 	__le32 target_rect_h;		/* left | right << 16 */
 	__le32 target_rect_v;		/* top | bottom << 16 */
 };
@@ -475,14 +476,18 @@ static_assert(offsetof(struct vic_config_struct, slot) == 0x090);
 static_assert(offsetof(struct vic_slot, surface) == 0x040);
 static_assert(sizeof(struct vic_config_struct) == VIC_CONFIG_SIZE);
 
+#define VIC_T_R5G6B5			10
+#define VIC_T_A8R8G8B8			32
 #define VIC_T_Y8___U8V8_N420		67
 #define VIC_BLK_KIND_PITCH		0
 #define VIC_BLK_KIND_GENERIC_16BX2	1
+#define VIC_ALPHA_FILL_SOURCE_STREAM	3
 
 #define VIC_SURFACE_FORMAT(fmt, loc_h, loc_v, kind, height, cache)	\
 	((fmt) | ((loc_h) << 7) | ((loc_v) << 9) | ((kind) << 11) |	\
 	 ((height) << 15) | ((cache) << 19))
 #define VIC_SURFACE_DIMS(w, h)		(((w) - 1) | (((h) - 1) << 14))
+#define VIC_SURFACE_DIMS_UNUSED		0x0fffffffu
 #define VIC_RECT(low, high)		((low) | ((high) << 16))
 
 void vic_engine_fill_detile_config(void *config,
@@ -491,44 +496,73 @@ void vic_engine_fill_detile_config(void *config,
 	struct vic_config_struct *c = config;
 	u32 w = params->width, h = ALIGN(params->height, 2);
 	u32 dw = params->out_width, dh = ALIGN(params->out_height, 2);
-	u32 src_rows = ALIGN(h, 32), dst_rows = dh;
+	u32 left = params->left, top = params->top;
+	u32 format = VIC_T_Y8___U8V8_N420, step = 1, alpha_fill = 0;
+	u32 chroma_loc_vert = 1;
+	u32 src_rows, dst_rows;
+
+	/* P010 is detiled one plane at a time. */
+	switch (params->pass) {
+	case VIC_DETILE_NV12:
+		break;
+	case VIC_DETILE_P010_LUMA:
+		format = VIC_T_R5G6B5;
+		step = 2;
+		chroma_loc_vert = 0;
+		break;
+	case VIC_DETILE_P010_CHROMA:
+		format = VIC_T_A8R8G8B8;
+		step = 4;
+		chroma_loc_vert = 0;
+		alpha_fill = VIC_ALPHA_FILL_SOURCE_STREAM;
+		w /= 2;
+		h /= 2;
+		dw /= 2;
+		dh /= 2;
+		left /= 2;
+		top /= 2;
+		break;
+	}
+	src_rows = ALIGN(h, 32);
+	dst_rows = dh;
 
 	memset(c, 0, sizeof(*c));
 
 	c->pipe.downsample = cpu_to_le32(VIC_RECT(1 << 2, 1 << 2));
 
+	c->output.alpha_fill = cpu_to_le32(alpha_fill);
 	c->output.target_rect_h = cpu_to_le32(VIC_RECT(0, dw - 1));
 	c->output.target_rect_v = cpu_to_le32(VIC_RECT(0, dh - 1));
 
-	c->out_surface.format = cpu_to_le32(VIC_SURFACE_FORMAT(VIC_T_Y8___U8V8_N420,
-							       0, 0, VIC_BLK_KIND_PITCH, 0, 0));
+	c->out_surface.format = cpu_to_le32(VIC_SURFACE_FORMAT(format, 0, 0,
+							       VIC_BLK_KIND_PITCH, 0, 0));
 	c->out_surface.size = cpu_to_le32(VIC_SURFACE_DIMS(dw, dh));
-	c->out_surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride,
+	c->out_surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride / step,
 							   dst_rows));
-	c->out_surface.chroma = cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride / 2,
-							     dst_rows / 2));
+	c->out_surface.chroma = step > 1 ? cpu_to_le32(VIC_SURFACE_DIMS_UNUSED) :
+			cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride / 2,
+						     dst_rows / 2));
 
 	c->slot[0].config.flags = cpu_to_le32(BIT(0) | BIT(8));
 	c->slot[0].config.clamp = cpu_to_le32(1023 << 10);
 	c->slot[0].config.alpha = cpu_to_le32(1023 | BIT(10));
-	c->slot[0].config.source_rect[0] = cpu_to_le32(params->left << 16);
-	c->slot[0].config.source_rect[1] =
-		cpu_to_le32((params->left + dw - 1) << 16);
-	c->slot[0].config.source_rect[2] = cpu_to_le32(params->top << 16);
-	c->slot[0].config.source_rect[3] =
-		cpu_to_le32((params->top + dh - 1) << 16);
+	c->slot[0].config.source_rect[0] = cpu_to_le32(left << 16);
+	c->slot[0].config.source_rect[1] = cpu_to_le32((left + dw - 1) << 16);
+	c->slot[0].config.source_rect[2] = cpu_to_le32(top << 16);
+	c->slot[0].config.source_rect[3] = cpu_to_le32((top + dh - 1) << 16);
 	c->slot[0].config.dest_rect[0] = cpu_to_le32(VIC_RECT(0, dw - 1));
 	c->slot[0].config.dest_rect[1] = cpu_to_le32(VIC_RECT(0, dh - 1));
 
 	/* Chroma sited left, block-linear GOB height 2, 32Bx8 cache width. */
 	c->slot[0].surface.format =
-		cpu_to_le32(VIC_SURFACE_FORMAT(VIC_T_Y8___U8V8_N420, 0, 1,
+		cpu_to_le32(VIC_SURFACE_FORMAT(format, 0, chroma_loc_vert,
 					       VIC_BLK_KIND_GENERIC_16BX2, 1, 1));
 	c->slot[0].surface.size = cpu_to_le32(VIC_SURFACE_DIMS(w, h));
-	c->slot[0].surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride,
+	c->slot[0].surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride / step,
 							       src_rows));
-	c->slot[0].surface.chroma = cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride / 2,
-								 src_rows / 2));
+	c->slot[0].surface.chroma = step > 1 ? cpu_to_le32(VIC_SURFACE_DIMS_UNUSED) :
+			cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride / 2,
+						     src_rows / 2));
 }
 
 #define VIC_METHOD_INCR			0x10100002

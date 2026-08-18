@@ -155,7 +155,9 @@ static const struct v4l2_ctrl_config nvdec_hevc_ctrls[] = {
 	}, {
 		.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
 		.min = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
-		.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+		.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10,
+		.menu_skip_mask =
+			BIT(V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_STILL_PICTURE),
 		.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
 	}, {
 		.id = V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
@@ -215,20 +217,42 @@ static void nvdec_reset_coded_fmt(struct nvdec_v4l2_ctx *ctx)
 	pix->plane_fmt[0].sizeimage = NVDEC_H264_CODED_SIZE;
 }
 
+/* NV12 holds one byte per sample, P010 two; nothing else is advertised. */
+static u32 nvdec_sample_bytes(u32 pixelformat)
+{
+	return pixelformat == V4L2_PIX_FMT_P010 ? 2 : 1;
+}
+
+/* Only HEVC Main10 decodes to a 10-bit surface on this hardware. */
+static bool nvdec_ten_bit_capable(const struct nvdec_v4l2_ctx *ctx)
+{
+	return ctx->codec == NVDEC_CODEC_HEVC;
+}
+
+static u32 nvdec_try_capture_pixfmt(const struct nvdec_v4l2_ctx *ctx,
+				    u32 pixelformat)
+{
+	if (pixelformat == V4L2_PIX_FMT_P010 && nvdec_ten_bit_capable(ctx))
+		return V4L2_PIX_FMT_P010;
+	return V4L2_PIX_FMT_NV12;
+}
+
 /* The decoded frame keeps the colorimetry the client set on the OUTPUT queue. */
 static void nvdec_fill_capture_fmt(const struct nvdec_v4l2_ctx *ctx,
-				   struct v4l2_format *f, u32 width, u32 height)
+				   struct v4l2_format *f, u32 pixelformat,
+				   u32 width, u32 height)
 {
 	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
 	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
-	u32 stride = ALIGN(width, 256);	/* VIC pitch-linear requirement */
+	/* VIC pitch-linear requirement, in bytes for either sample width. */
+	u32 stride = ALIGN(width * nvdec_sample_bytes(pixelformat), 256);
 	u32 aligned_height = ALIGN(height, 16);
 
 	memset(f, 0, sizeof(*f));
 	f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	pix->width = width;
 	pix->height = height;
-	pix->pixelformat = V4L2_PIX_FMT_NV12;
+	pix->pixelformat = pixelformat;
 	pix->field = V4L2_FIELD_NONE;
 	pix->colorspace = coded->colorspace;
 	pix->ycbcr_enc = coded->ycbcr_enc;
@@ -246,14 +270,16 @@ static void nvdec_reset_capture_fmt(struct nvdec_v4l2_ctx *ctx)
 	ctx->crop.top = 0;
 	ctx->crop.width = ctx->coded_fmt.fmt.pix_mp.width;
 	ctx->crop.height = ctx->coded_fmt.fmt.pix_mp.height;
-	nvdec_fill_capture_fmt(ctx, &ctx->capture_fmt, ctx->crop.width,
-			       ctx->crop.height);
+	nvdec_fill_capture_fmt(ctx, &ctx->capture_fmt, V4L2_PIX_FMT_NV12,
+			       ctx->crop.width, ctx->crop.height);
 }
 
 /* Kernel-owned block-linear surface NVDEC decodes into and VIC detiles. */
 static u32 nvdec_surface_stride(const struct nvdec_v4l2_ctx *ctx)
 {
-	return ALIGN(ctx->coded_fmt.fmt.pix_mp.width, 64);
+	u32 step = nvdec_sample_bytes(ctx->capture_fmt.fmt.pix_mp.pixelformat);
+
+	return ALIGN(ctx->coded_fmt.fmt.pix_mp.width, 64 / step) * step;
 }
 
 static u32 nvdec_surface_chroma_offset(const struct nvdec_v4l2_ctx *ctx)
@@ -823,10 +849,17 @@ static int nvdec_validate_hevc_request(struct nvdec_v4l2_ctx *ctx)
 	pps = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_PPS);
 	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_DECODE_PARAMS);
 
-	if (sps->bit_depth_luma_minus8 || sps->bit_depth_chroma_minus8 ||
+	if (sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8 ||
+	    (sps->bit_depth_luma_minus8 && sps->bit_depth_luma_minus8 != 2) ||
 	    sps->chroma_format_idc != 1 ||
 	    (sps->flags & V4L2_HEVC_SPS_FLAG_SEPARATE_COLOUR_PLANE)) {
-		why = "not 8-bit 4:2:0 with a shared colour plane";
+		why = "not 8-bit or 10-bit 4:2:0 with a shared colour plane";
+		goto reject;
+	}
+
+	if ((sps->bit_depth_luma_minus8 ? 2u : 1u) !=
+	    nvdec_sample_bytes(ctx->capture_fmt.fmt.pix_mp.pixelformat)) {
+		why = "stream bit depth does not match the CAPTURE format";
 		goto reject;
 	}
 
@@ -929,7 +962,7 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx)
 	request->dst_stride = pix->plane_fmt[0].bytesperline;
 	request->dst_chroma_offset = request->dst_stride * pix->height;
 	request->pic_order_cnt_val = dec->pic_order_cnt_val;
-	request->bit_depth = 8;
+	request->bit_depth = sps->bit_depth_luma_minus8 + 8;
 
 	log2_ctb = sps->log2_min_luma_coding_block_size_minus3 + 3 +
 		   sps->log2_diff_max_min_luma_coding_block_size;
@@ -984,7 +1017,8 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx)
 		pps->num_ref_idx_l0_default_active_minus1 + 1;
 	request->num_ref_idx_l1_default_active =
 		pps->num_ref_idx_l1_default_active_minus1 + 1;
-	request->init_qp = pps->init_qp_minus26 + 26;
+	request->init_qp = pps->init_qp_minus26 + 26 +
+			   (request->bit_depth - 8) * 6;
 	request->diff_cu_qp_delta_depth = pps->diff_cu_qp_delta_depth;
 	request->pps_cb_qp_offset = pps->pps_cb_qp_offset;
 	request->pps_cr_qp_offset = pps->pps_cr_qp_offset;
@@ -1739,6 +1773,7 @@ static int nvdec_querycap(struct file *file, void *priv,
 static int nvdec_enum_fmt(struct file *file, void *priv,
 			  struct v4l2_fmtdesc *f)
 {
+	struct nvdec_v4l2_ctx *ctx = file_to_nvdec_ctx(file);
 	static const u32 coded[] = {
 		V4L2_PIX_FMT_H264_SLICE,
 		V4L2_PIX_FMT_HEVC_SLICE,
@@ -1753,9 +1788,9 @@ static int nvdec_enum_fmt(struct file *file, void *priv,
 		return 0;
 	}
 
-	if (f->index)
+	if (f->index >= (nvdec_ten_bit_capable(ctx) ? 2 : 1))
 		return -EINVAL;
-	f->pixelformat = V4L2_PIX_FMT_NV12;
+	f->pixelformat = f->index ? V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
 	return 0;
 }
 
@@ -1770,10 +1805,13 @@ static int nvdec_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
 static int nvdec_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 {
 	struct nvdec_v4l2_ctx *ctx = file_to_nvdec_ctx(file);
+	u32 pixelformat;
 
 	if (V4L2_TYPE_IS_OUTPUT(f->type))
 		return nvdec_try_coded_fmt(f);
-	nvdec_fill_capture_fmt(ctx, f, ctx->crop.width, ctx->crop.height);
+	pixelformat = nvdec_try_capture_pixfmt(ctx, f->fmt.pix_mp.pixelformat);
+	nvdec_fill_capture_fmt(ctx, f, pixelformat, ctx->crop.width,
+			       ctx->crop.height);
 	return 0;
 }
 
@@ -1867,7 +1905,9 @@ static int nvdec_s_selection(struct file *file, void *priv,
 
 	ctx->crop = r;
 	sel->r = r;
-	nvdec_fill_capture_fmt(ctx, &ctx->capture_fmt, r.width, r.height);
+	nvdec_fill_capture_fmt(ctx, &ctx->capture_fmt,
+			       ctx->capture_fmt.fmt.pix_mp.pixelformat,
+			       r.width, r.height);
 	return 0;
 }
 
