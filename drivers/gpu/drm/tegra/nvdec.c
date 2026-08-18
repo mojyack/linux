@@ -24,6 +24,13 @@ static void nvdec_drm_close_channel(struct tegra_drm_context *context)
 	nvdec_engine_close_channel(context);
 }
 
+static int nvdec_drm_submit_job(struct tegra_drm_client *client,
+				struct host1x_job *job)
+{
+	return nvdec_engine_submit_job(nvdec_engine_from_drm_client(client), job,
+				       NULL, NULL);
+}
+
 static int nvdec_drm_can_use_memory_ctx(struct tegra_drm_client *client,
 					bool *supported)
 {
@@ -36,6 +43,7 @@ static const struct tegra_drm_client_ops nvdec_drm_ops = {
 	.open_channel = nvdec_drm_open_channel,
 	.close_channel = nvdec_drm_close_channel,
 	.submit = tegra_drm_submit,
+	.submit_job = nvdec_drm_submit_job,
 	.get_streamid_offset = tegra_drm_get_streamid_offset_thi,
 	.can_use_memory_ctx = nvdec_drm_can_use_memory_ctx,
 };
@@ -44,6 +52,7 @@ static int nvdec_probe(struct platform_device *pdev)
 {
 	struct nvdec_engine *engine;
 	struct tegra_drm_client *client;
+	int err;
 
 	engine = nvdec_engine_probe(pdev);
 	if (IS_ERR(engine))
@@ -54,12 +63,24 @@ static int nvdec_probe(struct platform_device *pdev)
 	client->version = nvdec_engine_version(engine);
 	client->ops = &nvdec_drm_ops;
 
-	return nvdec_engine_register(engine);
+	/* Must precede pm_runtime_enable(): registering resumes this device. */
+	err = nvdec_v4l2_register(engine);
+	if (err < 0)
+		return err;
+
+	err = nvdec_engine_register(engine);
+	if (err < 0)
+		nvdec_v4l2_unregister(engine);
+
+	return err;
 }
 
 static void nvdec_remove(struct platform_device *pdev)
 {
-	nvdec_engine_unregister(platform_get_drvdata(pdev));
+	struct nvdec_engine *engine = platform_get_drvdata(pdev);
+
+	nvdec_engine_unregister(engine);
+	nvdec_v4l2_unregister(engine);
 }
 
 struct platform_driver tegra_nvdec_driver = {

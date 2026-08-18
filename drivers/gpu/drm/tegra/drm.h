@@ -87,6 +87,8 @@ struct tegra_drm_client_ops {
 	int (*submit)(struct tegra_drm_context *context,
 		      struct drm_tegra_submit *args, struct drm_device *drm,
 		      struct drm_file *file);
+	int (*submit_job)(struct tegra_drm_client *client,
+			  struct host1x_job *job);
 	int (*get_streamid_offset)(struct tegra_drm_client *client, u32 *offset);
 	int (*can_use_memory_ctx)(struct tegra_drm_client *client, bool *supported);
 };

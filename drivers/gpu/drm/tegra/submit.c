@@ -635,7 +635,10 @@ int tegra_drm_ioctl_channel_submit(struct drm_device *drm, void *data,
 	job_data = NULL;
 
 	/* Submit job to hardware. */
-	err = host1x_job_submit(job);
+	if (context->client->ops->submit_job)
+		err = context->client->ops->submit_job(context->client, job);
+	else
+		err = host1x_job_submit(job);
 	if (err) {
 		SUBMIT_ERR(context, "host1x job submission failed: %d", err);
 		goto unpin_job;
