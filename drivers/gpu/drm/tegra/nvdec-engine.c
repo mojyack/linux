@@ -36,31 +36,26 @@
 #define NVDEC_FALCON_DEBUGINFO			0x1094
 #define NVDEC_TFBIF_TRANSCFG			0x2c44
 
+#define NVDEC_METHOD_APPLICATION		0x080
+#define NVDEC_METHOD_EXECUTE			0x0c0
+#define NVDEC_METHOD_CONTROL			0x100
+#define NVDEC_METHOD_SETUP			0x101
+#define NVDEC_METHOD_INPUT			0x102
+#define NVDEC_METHOD_PICTURE_INDEX		0x103
+#define NVDEC_METHOD_SLICE_OFFSETS		0x104
+#define NVDEC_METHOD_COLOC			0x105
+#define NVDEC_METHOD_HISTORY			0x106
+#define NVDEC_METHOD_STATUS			0x109
+#define NVDEC_METHOD_LUMA			0x10c
+#define NVDEC_METHOD_CHROMA			0x11d
+#define NVDEC_H264_METHOD_MBHIST		0x140
+
+/* The NVDEC methods, OP_DONE, the VIC detile and OP_DONE. */
+#define NVDEC_GATHER_WORDS			256
+
 #define NVDEC_H264_SETUP_SIZE			0x2fc
 #define NVDEC_H264_STATUS_OFFSET		0x300
-#define NVDEC_H264_VIC_CONFIG_OFFSET		0x400
-#define NVDEC_H264_STATE_SIZE			0x1000
-#define NVDEC_H264_GATHER_WORDS		135
-#define NVDEC_H264_DONE_WORDS			2
-#define NVDEC_H264_VIC_OFFSET			(NVDEC_H264_GATHER_WORDS + \
-						 NVDEC_H264_DONE_WORDS)
-#define NVDEC_H264_TOTAL_GATHER_WORDS		(NVDEC_H264_VIC_OFFSET + \
-						 VIC_DETILE_WORDS + \
-						 NVDEC_H264_DONE_WORDS)
 
-#define NVDEC_H264_METHOD_APPLICATION		0x080
-#define NVDEC_H264_METHOD_CONTROL		0x100
-#define NVDEC_H264_METHOD_PICTURE_INDEX	0x103
-#define NVDEC_H264_METHOD_SETUP		0x101
-#define NVDEC_H264_METHOD_INPUT		0x102
-#define NVDEC_H264_METHOD_SLICE_OFFSETS	0x104
-#define NVDEC_H264_METHOD_STATUS		0x109
-#define NVDEC_H264_METHOD_COLOC		0x105
-#define NVDEC_H264_METHOD_MBHIST		0x140
-#define NVDEC_H264_METHOD_HISTORY		0x106
-#define NVDEC_H264_METHOD_LUMA			0x10c
-#define NVDEC_H264_METHOD_CHROMA		0x11d
-#define NVDEC_H264_METHOD_EXECUTE		0x0c0
 
 struct nvdec_h264_dpb_entry {
 	__le32 flags;
@@ -143,18 +138,19 @@ struct nvdec_engine_map {
 	enum dma_data_direction direction;
 };
 
-struct nvdec_h264_surface {
+struct nvdec_pool_surface {
 	struct nvdec_engine_map *map;
 	u8 picture_index;
 	/* H.264 setup slot, NVDEC_H264_DPB_ENTRIES while this is not a reference. */
 	u8 dpb_slot;
 };
 
-struct nvdec_h264_context {
+struct nvdec_decode_context {
 	struct kref ref;
 	struct nvdec_engine *engine;
 	/* Serializes staging and submission of this context's pictures. */
 	struct mutex lock;
+	enum nvdec_codec codec;
 	struct nvdec_engine_map *scratch;
 	struct nvdec_engine_map *input;
 	u16 width_in_mbs;
@@ -170,30 +166,55 @@ struct nvdec_h264_context {
 	unsigned int slice_count;
 	unsigned int max_slices;
 	u32 staged;
-	struct nvdec_h264_surface surfaces[NVDEC_H264_MAX_PICTURES];
+	struct nvdec_pool_surface surfaces[NVDEC_MAX_PICTURES];
 };
 
-struct nvdec_h264_job {
-	struct nvdec_h264_context *ctx;
-	struct nvdec_h264_request request;
+struct nvdec_decode_job {
+	struct nvdec_decode_context *ctx;
+	const struct nvdec_codec_ops *ops;
+	union nvdec_request req;
 	struct nvdec_engine_map *state;
 	struct nvdec_engine_map *input;
 	struct nvdec_engine_map *gather;
 	struct nvdec_engine_map *scratch;
 	struct nvdec_engine_map *surface;
 	struct nvdec_engine_map *capture;
-	struct nvdec_engine_map *dpb[NVDEC_H264_DPB_ENTRIES];
-	struct vic_engine *vic;
+	struct nvdec_engine_map *dpb[NVDEC_MAX_REFS];
+	/* What each firmware picture slot names; borrowed from the maps above. */
+	struct nvdec_engine_map *pictures[NVDEC_MAX_PICTURES];
+	u8 num_pictures;
+	u8 picture_index;
+	u8 picture_indices[NVDEC_MAX_REFS];
+	u8 dpb_slots[NVDEC_MAX_REFS];
+	unsigned int vic_offset;
 	u32 slice_offsets_off;
+	struct vic_engine *vic;
 	struct dma_fence *fence;
-	nvdec_engine_h264_complete_t complete;
+	nvdec_engine_complete_t complete;
 	void *complete_data;
 	bool runtime_ref;
 	bool vic_runtime_ref;
 	bool submitted;
 };
 
-struct nvdec_h264_fence {
+/* What differs between codecs in turning a request into one host1x job. */
+struct nvdec_codec_ops {
+	u8 application;
+	u16 setup_size;
+	u16 status_offset;
+	/* The state buffer's VIC config, after the codec's own tables. */
+	u16 vic_config;
+	/* Written after the bitstream when the firmware takes slice offsets. */
+	const u8 *termination;
+	/* Validate, size the scratch, and name the firmware picture slots. */
+	int (*prepare)(struct nvdec_decode_job *hjob);
+	/* Fill the setup structure and the codec's tables in the state buffer. */
+	void (*fill)(struct nvdec_decode_job *hjob);
+	/* The codec's address methods, between STATUS and the pictures. */
+	void (*emit)(struct nvdec_decode_job *hjob, struct falcon_gather *g);
+};
+
+struct nvdec_fence {
 	struct dma_fence base;
 	/* Protects the dma_fence base. */
 	spinlock_t lock;
@@ -796,8 +817,8 @@ int nvdec_engine_map_add_fence(struct nvdec_engine_map *map,
 	return err;
 }
 
-static bool nvdec_h264_map_is_valid(const struct nvdec_engine_map *map,
-				    enum dma_data_direction direction, size_t size)
+static bool nvdec_map_is_valid(const struct nvdec_engine_map *map,
+			       enum dma_data_direction direction, size_t size)
 {
 	if (!map || map->size < size)
 		return false;
@@ -805,9 +826,9 @@ static bool nvdec_h264_map_is_valid(const struct nvdec_engine_map *map,
 	return map->direction == direction || map->direction == DMA_BIDIRECTIONAL;
 }
 
-static int nvdec_h264_copy_output(struct nvdec_engine_map *input, u32 offset,
-				  const struct nvdec_engine_map *output,
-				  size_t payload_size)
+static int nvdec_copy_output(struct nvdec_engine_map *input, u32 offset,
+			     const struct nvdec_engine_map *output,
+			     size_t payload_size)
 {
 	struct dma_buf *dmabuf = output->bo->dma_buf;
 	struct iosys_map vmap = { };
@@ -828,53 +849,53 @@ static int nvdec_h264_copy_output(struct nvdec_engine_map *input, u32 offset,
 	return err;
 }
 
-static const char *nvdec_h264_fence_get_driver_name(struct dma_fence *fence)
+static const char *nvdec_fence_get_driver_name(struct dma_fence *fence)
 {
 	return "tegra-nvdec";
 }
 
-static const char *nvdec_h264_fence_get_timeline_name(struct dma_fence *fence)
+static const char *nvdec_fence_get_timeline_name(struct dma_fence *fence)
 {
 	return "tegra-nvdec-h264";
 }
 
-static void nvdec_h264_fence_release(struct dma_fence *fence)
+static void nvdec_fence_release(struct dma_fence *fence)
 {
-	struct nvdec_h264_fence *h264_fence =
-		container_of(fence, struct nvdec_h264_fence, base);
+	struct nvdec_fence *h264_fence =
+		container_of(fence, struct nvdec_fence, base);
 
 	kfree(h264_fence);
 }
 
-static const struct dma_fence_ops nvdec_h264_fence_ops = {
-	.get_driver_name = nvdec_h264_fence_get_driver_name,
-	.get_timeline_name = nvdec_h264_fence_get_timeline_name,
-	.release = nvdec_h264_fence_release,
+static const struct dma_fence_ops nvdec_fence_ops = {
+	.get_driver_name = nvdec_fence_get_driver_name,
+	.get_timeline_name = nvdec_fence_get_timeline_name,
+	.release = nvdec_fence_release,
 };
 
 static struct dma_fence *
-nvdec_h264_fence_create(struct nvdec_engine *engine)
+nvdec_fence_create(struct nvdec_engine *engine)
 {
-	struct nvdec_h264_fence *h264_fence;
+	struct nvdec_fence *h264_fence;
 
 	h264_fence = kzalloc_obj(*h264_fence);
 	if (!h264_fence)
 		return ERR_PTR(-ENOMEM);
 
 	spin_lock_init(&h264_fence->lock);
-	dma_fence_init(&h264_fence->base, &nvdec_h264_fence_ops,
+	dma_fence_init(&h264_fence->base, &nvdec_fence_ops,
 		       &h264_fence->lock, engine->h264_fence_context,
 		       atomic64_inc_return(&engine->h264_fence_seqno));
 	return &h264_fence->base;
 }
 
-static int nvdec_h264_install_fences(struct nvdec_h264_job *hjob)
+static int nvdec_install_fences(struct nvdec_decode_job *hjob)
 {
 	unsigned int i;
 	int err;
 
 	err = nvdec_engine_map_add_fence(hjob->capture, hjob->fence, true);
-	for (i = 0; !err && i < NVDEC_H264_DPB_ENTRIES; i++) {
+	for (i = 0; !err && i < NVDEC_MAX_REFS; i++) {
 		if (hjob->dpb[i])
 			err = nvdec_engine_map_add_fence(hjob->dpb[i], hjob->fence,
 							 false);
@@ -883,7 +904,7 @@ static int nvdec_h264_install_fences(struct nvdec_h264_job *hjob)
 	return err;
 }
 
-static int nvdec_h264_prepare_scratch(struct nvdec_h264_context *ctx,
+static int nvdec_h264_prepare_scratch(struct nvdec_decode_context *ctx,
 				      const struct nvdec_h264_request *request)
 {
 	struct nvdec_engine_map *scratch;
@@ -935,7 +956,7 @@ static int nvdec_h264_prepare_scratch(struct nvdec_h264_context *ctx,
 	return 0;
 }
 
-static int nvdec_h264_prepare_input(struct nvdec_h264_context *ctx, size_t size)
+static int nvdec_prepare_input(struct nvdec_decode_context *ctx, size_t size)
 {
 	struct nvdec_engine_map *input;
 
@@ -955,10 +976,10 @@ static int nvdec_h264_prepare_input(struct nvdec_h264_context *ctx, size_t size)
 }
 
 /* Slices are staged back to back and described by slice_count + 1 offsets. */
-int nvdec_engine_h264_stage_slice(struct nvdec_h264_context *ctx,
-				  struct nvdec_engine_map *output,
-				  u32 payload_size, bool first,
-				  unsigned int max_slices)
+int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
+			     struct nvdec_engine_map *output,
+			     u32 payload_size, bool first,
+			     unsigned int max_slices)
 {
 	u32 staged;
 	int err;
@@ -976,7 +997,7 @@ int nvdec_engine_h264_stage_slice(struct nvdec_h264_context *ctx,
 	if (ctx->slice_count >= max_slices ||
 	    check_add_overflow(staged, payload_size, &staged) ||
 	    staged > U32_MAX - 16 - SZ_256 ||
-	    !nvdec_h264_map_is_valid(output, DMA_TO_DEVICE, payload_size)) {
+	    !nvdec_map_is_valid(output, DMA_TO_DEVICE, payload_size)) {
 		err = -EINVAL;
 		goto unlock;
 	}
@@ -995,13 +1016,13 @@ int nvdec_engine_h264_stage_slice(struct nvdec_h264_context *ctx,
 	}
 
 	/* The offset array and the 16-byte terminator follow the bitstream. */
-	err = nvdec_h264_prepare_input(ctx, ALIGN(staged + 16, SZ_256) +
+	err = nvdec_prepare_input(ctx, ALIGN(staged + 16, SZ_256) +
 				       (ctx->slice_count + 2) * sizeof(u32));
 	if (err)
 		goto unlock;
 
-	err = nvdec_h264_copy_output(ctx->input, staged - payload_size, output,
-				     payload_size);
+	err = nvdec_copy_output(ctx->input, staged - payload_size, output,
+				payload_size);
 	if (err)
 		goto unlock;
 
@@ -1018,7 +1039,7 @@ unlock:
 	return err;
 }
 
-void nvdec_engine_h264_discard_slices(struct nvdec_h264_context *ctx)
+void nvdec_engine_discard_slices(struct nvdec_decode_context *ctx)
 {
 	if (!ctx)
 		return;
@@ -1030,12 +1051,12 @@ void nvdec_engine_h264_discard_slices(struct nvdec_h264_context *ctx)
 }
 
 /* The scratch is sized from the coded resolution, so a new size needs a new one. */
-void nvdec_engine_h264_context_reset(struct nvdec_h264_context *ctx)
+void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 {
 	if (!ctx)
 		return;
 
-	nvdec_engine_h264_discard_slices(ctx);
+	nvdec_engine_discard_slices(ctx);
 	mutex_lock(&ctx->lock);
 	nvdec_engine_map_put(ctx->scratch);
 	ctx->scratch = NULL;
@@ -1044,17 +1065,67 @@ void nvdec_engine_h264_context_reset(struct nvdec_h264_context *ctx)
 	mutex_unlock(&ctx->lock);
 }
 
+/* The decode surface and the detile destination, as every codec lays them out. */
+static int nvdec_validate_frame(struct device *dev, const struct nvdec_frame *f,
+				unsigned int align,
+				const struct nvdec_engine_map *surface,
+				const struct nvdec_engine_map *capture,
+				u32 *surface_size)
+{
+	u32 luma_size, chroma_size, dst_size;
+
+	dev_dbg(dev,
+		"frame: coded=%ux%u crop=%ux%u+%u+%u stride=%u coff=%u dst=%u/%u payload=%u\n",
+		f->coded_width, f->coded_height, f->crop_width, f->crop_height,
+		f->crop_left, f->crop_top, f->luma_stride, f->chroma_offset,
+		f->dst_stride, f->dst_chroma_offset, f->output_payload_size);
+
+	if (!f->coded_width || !f->coded_height ||
+	    f->coded_width > 4096 || f->coded_height > 4096 ||
+	    !IS_ALIGNED(f->coded_width, align) ||
+	    !IS_ALIGNED(f->coded_height, align) || !f->output_payload_size) {
+		dev_dbg(dev, "reject: coded size\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow((u32)f->luma_stride,
+			       (u32)ALIGN(f->coded_height, 32), &luma_size) ||
+	    check_mul_overflow((u32)f->luma_stride,
+			       (u32)ALIGN(f->coded_height / 2, 16), &chroma_size) ||
+	    check_add_overflow(f->chroma_offset, chroma_size, surface_size) ||
+	    f->chroma_offset < luma_size || !IS_ALIGNED(f->luma_stride, 16) ||
+	    f->luma_stride < f->coded_width ||
+	    !nvdec_map_is_valid(surface, DMA_BIDIRECTIONAL, *surface_size)) {
+		dev_dbg(dev, "reject: surface geometry/map\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow(f->dst_stride, (u32)f->crop_height / 2, &dst_size) ||
+	    check_add_overflow(f->dst_chroma_offset, dst_size, &dst_size) ||
+	    !f->crop_width || !f->crop_height ||
+	    (f->crop_width | f->crop_height | f->crop_left | f->crop_top) & 1 ||
+	    f->crop_left + f->crop_width > f->coded_width ||
+	    f->crop_top + f->crop_height > f->coded_height ||
+	    f->dst_chroma_offset < f->dst_stride * (u32)f->crop_height ||
+	    !IS_ALIGNED(f->dst_stride, SZ_256) ||
+	    f->dst_stride < f->crop_width ||
+	    !nvdec_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
+		dev_dbg(dev, "reject: detile destination\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int nvdec_h264_validate_request(struct device *dev,
 				       const struct nvdec_h264_request *request,
-				       const struct nvdec_engine_map *surface,
-				       const struct nvdec_engine_map *capture,
-				       struct nvdec_engine_map * const dpb[])
+				       struct nvdec_engine_map * const dpb[],
+				       u32 surface_size)
 {
-	u32 luma_size, chroma_size, capture_size, dst_size;
 	unsigned int i;
 
 	dev_dbg(dev,
-		"h264 request: profile=%u level=%u chroma=%u depth=%u/%u log2fn=%u poc=%u/%u maxref=%u flags=0x%x pps=0x%x wbipred=%u slicegroups=%u type=%u mbs=%ux%u stride=%u/%u coff=%u payload=%u\n",
+		"h264 request: profile=%u level=%u chroma=%u depth=%u/%u log2fn=%u poc=%u/%u maxref=%u flags=0x%x pps=0x%x wbipred=%u slicegroups=%u type=%u mbs=%ux%u slices=%u\n",
 		request->profile_idc, request->level_idc,
 		request->chroma_format_idc, request->bit_depth_luma_minus8,
 		request->bit_depth_chroma_minus8,
@@ -1063,12 +1134,7 @@ static int nvdec_h264_validate_request(struct device *dev,
 		request->max_num_ref_frames, request->flags, request->pps_flags,
 		request->weighted_bipred_idc, request->num_slice_groups_minus1,
 		request->slice_type, request->pic_width_in_mbs,
-		request->frame_height_in_mbs, request->luma_stride,
-		request->chroma_stride, request->chroma_offset,
-		request->output_payload_size);
-	dev_dbg(dev, "h264 maps: capture size=%zu dir=%d hi=%u\n",
-		capture ? capture->size : 0, capture ? capture->direction : -1,
-		capture ? upper_32_bits(capture->iova) : 0);
+		request->frame_height_in_mbs, request->slice_count);
 
 	if ((request->profile_idc != 66 && request->profile_idc != 77 &&
 	     request->profile_idc != 100) ||
@@ -1084,15 +1150,16 @@ static int nvdec_h264_validate_request(struct device *dev,
 			       NVDEC_H264_REQ_SEPARATE_COLOUR |
 			       NVDEC_H264_REQ_FIELD |
 			       NVDEC_H264_REQ_BOTTOM_FIELD)) ||
-	    !request->pic_width_in_mbs || !request->frame_height_in_mbs ||
-	    request->pic_width_in_mbs > 256 || request->frame_height_in_mbs > 256 ||
+	    request->pic_width_in_mbs * 16 != request->frame.coded_width ||
+	    request->frame_height_in_mbs * 16 != request->frame.coded_height ||
 	    request->num_slice_groups_minus1 ||
 	    request->weighted_bipred_idc > 2 ||
 	    (request->slice_type != NVDEC_H264_SLICE_I &&
 	     request->slice_type != NVDEC_H264_SLICE_P &&
 	     request->slice_type != NVDEC_H264_SLICE_B) ||
-	    request->output_payload_size < 3 ||
-	    request->output_payload_size > U32_MAX - 16 || !request->slice_count ||
+	    request->frame.output_payload_size < 3 ||
+	    request->frame.output_payload_size > U32_MAX - 16 ||
+	    !request->slice_count ||
 	    request->slice_count > (u32)request->pic_width_in_mbs *
 				   request->frame_height_in_mbs) {
 		dev_dbg(dev, "h264 reject: syntax/output\n");
@@ -1105,42 +1172,6 @@ static int nvdec_h264_validate_request(struct device *dev,
 		return -EINVAL;
 	}
 
-	if (check_mul_overflow((u32)request->luma_stride,
-			       (u32)request->frame_height_in_mbs * 16, &luma_size) ||
-	    check_mul_overflow((u32)request->chroma_stride,
-			       (u32)ALIGN(request->frame_height_in_mbs * 8, 16),
-			       &chroma_size) ||
-	    check_add_overflow(request->chroma_offset, chroma_size, &capture_size) ||
-	    request->luma_stride != request->chroma_stride ||
-	    request->chroma_offset < luma_size ||
-	    !nvdec_h264_map_is_valid(surface, DMA_BIDIRECTIONAL, capture_size)) {
-		dev_dbg(dev, "h264 reject: surface geometry/map\n");
-		return -EINVAL;
-	}
-
-	if (!request->crop_width || !request->crop_height ||
-	    (request->crop_width | request->crop_height |
-	     request->crop_left | request->crop_top) & 1 ||
-	    request->crop_left + request->crop_width >
-	    request->pic_width_in_mbs * 16 ||
-	    request->crop_top + request->crop_height >
-	    request->frame_height_in_mbs * 16) {
-		dev_dbg(dev, "h264 reject: crop rectangle\n");
-		return -EINVAL;
-	}
-
-	if (check_mul_overflow(request->dst_stride,
-			       (u32)request->crop_height / 2, &dst_size) ||
-	    check_add_overflow(request->dst_chroma_offset, dst_size, &dst_size) ||
-	    request->dst_chroma_offset < request->dst_stride *
-					 (u32)request->crop_height ||
-	    !IS_ALIGNED(request->dst_stride, SZ_256) ||
-	    request->dst_stride < request->crop_width ||
-	    !nvdec_h264_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
-		dev_dbg(dev, "h264 reject: detile destination\n");
-		return -EINVAL;
-	}
-
 	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
 		if (!request->dpb[i].valid) {
 			if (dpb[i]) {
@@ -1150,7 +1181,7 @@ static int nvdec_h264_validate_request(struct device *dev,
 			continue;
 		}
 		if (request->dpb[i].fields != 3 ||
-		    !nvdec_h264_map_is_valid(dpb[i], DMA_TO_DEVICE, capture_size)) {
+		    !nvdec_map_is_valid(dpb[i], DMA_TO_DEVICE, surface_size)) {
 			dev_dbg(dev, "h264 reject: dpb %u\n", i);
 			return -EINVAL;
 		}
@@ -1159,19 +1190,20 @@ static int nvdec_h264_validate_request(struct device *dev,
 	return 0;
 }
 
-static int nvdec_h264_surface_index(struct nvdec_h264_context *ctx,
-				    struct nvdec_engine_map *map, u8 *index)
+static int nvdec_surface_index(struct nvdec_decode_context *ctx,
+			       struct nvdec_engine_map *map, u8 *index,
+			       unsigned int slots)
 {
 	unsigned int i;
 
 	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++) {
 		if (ctx->surfaces[i].map == map) {
 			*index = ctx->surfaces[i].picture_index;
-			return 0;
+			return *index < slots ? 0 : -ENOSPC;
 		}
 	}
 
-	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++) {
+	for (i = 0; i < slots; i++) {
 		if (!ctx->surfaces[i].map) {
 			ctx->surfaces[i].map = nvdec_engine_map_get(map);
 			ctx->surfaces[i].picture_index = i;
@@ -1185,14 +1217,14 @@ static int nvdec_h264_surface_index(struct nvdec_h264_context *ctx,
 }
 
 /* A slot names the same picture for as long as that picture is a reference. */
-static int nvdec_h264_dpb_slot(struct nvdec_h264_context *ctx,
+static int nvdec_h264_dpb_slot(struct nvdec_decode_context *ctx,
 			       struct nvdec_engine_map *map, u8 *slot)
 {
-	struct nvdec_h264_surface *entry = NULL;
+	struct nvdec_pool_surface *entry = NULL;
 	unsigned long used = 0;
 	unsigned int i;
 
-	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++) {
+	for (i = 0; i < NVDEC_MAX_PICTURES; i++) {
 		if (!ctx->surfaces[i].map)
 			continue;
 		if (ctx->surfaces[i].map == map)
@@ -1247,16 +1279,15 @@ static void nvdec_h264_setup_dpb(struct nvdec_h264_setup *setup,
 	}
 }
 
-static void nvdec_h264_fill_setup(struct nvdec_h264_job *hjob, u8 current_index,
-				  const u8 picture_indices[NVDEC_H264_DPB_ENTRIES],
-				  const u8 dpb_slots[NVDEC_H264_DPB_ENTRIES])
+static void nvdec_h264_fill_setup(struct nvdec_decode_job *hjob)
 {
-	const struct nvdec_h264_request *request = &hjob->request;
-	struct nvdec_h264_context *ctx = hjob->ctx;
+	const struct nvdec_h264_request *request = &hjob->req.h264;
+	u8 current_index = hjob->picture_index;
+	struct nvdec_decode_context *ctx = hjob->ctx;
 	struct nvdec_h264_setup *setup = hjob->state->cpu;
 	u32 picture_flags, current_picture;
 
-	setup->stream_len = cpu_to_le32(request->output_payload_size + 16);
+	setup->stream_len = cpu_to_le32(request->frame.output_payload_size + 16);
 	setup->slice_count = cpu_to_le32(request->slice_count);
 	setup->mbhist_buffer_size = cpu_to_le32(ctx->mbhist_size);
 	setup->log2_max_pic_order_cnt_lsb_minus4 =
@@ -1280,8 +1311,8 @@ static void nvdec_h264_fill_setup(struct nvdec_h264_job *hjob, u8 current_index,
 		cpu_to_le32(!!(request->pps_flags & NVDEC_H264_PPS_REDUNDANT));
 	setup->transform_8x8_mode_flag =
 		cpu_to_le32(!!(request->pps_flags & NVDEC_H264_PPS_TRANSFORM_8X8));
-	setup->pitch_luma = cpu_to_le32(request->luma_stride);
-	setup->pitch_chroma = cpu_to_le32(request->chroma_stride);
+	setup->pitch_luma = cpu_to_le32(request->frame.luma_stride);
+	setup->pitch_chroma = cpu_to_le32(request->frame.luma_stride);
 	setup->history_buffer_size = cpu_to_le32(ctx->history_size / 256);
 
 	picture_flags = !!(request->flags & NVDEC_H264_REQ_DIRECT_8X8) << 1;
@@ -1305,100 +1336,115 @@ static void nvdec_h264_fill_setup(struct nvdec_h264_job *hjob, u8 current_index,
 	setup->current_field_order_cnt[1] = cpu_to_le32(request->bottom_field_order_cnt);
 	/* x264 and JM differ on Intra_8x8 reference filtering; match nvtegra. */
 	setup->lossless_flags = cpu_to_le32(BIT(0));
-	nvdec_h264_setup_dpb(setup, request, picture_indices, dpb_slots);
+	nvdec_h264_setup_dpb(setup, request, hjob->picture_indices, hjob->dpb_slots);
 	memcpy(setup->scaling_4x4, request->scaling_4x4, sizeof(setup->scaling_4x4));
 	memcpy(setup->scaling_8x8, request->scaling_8x8, sizeof(setup->scaling_8x8));
 }
 
-static void nvdec_h264_debug_job(struct nvdec_h264_job *hjob, u8 current_index,
-				 const u8 picture_indices[NVDEC_H264_DPB_ENTRIES],
-				 const u8 dpb_slots[NVDEC_H264_DPB_ENTRIES])
+static void nvdec_h264_debug_job(struct nvdec_decode_job *hjob)
 {
 	char dpb[128] = "";
 	unsigned int i, len = 0;
 
 	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
-		if (!hjob->request.dpb[i].valid)
+		if (!hjob->req.h264.dpb[i].valid)
 			continue;
 		len += scnprintf(dpb + len, sizeof(dpb) - len, "%s%u:%u@%u",
-				 len ? "," : "", i, picture_indices[i],
-				 dpb_slots[i]);
+				 len ? "," : "", i, hjob->picture_indices[i],
+				 hjob->dpb_slots[i]);
 	}
 
-	dev_dbg(hjob->ctx->engine->dev,
-		"h264 methods=0200,0400,040c,0404,0408,0410,0424,0414,0500,0418,luma[0..16],chroma[0..16],0300 dpb=%s current=%u\n",
-		dpb[0] ? dpb : "none", current_index);
-	print_hex_dump_debug("nvdec setup: ", DUMP_PREFIX_OFFSET, 16, 4,
-			     hjob->state->cpu, NVDEC_H264_SETUP_SIZE, false);
+	dev_dbg(hjob->ctx->engine->dev, "h264 dpb=%s current=%u\n",
+		dpb[0] ? dpb : "none", hjob->picture_index);
 }
 
-static int nvdec_h264_build_gather(struct nvdec_h264_job *hjob,
-				   u8 current_index,
-				   const u8 picture_indices[NVDEC_H264_DPB_ENTRIES],
-				   const u8 dpb_slots[NVDEC_H264_DPB_ENTRIES])
+static int nvdec_h264_prepare(struct nvdec_decode_job *hjob)
 {
-	struct nvdec_h264_context *ctx = hjob->ctx;
-	struct nvdec_engine_map *references[NVDEC_H264_MAX_PICTURES];
-	u32 syncpt = host1x_syncpt_id(ctx->engine->client.base.syncpts[0]);
-	struct falcon_gather g = {
-		.words = hjob->gather->cpu,
-		.size = NVDEC_H264_TOTAL_GATHER_WORDS,
-	};
+	struct nvdec_h264_request *request = &hjob->req.h264;
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	struct device *dev = ctx->engine->dev;
+	u32 surface_size;
 	unsigned int i;
+	int err;
 
-	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++)
-		references[i] = hjob->surface;
+	request->slice_count = ctx->slice_count;
+	err = nvdec_validate_frame(dev, &request->frame, 16, hjob->surface,
+				   hjob->capture, &surface_size);
+	if (!err)
+		err = nvdec_h264_validate_request(dev, request, hjob->dpb,
+						  surface_size);
+	if (!err)
+		err = nvdec_h264_prepare_scratch(ctx, request);
+	if (err)
+		return err;
+	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
+
+	err = nvdec_surface_index(ctx, hjob->surface, &hjob->picture_index,
+				  NVDEC_H264_MAX_PICTURES);
+	if (err)
+		return err;
 	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
-		if (hjob->request.dpb[i].valid)
-			references[picture_indices[i]] = hjob->dpb[i];
+		if (!request->dpb[i].valid)
+			continue;
+		err = nvdec_surface_index(ctx, hjob->dpb[i],
+					  &hjob->picture_indices[i],
+					  NVDEC_H264_MAX_PICTURES);
+		if (!err)
+			err = nvdec_h264_dpb_slot(ctx, hjob->dpb[i],
+						  &hjob->dpb_slots[i]);
+		if (err)
+			return err;
 	}
 
-	falcon_gather_method(&g, NVDEC_H264_METHOD_APPLICATION, 3);
-	falcon_gather_method(&g, NVDEC_H264_METHOD_CONTROL, 0x53);
-	falcon_gather_method(&g, NVDEC_H264_METHOD_PICTURE_INDEX, current_index);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_SETUP, hjob->state->iova);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_INPUT, hjob->input->iova);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_SLICE_OFFSETS,
-			      hjob->input->iova + hjob->slice_offsets_off);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_STATUS,
-			      hjob->state->iova + NVDEC_H264_STATUS_OFFSET);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_COLOC, hjob->scratch->iova);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_MBHIST,
-			      hjob->scratch->iova + ctx->mbhist_offset);
-	falcon_gather_address(&g, NVDEC_H264_METHOD_HISTORY,
-			      hjob->scratch->iova + ctx->history_offset);
+	hjob->num_pictures = NVDEC_H264_MAX_PICTURES;
 	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++)
-		falcon_gather_address(&g, NVDEC_H264_METHOD_LUMA + i,
-				      references[i]->iova);
-	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++)
-		falcon_gather_address(&g, NVDEC_H264_METHOD_CHROMA + i,
-				      references[i]->iova +
-				      hjob->request.chroma_offset);
-	falcon_gather_method(&g, NVDEC_H264_METHOD_EXECUTE, 0x100);
-	if (!g.err && WARN_ON_ONCE(g.count != NVDEC_H264_GATHER_WORDS))
-		return -EINVAL;
-	falcon_gather_op_done(&g, syncpt);
+		hjob->pictures[i] = hjob->surface;
+	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
+		if (request->dpb[i].valid)
+			hjob->pictures[hjob->picture_indices[i]] = hjob->dpb[i];
+	}
 
-	vic_engine_emit_detile(&g, hjob->state->iova + NVDEC_H264_VIC_CONFIG_OFFSET,
-			       hjob->surface->iova,
-			       hjob->surface->iova + hjob->request.chroma_offset,
-			       hjob->capture->iova,
-			       hjob->capture->iova + hjob->request.dst_chroma_offset);
-	falcon_gather_op_done(&g, syncpt);
-	if (g.err)
-		return g.err;
-
-	nvdec_h264_debug_job(hjob, current_index, picture_indices, dpb_slots);
 	return 0;
 }
 
-static void nvdec_h264_context_release(struct kref *ref)
+static void nvdec_h264_emit(struct nvdec_decode_job *hjob,
+			    struct falcon_gather *g)
 {
-	struct nvdec_h264_context *ctx = container_of(ref, struct nvdec_h264_context,
+	struct nvdec_decode_context *ctx = hjob->ctx;
+
+	falcon_gather_address(g, NVDEC_METHOD_SLICE_OFFSETS,
+			      hjob->input->iova + hjob->slice_offsets_off);
+	falcon_gather_address(g, NVDEC_METHOD_COLOC, hjob->scratch->iova);
+	falcon_gather_address(g, NVDEC_H264_METHOD_MBHIST,
+			      hjob->scratch->iova + ctx->mbhist_offset);
+	falcon_gather_address(g, NVDEC_METHOD_HISTORY,
+			      hjob->scratch->iova + ctx->history_offset);
+	nvdec_h264_debug_job(hjob);
+}
+
+static const u8 nvdec_h264_termination[16] = {
+	0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const struct nvdec_codec_ops nvdec_h264_ops = {
+	.application = 3,
+	.setup_size = NVDEC_H264_SETUP_SIZE,
+	.status_offset = NVDEC_H264_STATUS_OFFSET,
+	.vic_config = 0x400,
+	.termination = nvdec_h264_termination,
+	.prepare = nvdec_h264_prepare,
+	.fill = nvdec_h264_fill_setup,
+	.emit = nvdec_h264_emit,
+};
+
+static void nvdec_context_release(struct kref *ref)
+{
+	struct nvdec_decode_context *ctx = container_of(ref, struct nvdec_decode_context,
 						       ref);
 	unsigned int i;
 
-	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++)
+	for (i = 0; i < NVDEC_MAX_PICTURES; i++)
 		nvdec_engine_map_put(ctx->surfaces[i].map);
 	nvdec_engine_map_put(ctx->input);
 	nvdec_engine_map_put(ctx->scratch);
@@ -1407,7 +1453,7 @@ static void nvdec_h264_context_release(struct kref *ref)
 }
 
 /* Drops everything a job holds, whether or not it ever reached the engine. */
-static void nvdec_h264_job_free(struct nvdec_h264_job *hjob, bool error)
+static void nvdec_job_free(struct nvdec_decode_job *hjob, bool error)
 {
 	unsigned int i;
 
@@ -1435,30 +1481,30 @@ static void nvdec_h264_job_free(struct nvdec_h264_job *hjob, bool error)
 	nvdec_engine_map_put(hjob->scratch);
 	nvdec_engine_map_put(hjob->surface);
 	nvdec_engine_map_put(hjob->capture);
-	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++)
+	for (i = 0; i < NVDEC_MAX_REFS; i++)
 		nvdec_engine_map_put(hjob->dpb[i]);
-	kref_put(&hjob->ctx->ref, nvdec_h264_context_release);
+	kref_put(&hjob->ctx->ref, nvdec_context_release);
 	kfree(hjob);
 }
 
-static void nvdec_h264_job_release(struct host1x_job *job)
+static void nvdec_decode_job_release(struct host1x_job *job)
 {
-	struct nvdec_h264_job *hjob = job->user_data;
+	struct nvdec_decode_job *hjob = job->user_data;
 	struct nvdec_engine *engine = hjob->ctx->engine;
 	bool cancelled = job->cancelled;
 
 	mutex_lock(&hjob->ctx->lock);
 	hjob->ctx->in_flight = false;
 	mutex_unlock(&hjob->ctx->lock);
-	nvdec_h264_job_free(hjob, cancelled);
+	nvdec_job_free(hjob, cancelled);
 	if (cancelled)
 		nvdec_engine_recover(engine);
 }
 
-struct nvdec_h264_context *
-nvdec_engine_h264_context_create(struct nvdec_engine *engine)
+struct nvdec_decode_context *
+nvdec_engine_context_create(struct nvdec_engine *engine, enum nvdec_codec codec)
 {
-	struct nvdec_h264_context *ctx;
+	struct nvdec_decode_context *ctx;
 
 	/* Engine buffers live in the host1x domain, so the engine must too. */
 	if (engine->client.drm->domain && !engine->client.base.group)
@@ -1470,20 +1516,21 @@ nvdec_engine_h264_context_create(struct nvdec_engine *engine)
 
 	kref_init(&ctx->ref);
 	ctx->engine = engine;
+	ctx->codec = codec;
 	mutex_init(&ctx->lock);
 	return ctx;
 }
 
-void nvdec_engine_h264_context_destroy(struct nvdec_h264_context *ctx)
+void nvdec_engine_context_destroy(struct nvdec_decode_context *ctx)
 {
 	if (!ctx)
 		return;
 
-	kref_put(&ctx->ref, nvdec_h264_context_release);
+	kref_put(&ctx->ref, nvdec_context_release);
 }
 
-void nvdec_engine_h264_context_release_surface(struct nvdec_h264_context *ctx,
-					       struct nvdec_engine_map *surface)
+void nvdec_engine_context_release_surface(struct nvdec_decode_context *ctx,
+					  struct nvdec_engine_map *surface)
 {
 	unsigned int i;
 
@@ -1491,7 +1538,7 @@ void nvdec_engine_h264_context_release_surface(struct nvdec_h264_context *ctx,
 		return;
 
 	mutex_lock(&ctx->lock);
-	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++) {
+	for (i = 0; i < NVDEC_MAX_PICTURES; i++) {
 		if (ctx->surfaces[i].map != surface)
 			continue;
 		nvdec_engine_map_put(ctx->surfaces[i].map);
@@ -1501,28 +1548,155 @@ void nvdec_engine_h264_context_release_surface(struct nvdec_h264_context *ctx,
 	mutex_unlock(&ctx->lock);
 }
 
-int nvdec_engine_h264_submit(struct nvdec_h264_context *ctx,
-			     const struct nvdec_h264_request *request,
-			     struct nvdec_engine_map *surface,
-			     struct nvdec_engine_map *capture,
-			     struct nvdec_engine_map * const dpb[NVDEC_H264_DPB_ENTRIES],
-			     struct dma_fence **fence,
-			     nvdec_engine_h264_complete_t complete, void *data)
+static void nvdec_fill_detile(struct nvdec_decode_job *hjob)
 {
-	static const u8 termination[16] = {
-		0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x00,
+	const struct nvdec_frame *f = &hjob->req.frame;
+	struct vic_detile_params params = {
+		.width = f->coded_width,
+		.height = f->coded_height,
+		.left = f->crop_left,
+		.top = f->crop_top,
+		.out_width = f->crop_width,
+		.out_height = f->crop_height,
+		.src_stride = f->luma_stride,
+		.dst_stride = f->dst_stride,
 	};
-	struct nvdec_h264_job *hjob;
-	struct host1x_job *job;
-	u8 picture_indices[NVDEC_H264_DPB_ENTRIES] = { };
-	u8 dpb_slots[NVDEC_H264_DPB_ENTRIES] = { };
-	u8 current_index;
+
+	vic_engine_fill_detile_config(hjob->state->cpu + hjob->ops->vic_config,
+				      &params);
+}
+
+static int nvdec_build_gather(struct nvdec_decode_job *hjob)
+{
+	const struct nvdec_codec_ops *ops = hjob->ops;
+	const struct nvdec_frame *f = &hjob->req.frame;
+	struct nvdec_engine *engine = hjob->ctx->engine;
+	u32 syncpt = host1x_syncpt_id(engine->client.base.syncpts[0]);
+	dma_addr_t state = hjob->state->iova;
+	struct falcon_gather g = {
+		.words = hjob->gather->cpu,
+		.size = NVDEC_GATHER_WORDS,
+	};
 	unsigned int i;
-	__le32 *offsets;
+
+	falcon_gather_method(&g, NVDEC_METHOD_APPLICATION, ops->application);
+	falcon_gather_method(&g, NVDEC_METHOD_CONTROL, 0x50 | ops->application);
+	falcon_gather_method(&g, NVDEC_METHOD_PICTURE_INDEX, hjob->picture_index);
+	falcon_gather_address(&g, NVDEC_METHOD_SETUP, state);
+	falcon_gather_address(&g, NVDEC_METHOD_INPUT, hjob->input->iova);
+	falcon_gather_address(&g, NVDEC_METHOD_STATUS, state + ops->status_offset);
+	ops->emit(hjob, &g);
+	for (i = 0; i < hjob->num_pictures; i++) {
+		falcon_gather_address(&g, NVDEC_METHOD_LUMA + i,
+				      hjob->pictures[i]->iova);
+		falcon_gather_address(&g, NVDEC_METHOD_CHROMA + i,
+				      hjob->pictures[i]->iova + f->chroma_offset);
+	}
+	falcon_gather_method(&g, NVDEC_METHOD_EXECUTE, 0x100);
+	falcon_gather_op_done(&g, syncpt);
+	hjob->vic_offset = g.count;
+
+	vic_engine_emit_detile(&g, state + ops->vic_config, hjob->surface->iova,
+			       hjob->surface->iova + f->chroma_offset,
+			       hjob->capture->iova,
+			       hjob->capture->iova + f->dst_chroma_offset);
+	falcon_gather_op_done(&g, syncpt);
+
+	print_hex_dump_debug("nvdec setup: ", DUMP_PREFIX_OFFSET, 16, 4,
+			     hjob->state->cpu, ops->setup_size, false);
+	return g.err;
+}
+
+/* One host1x job: NVDEC and OP_DONE, then a wait into VIC, detile, OP_DONE. */
+static int nvdec_launch_job(struct nvdec_decode_job *hjob,
+			    struct dma_fence **fence)
+{
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	struct nvdec_engine *engine = ctx->engine;
+	struct host1x_bo *gather = &hjob->gather->bo->base;
+	struct host1x_job *job;
 	int err;
 
-	if (!ctx || !request || !surface || !capture || !dpb || !fence)
+	job = host1x_job_alloc(engine->channel, 3, 0, true);
+	if (!job)
+		return -ENOMEM;
+
+	job->client = &engine->client.base;
+	job->class = HOST1X_CLASS_NVDEC;
+	job->serialize = true;
+	job->syncpt = host1x_syncpt_get(engine->client.base.syncpts[0]);
+	job->syncpt_incrs = 2;	/* NVDEC OP_DONE, then VIC OP_DONE */
+	job->timeout = 10000;
+	host1x_job_add_gather(job, gather, hjob->vic_offset, 0);
+	host1x_job_add_wait(job, host1x_syncpt_id(job->syncpt), 1, true,
+			    HOST1X_CLASS_VIC);
+	host1x_job_add_gather(job, gather, VIC_DETILE_WORDS + 2,
+			      hjob->vic_offset * sizeof(u32));
+
+	err = pm_runtime_resume_and_get(engine->dev);
+	if (err < 0)
+		goto put_job;
+	hjob->runtime_ref = true;
+	err = pm_runtime_resume_and_get(vic_engine_device(hjob->vic));
+	if (err < 0)
+		goto put_job;
+	hjob->vic_runtime_ref = true;
+	err = host1x_job_pin(job, engine->dev);
+	if (err)
+		goto put_job;
+
+	/* Once submitted, the job's release frees hjob instead of the caller. */
+	job->release = nvdec_decode_job_release;
+	job->user_data = hjob;
+	ctx->in_flight = true;
+	hjob->submitted = true;
+	err = nvdec_engine_submit_job(engine, job, NULL, NULL);
+	if (err) {
+		job->release = NULL;
+		ctx->in_flight = false;
+		hjob->submitted = false;
+		host1x_job_unpin(job);
+		goto put_job;
+	}
+	*fence = dma_fence_get(hjob->fence);
+
+put_job:
+	host1x_job_put(job);
+	return err;
+}
+
+static const struct nvdec_codec_ops *const nvdec_codec_ops[] = {
+	[NVDEC_CODEC_H264] = &nvdec_h264_ops,
+};
+
+/* The staged bitstream is followed by its terminator and the slice offsets. */
+static void nvdec_write_slice_offsets(struct nvdec_decode_job *hjob)
+{
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	__le32 *offsets;
+	unsigned int i;
+
+	hjob->slice_offsets_off = ALIGN(ctx->staged + 16, SZ_256);
+	memcpy(hjob->input->cpu + ctx->staged, hjob->ops->termination, 16);
+	offsets = hjob->input->cpu + hjob->slice_offsets_off;
+	for (i = 0; i < ctx->slice_count; i++)
+		offsets[i] = cpu_to_le32(ctx->slice_offsets[i]);
+	offsets[i] = cpu_to_le32(ctx->staged);
+}
+
+int nvdec_engine_submit(struct nvdec_decode_context *ctx,
+			const union nvdec_request *request,
+			struct nvdec_engine_map *surface,
+			struct nvdec_engine_map *capture,
+			struct nvdec_engine_map * const refs[NVDEC_MAX_REFS],
+			struct dma_fence **fence,
+			nvdec_engine_complete_t complete, void *data)
+{
+	struct nvdec_decode_job *hjob;
+	unsigned int i;
+	int err;
+
+	if (!ctx || !request || !surface || !capture || !refs || !fence)
 		return -EINVAL;
 	*fence = NULL;
 
@@ -1542,148 +1716,67 @@ int nvdec_engine_h264_submit(struct nvdec_h264_context *ctx,
 	}
 	hjob->ctx = ctx;
 	kref_get(&ctx->ref);
-	hjob->request = *request;
-	hjob->request.output_payload_size = ctx->staged;
-	hjob->request.slice_count = ctx->slice_count;
+	hjob->ops = nvdec_codec_ops[ctx->codec];
+	hjob->req = *request;
+	hjob->req.frame.output_payload_size = ctx->staged;
 	hjob->complete = complete;
 	hjob->complete_data = data;
-	err = nvdec_h264_validate_request(ctx->engine->dev, &hjob->request,
-					  surface, capture, dpb);
-	if (err)
-		goto free_hjob;
-
-	err = nvdec_h264_prepare_scratch(ctx, &hjob->request);
-	if (err)
-		goto free_hjob;
-	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
-	hjob->slice_offsets_off = ALIGN(ctx->staged + 16, SZ_256);
-
-	err = nvdec_h264_surface_index(ctx, surface, &current_index);
-	if (err)
-		goto free_hjob;
-	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
-		if (!hjob->request.dpb[i].valid)
-			continue;
-		err = nvdec_h264_surface_index(ctx, dpb[i], &picture_indices[i]);
-		if (!err)
-			err = nvdec_h264_dpb_slot(ctx, dpb[i], &dpb_slots[i]);
-		if (err)
-			goto free_hjob;
+	hjob->surface = nvdec_engine_map_get(surface);
+	hjob->capture = nvdec_engine_map_get(capture);
+	for (i = 0; i < NVDEC_MAX_REFS; i++) {
+		if (refs[i])
+			hjob->dpb[i] = nvdec_engine_map_get(refs[i]);
 	}
+
+	err = hjob->ops->prepare(hjob);
+	if (err)
+		goto free_hjob;
 
 	hjob->vic = vic_engine_find(ctx->engine->client.drm);
 	if (!hjob->vic) {
 		err = -ENODEV;
 		goto free_hjob;
 	}
-	hjob->state = nvdec_buffer_create(ctx->engine, NVDEC_H264_STATE_SIZE, true);
+	hjob->input = nvdec_engine_map_get(ctx->input);
+	hjob->state = nvdec_buffer_create(ctx->engine, hjob->ops->vic_config +
+					  VIC_CONFIG_SIZE, true);
 	if (IS_ERR(hjob->state)) {
 		err = PTR_ERR(hjob->state);
 		hjob->state = NULL;
 		goto free_hjob;
 	}
-	hjob->input = nvdec_engine_map_get(ctx->input);
 	hjob->gather = nvdec_buffer_create(ctx->engine,
-					   NVDEC_H264_TOTAL_GATHER_WORDS * sizeof(u32),
-					   true);
+					   NVDEC_GATHER_WORDS * sizeof(u32), true);
 	if (IS_ERR(hjob->gather)) {
 		err = PTR_ERR(hjob->gather);
 		hjob->gather = NULL;
 		goto free_hjob;
 	}
-
-	hjob->surface = nvdec_engine_map_get(surface);
-	hjob->capture = nvdec_engine_map_get(capture);
-	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
-		if (hjob->request.dpb[i].valid)
-			hjob->dpb[i] = nvdec_engine_map_get(dpb[i]);
-	}
-	hjob->fence = nvdec_h264_fence_create(ctx->engine);
+	hjob->fence = nvdec_fence_create(ctx->engine);
 	if (IS_ERR(hjob->fence)) {
 		err = PTR_ERR(hjob->fence);
 		hjob->fence = NULL;
 		goto free_hjob;
 	}
-	err = nvdec_h264_install_fences(hjob);
+	err = nvdec_install_fences(hjob);
 	if (err)
 		goto free_hjob;
 
-	memcpy(hjob->input->cpu + ctx->staged, termination, sizeof(termination));
-	offsets = hjob->input->cpu + hjob->slice_offsets_off;
-	for (i = 0; i < ctx->slice_count; i++)
-		offsets[i] = cpu_to_le32(ctx->slice_offsets[i]);
-	offsets[i] = cpu_to_le32(ctx->staged);
-
-	nvdec_h264_fill_setup(hjob, current_index, picture_indices, dpb_slots);
-	vic_engine_fill_detile_config(hjob->state->cpu + NVDEC_H264_VIC_CONFIG_OFFSET,
-				      &(struct vic_detile_params){
-					.width = hjob->request.pic_width_in_mbs * 16,
-					.height = hjob->request.frame_height_in_mbs * 16,
-					.left = hjob->request.crop_left,
-					.top = hjob->request.crop_top,
-					.out_width = hjob->request.crop_width,
-					.out_height = hjob->request.crop_height,
-					.src_stride = hjob->request.luma_stride,
-					.dst_stride = hjob->request.dst_stride,
-				      });
-	err = nvdec_h264_build_gather(hjob, current_index, picture_indices,
-				      dpb_slots);
+	if (hjob->ops->termination)
+		nvdec_write_slice_offsets(hjob);
+	hjob->ops->fill(hjob);
+	nvdec_fill_detile(hjob);
+	err = nvdec_build_gather(hjob);
+	if (!err)
+		err = nvdec_launch_job(hjob, fence);
 	if (err)
 		goto free_hjob;
 
-	job = host1x_job_alloc(ctx->engine->channel, 3, 0, true);
-	if (!job) {
-		err = -ENOMEM;
-		goto free_hjob;
-	}
-	job->client = &ctx->engine->client.base;
-	job->class = HOST1X_CLASS_NVDEC;
-	job->serialize = true;
-	job->syncpt = host1x_syncpt_get(ctx->engine->client.base.syncpts[0]);
-	job->syncpt_incrs = 2;	/* NVDEC OP_DONE, then VIC OP_DONE */
-	job->timeout = 10000;
-	host1x_job_add_gather(job, &hjob->gather->bo->base, NVDEC_H264_VIC_OFFSET,
-			      0);
-	host1x_job_add_wait(job, host1x_syncpt_id(job->syncpt), 1, true,
-			    HOST1X_CLASS_VIC);
-	host1x_job_add_gather(job, &hjob->gather->bo->base,
-			      VIC_DETILE_WORDS + NVDEC_H264_DONE_WORDS,
-			      NVDEC_H264_VIC_OFFSET * sizeof(u32));
-
-	err = pm_runtime_resume_and_get(ctx->engine->dev);
-	if (err < 0)
-		goto put_job;
-	hjob->runtime_ref = true;
-	err = pm_runtime_resume_and_get(vic_engine_device(hjob->vic));
-	if (err < 0)
-		goto put_job;
-	hjob->vic_runtime_ref = true;
-	err = host1x_job_pin(job, ctx->engine->dev);
-	if (err)
-		goto put_job;
-
-	/* Once submitted, the job's release frees hjob instead of this path. */
-	job->release = nvdec_h264_job_release;
-	job->user_data = hjob;
-	ctx->in_flight = true;
-	hjob->submitted = true;
-	err = nvdec_engine_submit_job(ctx->engine, job, NULL, NULL);
-	if (err) {
-		job->release = NULL;
-		ctx->in_flight = false;
-		hjob->submitted = false;
-		host1x_job_unpin(job);
-		goto put_job;
-	}
-	*fence = dma_fence_get(hjob->fence);
-	host1x_job_put(job);
 	mutex_unlock(&ctx->lock);
 	return 0;
 
-put_job:
-	host1x_job_put(job);
 free_hjob:
-	nvdec_h264_job_free(hjob, true);
+	nvdec_job_free(hjob, true);
 unlock:
 	mutex_unlock(&ctx->lock);
 	return err;

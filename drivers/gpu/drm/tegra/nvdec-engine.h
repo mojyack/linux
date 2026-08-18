@@ -19,14 +19,35 @@ struct nvdec_v4l2;
 
 struct nvdec_engine;
 struct nvdec_engine_map;
-struct nvdec_h264_context;
+struct nvdec_decode_context;
+
+/* Where a picture is decoded to and detiled from; common to every codec. */
+struct nvdec_frame {
+	u16 coded_width;
+	u16 coded_height;
+	/* Visible rectangle VIC detiles out of the coded picture. */
+	u16 crop_left;
+	u16 crop_top;
+	u16 crop_width;
+	u16 crop_height;
+	u16 luma_stride;
+	u32 chroma_offset;
+	u32 dst_stride;
+	u32 dst_chroma_offset;
+	u32 output_payload_size;
+};
+
+/* The most references any codec passes, and the most firmware picture slots. */
+#define NVDEC_MAX_REFS		16
+#define NVDEC_MAX_PICTURES	17
 
 #define NVDEC_H264_DPB_ENTRIES	16
 /* 16 references plus the current picture; one firmware index each. */
-#define NVDEC_H264_MAX_PICTURES	17
+#define NVDEC_H264_MAX_PICTURES	NVDEC_MAX_PICTURES
 
 /* Copied, validated H.264 state. This is not a V4L2 control layout. */
 struct nvdec_h264_request {
+	struct nvdec_frame frame;
 	u8 profile_idc;
 	u8 level_idc;
 	u8 chroma_format_idc;
@@ -44,18 +65,7 @@ struct nvdec_h264_request {
 	u16 frame_num;
 	u16 pic_width_in_mbs;
 	u16 frame_height_in_mbs;
-	u16 luma_stride;
-	u16 chroma_stride;
-	/* Visible rectangle VIC detiles out of the coded picture. */
-	u16 crop_left;
-	u16 crop_top;
-	u16 crop_width;
-	u16 crop_height;
-	u32 output_payload_size;
 	u32 slice_count;
-	u32 chroma_offset;
-	u32 dst_stride;
-	u32 dst_chroma_offset;
 	s32 top_field_order_cnt;
 	s32 bottom_field_order_cnt;
 	s8 pic_init_qp_minus26;
@@ -101,9 +111,19 @@ struct nvdec_h264_request {
 #define NVDEC_H264_SLICE_SP	3
 #define NVDEC_H264_SLICE_SI	4
 
+/* Every member starts with its struct nvdec_frame. */
+union nvdec_request {
+	struct nvdec_frame frame;
+	struct nvdec_h264_request h264;
+};
+
+enum nvdec_codec {
+	NVDEC_CODEC_H264,
+};
+
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,
 					     void *data);
-typedef void (*nvdec_engine_h264_complete_t)(void *data, bool error);
+typedef void (*nvdec_engine_complete_t)(void *data, bool error);
 
 #define NVIDIA_TEGRA_210_NVDEC_FIRMWARE "nvidia/tegra210/nvdec.bin"
 #define NVIDIA_TEGRA_186_NVDEC_FIRMWARE "nvidia/tegra186/nvdec.bin"
@@ -145,24 +165,24 @@ int nvdec_engine_map_wait(struct nvdec_engine_map *map, bool write);
 int nvdec_engine_map_add_fence(struct nvdec_engine_map *map,
 			       struct dma_fence *fence, bool write);
 
-struct nvdec_h264_context *
-nvdec_engine_h264_context_create(struct nvdec_engine *engine);
-void nvdec_engine_h264_context_destroy(struct nvdec_h264_context *ctx);
-void nvdec_engine_h264_context_release_surface(struct nvdec_h264_context *ctx,
-					       struct nvdec_engine_map *surface);
-int nvdec_engine_h264_stage_slice(struct nvdec_h264_context *ctx,
-				  struct nvdec_engine_map *output,
-				  u32 payload_size, bool first,
-				  unsigned int max_slices);
-void nvdec_engine_h264_discard_slices(struct nvdec_h264_context *ctx);
-void nvdec_engine_h264_context_reset(struct nvdec_h264_context *ctx);
-int nvdec_engine_h264_submit(struct nvdec_h264_context *ctx,
-			     const struct nvdec_h264_request *request,
-			     struct nvdec_engine_map *surface,
-			     struct nvdec_engine_map *capture,
-			     struct nvdec_engine_map * const dpb[NVDEC_H264_DPB_ENTRIES],
-			     struct dma_fence **fence,
-			     nvdec_engine_h264_complete_t complete, void *data);
+struct nvdec_decode_context *
+nvdec_engine_context_create(struct nvdec_engine *engine, enum nvdec_codec codec);
+void nvdec_engine_context_destroy(struct nvdec_decode_context *ctx);
+void nvdec_engine_context_release_surface(struct nvdec_decode_context *ctx,
+					  struct nvdec_engine_map *surface);
+int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
+			     struct nvdec_engine_map *output,
+			     u32 payload_size, bool first,
+			     unsigned int max_slices);
+void nvdec_engine_discard_slices(struct nvdec_decode_context *ctx);
+void nvdec_engine_context_reset(struct nvdec_decode_context *ctx);
+int nvdec_engine_submit(struct nvdec_decode_context *ctx,
+			const union nvdec_request *request,
+			struct nvdec_engine_map *surface,
+			struct nvdec_engine_map *capture,
+			struct nvdec_engine_map * const refs[NVDEC_MAX_REFS],
+			struct dma_fence **fence,
+			nvdec_engine_complete_t complete, void *data);
 
 extern const struct dev_pm_ops nvdec_engine_pm_ops;
 extern const struct of_device_id nvdec_engine_of_match[];

@@ -24,26 +24,6 @@
 #define NVDEC_MAX_HEIGHT	4096
 #define NVDEC_H264_CODED_SIZE	SZ_4M
 
-/* Smallest picture the engine decodes correctly, and the coded alignment. */
-static const struct nvdec_codec_size {
-	u32 pixelformat;
-	u16 min_width;
-	u16 min_height;
-	u16 align;
-} nvdec_codec_sizes[] = {
-	{ V4L2_PIX_FMT_H264_SLICE,   48,  16, 16 },
-};
-
-static const struct nvdec_codec_size *nvdec_codec_size(u32 pixelformat)
-{
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(nvdec_codec_sizes); i++)
-		if (nvdec_codec_sizes[i].pixelformat == pixelformat)
-			return &nvdec_codec_sizes[i];
-	return NULL;
-}
-
 struct nvdec_v4l2 {
 	struct nvdec_engine *engine;
 	struct device *dev;
@@ -63,12 +43,12 @@ struct nvdec_v4l2_ctx {
 	struct v4l2_format capture_fmt;
 	/* Visible rectangle of the coded picture; VIC detiles only this. */
 	struct v4l2_rect crop;
-	struct v4l2_ctrl *ctrls[10];
-	struct nvdec_h264_context *h264;
+	enum nvdec_codec codec;
+	struct nvdec_decode_context *decode;
 	struct list_head surfaces;
 	struct nvdec_v4l2_job *job;
 	/* Picture being assembled; slices of one picture share it. */
-	struct nvdec_h264_request picture;
+	union nvdec_request request;
 	u32 last_first_mb;
 };
 
@@ -84,7 +64,7 @@ struct nvdec_v4l2_job {
 	struct vb2_v4l2_buffer *dst;
 	struct nvdec_v4l2_surface *surface;
 	struct nvdec_engine_map *capture;
-	struct nvdec_engine_map *dpb[NVDEC_H264_DPB_ENTRIES];
+	struct nvdec_engine_map *dpb[NVDEC_MAX_REFS];
 	struct dma_fence *fence;
 	bool capture_new;
 	bool aborted;
@@ -128,22 +108,6 @@ static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 static void nvdec_release_surface(struct nvdec_v4l2_ctx *ctx,
 				  struct vb2_buffer *vb);
 static void nvdec_release_surfaces(struct nvdec_v4l2_ctx *ctx);
-
-static void nvdec_reset_coded_fmt(struct nvdec_v4l2_ctx *ctx)
-{
-	struct v4l2_pix_format_mplane *pix = &ctx->coded_fmt.fmt.pix_mp;
-	const struct nvdec_codec_size *size =
-		nvdec_codec_size(V4L2_PIX_FMT_H264_SLICE);
-
-	memset(&ctx->coded_fmt, 0, sizeof(ctx->coded_fmt));
-	ctx->coded_fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-	pix->width = size->min_width;
-	pix->height = size->min_height;
-	pix->pixelformat = V4L2_PIX_FMT_H264_SLICE;
-	pix->field = V4L2_FIELD_NONE;
-	pix->num_planes = 1;
-	pix->plane_fmt[0].sizeimage = NVDEC_H264_CODED_SIZE;
-}
 
 /* The decoded frame keeps the colorimetry the client set on the OUTPUT queue. */
 static void nvdec_fill_capture_fmt(const struct nvdec_v4l2_ctx *ctx,
@@ -198,28 +162,6 @@ static size_t nvdec_surface_size(const struct nvdec_v4l2_ctx *ctx)
 
 	return nvdec_surface_chroma_offset(ctx) +
 	       nvdec_surface_stride(ctx) * ALIGN(DIV_ROUND_UP(height, 2), 16);
-}
-
-static int nvdec_try_coded_fmt(struct v4l2_format *f)
-{
-	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
-	const struct nvdec_codec_size *size;
-
-	size = nvdec_codec_size(pix->pixelformat);
-	if (!size) {
-		pix->pixelformat = V4L2_PIX_FMT_H264_SLICE;
-		size = nvdec_codec_size(pix->pixelformat);
-	}
-	pix->width = clamp_t(u32, pix->width, size->min_width, NVDEC_MAX_WIDTH);
-	pix->height = clamp_t(u32, pix->height, size->min_height, NVDEC_MAX_HEIGHT);
-	pix->width = ALIGN(pix->width, size->align);
-	pix->height = ALIGN(pix->height, size->align);
-	pix->field = V4L2_FIELD_NONE;
-	pix->num_planes = 1;
-	pix->plane_fmt[0].bytesperline = 0;
-	pix->plane_fmt[0].sizeimage = max_t(u32, pix->plane_fmt[0].sizeimage,
-					    NVDEC_H264_CODED_SIZE);
-	return 0;
 }
 
 static int nvdec_queue_setup(struct vb2_queue *vq, unsigned int *nbufs,
@@ -299,10 +241,10 @@ static void nvdec_stop_streaming(struct vb2_queue *vq)
 	}
 	if (V4L2_TYPE_IS_CAPTURE(vq->type)) {
 		/* Drop the size-derived scratch so the next stream may differ. */
-		nvdec_engine_h264_context_reset(ctx->h264);
+		nvdec_engine_context_reset(ctx->decode);
 		nvdec_release_surfaces(ctx);
 	} else {
-		nvdec_engine_h264_discard_slices(ctx->h264);
+		nvdec_engine_discard_slices(ctx->decode);
 	}
 }
 
@@ -539,7 +481,7 @@ static void nvdec_release_surface(struct nvdec_v4l2_ctx *ctx,
 
 	if (!surface)
 		return;
-	nvdec_engine_h264_context_release_surface(ctx->h264, surface->map);
+	nvdec_engine_context_release_surface(ctx->decode, surface->map);
 	list_del(&surface->list);
 	nvdec_engine_map_put(surface->map);
 	kfree(surface);
@@ -601,15 +543,54 @@ static int nvdec_map_buffer(struct nvdec_v4l2_ctx *ctx, struct vb2_buffer *vb,
 	return 0;
 }
 
-static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
+static int nvdec_set_codec(struct nvdec_v4l2_ctx *ctx, enum nvdec_codec codec)
 {
-	struct nvdec_h264_request *request = &ctx->picture;
+	struct nvdec_decode_context *decode;
+
+	if (ctx->codec == codec)
+		return 0;
+
+	decode = nvdec_engine_context_create(ctx->nvdec->engine, codec);
+	if (IS_ERR(decode))
+		return PTR_ERR(decode);
+
+	nvdec_release_surfaces(ctx);
+	nvdec_engine_context_destroy(ctx->decode);
+	ctx->decode = decode;
+	ctx->codec = codec;
+	return 0;
+}
+
+/* Clears the request and fills the surface and detile geometry it starts with. */
+static void nvdec_snapshot_frame(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *pix = &ctx->capture_fmt.fmt.pix_mp;
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	struct nvdec_frame *f = &ctx->request.frame;
+
+	memset(&ctx->request, 0, sizeof(ctx->request));
+	f->coded_width = coded->width;
+	f->coded_height = coded->height;
+	f->crop_left = ctx->crop.left;
+	f->crop_top = ctx->crop.top;
+	f->crop_width = ctx->crop.width;
+	f->crop_height = ctx->crop.height;
+	f->luma_stride = nvdec_surface_stride(ctx);
+	f->chroma_offset = nvdec_surface_chroma_offset(ctx);
+	f->dst_stride = pix->plane_fmt[0].bytesperline;
+	f->dst_chroma_offset = f->dst_stride * pix->height;
+}
+
+static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx,
+				       struct vb2_v4l2_buffer *src,
+				       struct vb2_v4l2_buffer *dst, bool first)
+{
+	struct nvdec_h264_request *request = &ctx->request.h264;
 	const struct v4l2_ctrl_h264_sps *sps;
 	const struct v4l2_ctrl_h264_pps *pps;
 	const struct v4l2_ctrl_h264_decode_params *dec;
 	const struct v4l2_ctrl_h264_slice_params *slice;
 	const struct v4l2_ctrl_h264_scaling_matrix *scaling;
-	const struct v4l2_pix_format_mplane *pix = &ctx->capture_fmt.fmt.pix_mp;
 	unsigned int i;
 
 	if (nvdec_validate_h264_request(ctx, first))
@@ -619,7 +600,7 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_DECODE_PARAMS);
 	slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
 	scaling = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SCALING_MATRIX);
-	memset(request, 0, sizeof(*request));
+	nvdec_snapshot_frame(ctx);
 	request->profile_idc = sps->profile_idc;
 	request->level_idc = sps->level_idc;
 	request->chroma_format_idc = sps->chroma_format_idc;
@@ -637,15 +618,6 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	request->frame_num = dec->frame_num;
 	request->pic_width_in_mbs = sps->pic_width_in_mbs_minus1 + 1;
 	request->frame_height_in_mbs = sps->pic_height_in_map_units_minus1 + 1;
-	request->luma_stride = nvdec_surface_stride(ctx);
-	request->chroma_stride = request->luma_stride;
-	request->chroma_offset = nvdec_surface_chroma_offset(ctx);
-	request->crop_left = ctx->crop.left;
-	request->crop_top = ctx->crop.top;
-	request->crop_width = ctx->crop.width;
-	request->crop_height = ctx->crop.height;
-	request->dst_stride = pix->plane_fmt[0].bytesperline;
-	request->dst_chroma_offset = request->dst_stride * pix->height;
 	request->top_field_order_cnt = dec->top_field_order_cnt;
 	request->bottom_field_order_cnt = dec->bottom_field_order_cnt;
 	request->pic_init_qp_minus26 = pps->pic_init_qp_minus26;
@@ -710,7 +682,7 @@ static void nvdec_job_cleanup_maps(struct nvdec_v4l2_job *job)
 	unsigned int i;
 
 	nvdec_engine_map_put(job->capture);
-	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++)
+	for (i = 0; i < NVDEC_MAX_REFS; i++)
 		nvdec_engine_map_put(job->dpb[i]);
 	dma_fence_put(job->fence);
 }
@@ -747,12 +719,121 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 		return err;
 	err = nvdec_engine_map_wait(output, false);
 	if (!err)
-		err = nvdec_engine_h264_stage_slice(ctx->h264, output,
-						    vb2_get_plane_payload(&src->vb2_buf, 0),
-					first, ctx->picture.pic_width_in_mbs *
-					ctx->picture.frame_height_in_mbs);
+		err = nvdec_engine_stage_slice(ctx->decode, output,
+					       vb2_get_plane_payload(&src->vb2_buf, 0),
+					       first, ctx->request.h264.pic_width_in_mbs *
+					       ctx->request.h264.frame_height_in_mbs);
 	nvdec_engine_map_put(output);
 	return err;
+}
+
+/* Each DPB entry names a capture buffer, and through it a pool surface. */
+static int nvdec_pin_reference(struct nvdec_v4l2_ctx *ctx,
+			       struct nvdec_v4l2_job *job, unsigned int slot,
+			       u64 timestamp)
+{
+	struct vb2_queue *cap_q = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
+	struct nvdec_v4l2_surface *surface;
+
+	surface = nvdec_find_surface(ctx, vb2_find_buffer(cap_q, timestamp));
+	if (!surface)
+		return -EINVAL;
+
+	job->dpb[slot] = nvdec_engine_map_get(surface->map);
+	return 0;
+}
+
+static int nvdec_resolve_h264(struct nvdec_v4l2_ctx *ctx,
+			      struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_h264_decode_params *dec =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_DECODE_PARAMS);
+	unsigned int i;
+	int err;
+
+	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
+		if (!ctx->request.h264.dpb[i].valid)
+			continue;
+		err = nvdec_pin_reference(ctx, job, i, dec->dpb[i].reference_ts);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
+/* Everything that differs between the coded formats on the OUTPUT queue. */
+struct nvdec_codec_desc {
+	u32 pixelformat;
+	/* Smallest picture the engine decodes correctly, and the coded alignment. */
+	u16 min_width;
+	u16 min_height;
+	u16 align;
+	const struct v4l2_ctrl_config *ctrls;
+	unsigned int num_ctrls;
+	int (*snapshot)(struct nvdec_v4l2_ctx *ctx, struct vb2_v4l2_buffer *src,
+			struct vb2_v4l2_buffer *dst, bool first);
+	int (*resolve)(struct nvdec_v4l2_ctx *ctx, struct nvdec_v4l2_job *job);
+};
+
+static const struct nvdec_codec_desc nvdec_codecs[] = {
+	[NVDEC_CODEC_H264] = {
+		.pixelformat = V4L2_PIX_FMT_H264_SLICE,
+		.min_width = 48,
+		.min_height = 16,
+		.align = 16,
+		.ctrls = nvdec_h264_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_h264_ctrls),
+		.snapshot = nvdec_snapshot_h264_request,
+		.resolve = nvdec_resolve_h264,
+	},
+};
+
+static const struct nvdec_codec_desc *nvdec_codec_desc(u32 pixelformat)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(nvdec_codecs); i++)
+		if (nvdec_codecs[i].pixelformat == pixelformat)
+			return &nvdec_codecs[i];
+	return NULL;
+}
+
+static void nvdec_reset_coded_fmt(struct nvdec_v4l2_ctx *ctx)
+{
+	struct v4l2_pix_format_mplane *pix = &ctx->coded_fmt.fmt.pix_mp;
+	const struct nvdec_codec_desc *desc = &nvdec_codecs[NVDEC_CODEC_H264];
+
+	memset(&ctx->coded_fmt, 0, sizeof(ctx->coded_fmt));
+	ctx->coded_fmt.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+	pix->width = desc->min_width;
+	pix->height = desc->min_height;
+	pix->pixelformat = desc->pixelformat;
+	pix->field = V4L2_FIELD_NONE;
+	pix->num_planes = 1;
+	pix->plane_fmt[0].sizeimage = NVDEC_H264_CODED_SIZE;
+}
+
+static int nvdec_try_coded_fmt(struct v4l2_format *f)
+{
+	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
+	const struct nvdec_codec_desc *desc;
+
+	desc = nvdec_codec_desc(pix->pixelformat);
+	if (!desc) {
+		desc = &nvdec_codecs[NVDEC_CODEC_H264];
+		pix->pixelformat = desc->pixelformat;
+	}
+	pix->width = clamp_t(u32, pix->width, desc->min_width, NVDEC_MAX_WIDTH);
+	pix->height = clamp_t(u32, pix->height, desc->min_height, NVDEC_MAX_HEIGHT);
+	pix->width = ALIGN(pix->width, desc->align);
+	pix->height = ALIGN(pix->height, desc->align);
+	pix->field = V4L2_FIELD_NONE;
+	pix->num_planes = 1;
+	pix->plane_fmt[0].bytesperline = 0;
+	pix->plane_fmt[0].sizeimage = max_t(u32, pix->plane_fmt[0].sizeimage,
+					    NVDEC_H264_CODED_SIZE);
+	return 0;
 }
 
 static void nvdec_device_run(void *priv)
@@ -761,12 +842,11 @@ static void nvdec_device_run(void *priv)
 	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 	struct media_request *req = src ? src->vb2_buf.req_obj.req : NULL;
+	const struct nvdec_codec_desc *desc = &nvdec_codecs[ctx->codec];
 	struct nvdec_v4l2_job *job;
-	const struct v4l2_ctrl_h264_decode_params *dec;
-	const struct v4l2_ctrl_h264_slice_params *slice;
-	unsigned int i;
 	bool controls_set_up = false;
-	bool first;
+	bool first = true;
+	unsigned int i;
 	int err;
 
 	err = req ? v4l2_ctrl_request_setup(req, &ctx->ctrl_hdl) : -EINVAL;
@@ -776,9 +856,13 @@ static void nvdec_device_run(void *priv)
 	if (err)
 		goto fail;
 	/* A picture starts at macroblock zero; m2m's new_frame is unreliable. */
-	slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
-	first = !slice || !slice->first_mb_in_slice;
-	err = nvdec_snapshot_h264_request(ctx, first);
+	if (ctx->codec == NVDEC_CODEC_H264) {
+		const struct v4l2_ctrl_h264_slice_params *slice =
+			nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
+
+		first = !slice || !slice->first_mb_in_slice;
+	}
+	err = desc->snapshot(ctx, src, dst, first);
 	if (err)
 		goto fail;
 	err = nvdec_stage_slice(ctx, src, first);
@@ -810,33 +894,20 @@ static void nvdec_device_run(void *priv)
 	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, &job->capture);
 	if (err)
 		goto free_job;
-	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_DECODE_PARAMS);
-	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
-		struct vb2_buffer *vb;
-		struct nvdec_v4l2_surface *surface;
-
-		if (!ctx->picture.dpb[i].valid)
-			continue;
-		vb = vb2_find_buffer(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx),
-				     dec->dpb[i].reference_ts);
-		surface = nvdec_find_surface(ctx, vb);
-		if (!surface) {
-			err = -EINVAL;
-			goto free_job;
-		}
-		job->dpb[i] = nvdec_engine_map_get(surface->map);
-	}
+	err = desc->resolve(ctx, job);
+	if (err)
+		goto free_job;
 	err = nvdec_engine_map_wait(job->capture, true);
-	for (i = 0; !err && i < NVDEC_H264_DPB_ENTRIES; i++) {
+	for (i = 0; !err && i < NVDEC_MAX_REFS; i++) {
 		if (job->dpb[i])
 			err = nvdec_engine_map_wait(job->dpb[i], false);
 	}
 	if (err)
 		goto free_job;
 	ctx->job = job;
-	err = nvdec_engine_h264_submit(ctx->h264, &ctx->picture,
-				       job->surface->map, job->capture, job->dpb,
-					&job->fence, nvdec_job_complete, job);
+	err = nvdec_engine_submit(ctx->decode, &ctx->request, job->surface->map,
+				  job->capture, job->dpb, &job->fence,
+				  nvdec_job_complete, job);
 	if (err) {
 		ctx->job = NULL;
 		goto free_job;
@@ -851,7 +922,7 @@ free_job:
 fail:
 	if (controls_set_up)
 		v4l2_ctrl_request_complete(req, &ctx->ctrl_hdl);
-	nvdec_engine_h264_discard_slices(ctx->h264);
+	nvdec_engine_discard_slices(ctx->decode);
 	src->flags &= ~V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF;
 	v4l2_m2m_buf_done_and_job_finish(ctx->nvdec->m2m_dev, ctx->fh.m2m_ctx,
 					 VB2_BUF_STATE_ERROR);
@@ -896,10 +967,16 @@ static int nvdec_querycap(struct file *file, void *priv,
 static int nvdec_enum_fmt(struct file *file, void *priv,
 			  struct v4l2_fmtdesc *f)
 {
+	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
+		if (f->index >= ARRAY_SIZE(nvdec_codecs))
+			return -EINVAL;
+		f->pixelformat = nvdec_codecs[f->index].pixelformat;
+		return 0;
+	}
+
 	if (f->index)
 		return -EINVAL;
-	f->pixelformat = V4L2_TYPE_IS_OUTPUT(f->type) ?
-		V4L2_PIX_FMT_H264_SLICE : V4L2_PIX_FMT_NV12;
+	f->pixelformat = V4L2_PIX_FMT_NV12;
 	return 0;
 }
 
@@ -933,8 +1010,14 @@ static int nvdec_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	if (err)
 		return err;
 	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
+		enum nvdec_codec codec =
+			nvdec_codec_desc(f->fmt.pix_mp.pixelformat) - nvdec_codecs;
+
 		if (vb2_is_busy(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx)))
 			return -EBUSY;
+		err = nvdec_set_codec(ctx, codec);
+		if (err)
+			return err;
 		ctx->coded_fmt = *f;
 		nvdec_reset_capture_fmt(ctx);
 	} else {
@@ -1006,20 +1089,20 @@ static int nvdec_s_selection(struct file *file, void *priv,
 static int nvdec_enum_framesizes(struct file *file, void *priv,
 				 struct v4l2_frmsizeenum *fsize)
 {
-	const struct nvdec_codec_size *size;
+	const struct nvdec_codec_desc *desc;
 
 	if (fsize->index)
 		return -EINVAL;
-	size = nvdec_codec_size(fsize->pixel_format);
-	if (!size)
+	desc = nvdec_codec_desc(fsize->pixel_format);
+	if (!desc)
 		return -EINVAL;
 	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
-	fsize->stepwise.min_width = size->min_width;
+	fsize->stepwise.min_width = desc->min_width;
 	fsize->stepwise.max_width = NVDEC_MAX_WIDTH;
-	fsize->stepwise.step_width = size->align;
-	fsize->stepwise.min_height = size->min_height;
+	fsize->stepwise.step_width = desc->align;
+	fsize->stepwise.min_height = desc->min_height;
 	fsize->stepwise.max_height = NVDEC_MAX_HEIGHT;
-	fsize->stepwise.step_height = size->align;
+	fsize->stepwise.step_height = desc->align;
 	return 0;
 }
 
@@ -1053,7 +1136,7 @@ static int nvdec_open(struct file *file)
 {
 	struct nvdec_v4l2 *nvdec = video_drvdata(file);
 	struct nvdec_v4l2_ctx *ctx;
-	unsigned int i;
+	unsigned int i, j;
 	int err;
 
 	if (!nvdec_engine_ready(nvdec->engine))
@@ -1064,19 +1147,21 @@ static int nvdec_open(struct file *file)
 		return -ENOMEM;
 	ctx->nvdec = nvdec;
 	INIT_LIST_HEAD(&ctx->surfaces);
-	ctx->h264 = nvdec_engine_h264_context_create(nvdec->engine);
-	if (IS_ERR(ctx->h264)) {
-		err = PTR_ERR(ctx->h264);
+	ctx->codec = NVDEC_CODEC_H264;
+	ctx->decode = nvdec_engine_context_create(nvdec->engine, ctx->codec);
+	if (IS_ERR(ctx->decode)) {
+		err = PTR_ERR(ctx->decode);
 		goto free_ctx;
 	}
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
-	v4l2_ctrl_handler_init(&ctx->ctrl_hdl, ARRAY_SIZE(nvdec_h264_ctrls));
-	for (i = 0; i < ARRAY_SIZE(nvdec_h264_ctrls); i++) {
-		ctx->ctrls[i] = v4l2_ctrl_new_custom(&ctx->ctrl_hdl,
-						     &nvdec_h264_ctrls[i], NULL);
-		if (ctx->ctrl_hdl.error)
-			goto free_ctrls;
+	v4l2_ctrl_handler_init(&ctx->ctrl_hdl, 16);
+	for (i = 0; i < ARRAY_SIZE(nvdec_codecs); i++) {
+		for (j = 0; j < nvdec_codecs[i].num_ctrls; j++)
+			v4l2_ctrl_new_custom(&ctx->ctrl_hdl,
+					     &nvdec_codecs[i].ctrls[j], NULL);
 	}
+	if (ctx->ctrl_hdl.error)
+		goto free_ctrls;
 	ctx->fh.ctrl_handler = &ctx->ctrl_hdl;
 	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(nvdec->m2m_dev, ctx, nvdec_queue_init);
 	if (IS_ERR(ctx->fh.m2m_ctx)) {
@@ -1092,7 +1177,7 @@ free_ctrls:
 	err = ctx->ctrl_hdl.error ?: err;
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
-	nvdec_engine_h264_context_destroy(ctx->h264);
+	nvdec_engine_context_destroy(ctx->decode);
 free_ctx:
 	kfree(ctx);
 	return err;
@@ -1107,7 +1192,7 @@ static int nvdec_release(struct file *file)
 	nvdec_release_surfaces(ctx);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
-	nvdec_engine_h264_context_destroy(ctx->h264);
+	nvdec_engine_context_destroy(ctx->decode);
 	kfree(ctx);
 	return 0;
 }
