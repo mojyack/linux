@@ -327,7 +327,10 @@ int tegra_drm_submit(struct tegra_drm_context *context,
 	if (err)
 		goto fail;
 
-	err = host1x_job_submit(job);
+	if (context->client->ops->submit_job)
+		err = context->client->ops->submit_job(context->client, job);
+	else
+		err = host1x_job_submit(job);
 	if (err) {
 		host1x_job_unpin(job);
 		goto fail;

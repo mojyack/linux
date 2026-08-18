@@ -420,6 +420,205 @@ int vic_engine_can_use_context(struct vic_engine *engine, bool *supported)
 	return 0;
 }
 
+/* VicConfigStruct 4.0; only what the detile stage touches is broken out. */
+struct vic_pipe_config {
+	__le32 downsample;		/* horiz | vert << 16, U9.2 */
+	u8 reserved[0x0c];
+};
+
+struct vic_output_config {
+	u8 reserved0[0x08];		/* alpha fill, background, regamma */
+	__le32 target_rect_h;		/* left | right << 16 */
+	__le32 target_rect_v;		/* top | bottom << 16 */
+};
+
+struct vic_surface_config {
+	__le32 format;			/* pixel format, chroma loc, block kind */
+	__le32 size;			/* width | height << 14 */
+	__le32 luma;			/* luma width | height << 14 */
+	__le32 chroma;			/* chroma width | height << 14 */
+};
+
+struct vic_slot_config {
+	__le32 flags;			/* SlotEnable, CurrentFieldEnable */
+	u8 reserved0[0x0c];
+	__le32 clamp;			/* SoftClampLow | SoftClampHigh << 10 */
+	__le32 alpha;			/* PlanarAlpha | ConstantAlpha << 10 */
+	u8 reserved1[0x08];
+	__le32 source_rect[4];		/* left, right, top, bottom, U14.16 */
+	__le32 dest_rect[2];		/* left | right << 16, top | bottom << 16 */
+	u8 reserved2[0x08];
+};
+
+struct vic_slot {
+	struct vic_slot_config config;
+	struct vic_surface_config surface;
+	u8 luma_key[0x10];
+	u8 color_matrix[0x20];
+	u8 gamut_matrix[0x20];
+	u8 blending[0x10];
+};
+
+struct vic_config_struct {
+	struct vic_pipe_config pipe;
+	struct vic_output_config output;
+	struct vic_surface_config out_surface;
+	u8 out_color_matrix[0x20];
+	u8 clear_rect[0x40];
+	struct vic_slot slot[8];
+};
+
+static_assert(sizeof(struct vic_slot_config) == 0x40);
+static_assert(sizeof(struct vic_slot) == 0xb0);
+static_assert(offsetof(struct vic_config_struct, out_surface) == 0x020);
+static_assert(offsetof(struct vic_config_struct, slot) == 0x090);
+static_assert(offsetof(struct vic_slot, surface) == 0x040);
+static_assert(sizeof(struct vic_config_struct) == VIC_CONFIG_SIZE);
+
+#define VIC_T_Y8___U8V8_N420		67
+#define VIC_BLK_KIND_PITCH		0
+#define VIC_BLK_KIND_GENERIC_16BX2	1
+
+#define VIC_SURFACE_FORMAT(fmt, loc_h, loc_v, kind, height, cache)	\
+	((fmt) | ((loc_h) << 7) | ((loc_v) << 9) | ((kind) << 11) |	\
+	 ((height) << 15) | ((cache) << 19))
+#define VIC_SURFACE_DIMS(w, h)		(((w) - 1) | (((h) - 1) << 14))
+#define VIC_RECT(low, high)		((low) | ((high) << 16))
+
+void vic_engine_fill_detile_config(void *config,
+				   const struct vic_detile_params *params)
+{
+	struct vic_config_struct *c = config;
+	u32 w = params->width, h = ALIGN(params->height, 2);
+	u32 dw = params->out_width, dh = ALIGN(params->out_height, 2);
+	u32 src_rows = ALIGN(h, 32), dst_rows = dh;
+
+	memset(c, 0, sizeof(*c));
+
+	c->pipe.downsample = cpu_to_le32(VIC_RECT(1 << 2, 1 << 2));
+
+	c->output.target_rect_h = cpu_to_le32(VIC_RECT(0, dw - 1));
+	c->output.target_rect_v = cpu_to_le32(VIC_RECT(0, dh - 1));
+
+	c->out_surface.format = cpu_to_le32(VIC_SURFACE_FORMAT(VIC_T_Y8___U8V8_N420,
+							       0, 0, VIC_BLK_KIND_PITCH, 0, 0));
+	c->out_surface.size = cpu_to_le32(VIC_SURFACE_DIMS(dw, dh));
+	c->out_surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride,
+							   dst_rows));
+	c->out_surface.chroma = cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride / 2,
+							     dst_rows / 2));
+
+	c->slot[0].config.flags = cpu_to_le32(BIT(0) | BIT(8));
+	c->slot[0].config.clamp = cpu_to_le32(1023 << 10);
+	c->slot[0].config.alpha = cpu_to_le32(1023 | BIT(10));
+	c->slot[0].config.source_rect[0] = cpu_to_le32(params->left << 16);
+	c->slot[0].config.source_rect[1] =
+		cpu_to_le32((params->left + dw - 1) << 16);
+	c->slot[0].config.source_rect[2] = cpu_to_le32(params->top << 16);
+	c->slot[0].config.source_rect[3] =
+		cpu_to_le32((params->top + dh - 1) << 16);
+	c->slot[0].config.dest_rect[0] = cpu_to_le32(VIC_RECT(0, dw - 1));
+	c->slot[0].config.dest_rect[1] = cpu_to_le32(VIC_RECT(0, dh - 1));
+
+	/* Chroma sited left, block-linear GOB height 2, 32Bx8 cache width. */
+	c->slot[0].surface.format =
+		cpu_to_le32(VIC_SURFACE_FORMAT(VIC_T_Y8___U8V8_N420, 0, 1,
+					       VIC_BLK_KIND_GENERIC_16BX2, 1, 1));
+	c->slot[0].surface.size = cpu_to_le32(VIC_SURFACE_DIMS(w, h));
+	c->slot[0].surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride,
+							       src_rows));
+	c->slot[0].surface.chroma = cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride / 2,
+								 src_rows / 2));
+}
+
+#define VIC_METHOD_INCR			0x10100002
+#define VIC_METHOD_APPLICATION_ID	0x080
+#define VIC_METHOD_EXECUTE		0x0c0
+#define VIC_METHOD_SURFACE0_LUMA	0x100
+#define VIC_METHOD_SURFACE0_CHROMA_U	0x101
+#define VIC_METHOD_CONTROL_PARAMS	0x1c1
+#define VIC_METHOD_CONFIG_STRUCT	0x1c2
+#define VIC_METHOD_OUT_LUMA		0x1c8
+#define VIC_METHOD_OUT_CHROMA_U		0x1c9
+
+static void vic_emit_method(u32 *gather, unsigned int *word, unsigned int method,
+			    u32 value)
+{
+	gather[(*word)++] = VIC_METHOD_INCR;
+	gather[(*word)++] = method;
+	gather[(*word)++] = value;
+}
+
+/* Like NVDEC, every VIC address method carries the address shifted by 8. */
+static int vic_emit_address(u32 *gather, unsigned int *word, unsigned int method,
+			    dma_addr_t iova)
+{
+	if (!IS_ALIGNED(iova, SZ_256) || upper_32_bits(iova >> 8))
+		return -EINVAL;
+
+	vic_emit_method(gather, word, method, lower_32_bits(iova >> 8));
+	return 0;
+}
+
+int vic_engine_emit_detile(u32 *gather, unsigned int *word, dma_addr_t config,
+			   dma_addr_t src_luma, dma_addr_t src_chroma,
+			   dma_addr_t dst_luma, dma_addr_t dst_chroma)
+{
+	unsigned int start = *word;
+	int err;
+
+	vic_emit_method(gather, word, VIC_METHOD_APPLICATION_ID, 1);
+	vic_emit_method(gather, word, VIC_METHOD_CONTROL_PARAMS,
+			((VIC_CONFIG_SIZE >> 4) << 16) | BIT(8) | BIT(0));
+
+	err = vic_emit_address(gather, word, VIC_METHOD_CONFIG_STRUCT, config);
+	if (!err)
+		err = vic_emit_address(gather, word, VIC_METHOD_SURFACE0_LUMA,
+				       src_luma);
+	if (!err)
+		err = vic_emit_address(gather, word, VIC_METHOD_SURFACE0_CHROMA_U,
+				       src_chroma);
+	if (!err)
+		err = vic_emit_address(gather, word, VIC_METHOD_OUT_LUMA, dst_luma);
+	if (!err)
+		err = vic_emit_address(gather, word, VIC_METHOD_OUT_CHROMA_U,
+				       dst_chroma);
+	if (err)
+		return err;
+
+	vic_emit_method(gather, word, VIC_METHOD_EXECUTE, BIT(8));
+
+	if (WARN_ON_ONCE(*word - start != VIC_DETILE_WORDS))
+		return -EINVAL;
+
+	return 0;
+}
+
+struct vic_engine *vic_engine_find(struct tegra_drm *tegra)
+{
+	struct tegra_drm_client *client;
+	struct vic_engine *engine = NULL;
+
+	if (!tegra)
+		return NULL;
+
+	mutex_lock(&tegra->clients_lock);
+	list_for_each_entry(client, &tegra->clients, list) {
+		if (client->base.class == HOST1X_CLASS_VIC) {
+			engine = to_vic_engine(client);
+			break;
+		}
+	}
+	mutex_unlock(&tegra->clients_lock);
+
+	return engine;
+}
+
+struct device *vic_engine_device(struct vic_engine *engine)
+{
+	return engine->dev;
+}
+
 static const struct vic_config vic_t124_config = {
 	.firmware = NVIDIA_TEGRA_124_VIC_FIRMWARE,
 	.version = 0x40,
