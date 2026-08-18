@@ -111,14 +111,111 @@ struct nvdec_h264_request {
 #define NVDEC_H264_SLICE_SP	3
 #define NVDEC_H264_SLICE_SI	4
 
+#define NVDEC_HEVC_DPB_ENTRIES	16
+/* 15 references plus the current picture; one firmware index each. */
+#define NVDEC_HEVC_MAX_PICTURES	16
+/* The largest coding tree unit, which the coded size is padded up to. */
+#define NVDEC_HEVC_CTU_SIZE	64
+
+/* Copied, validated HEVC state. This is not a V4L2 control layout. */
+struct nvdec_hevc_request {
+	struct nvdec_frame frame;
+	u16 pic_width_in_luma_samples;
+	u16 pic_height_in_luma_samples;
+	u16 ctb_width;
+	u16 ctb_height;
+	u16 sw_hdr_skip_length;
+	s32 pic_order_cnt_val;
+	u32 sps_flags;
+	u32 pps_flags;
+	u8 bit_depth;
+	u8 log2_min_luma_coding_block_size;
+	u8 log2_max_luma_coding_block_size;
+	u8 log2_min_transform_block_size;
+	u8 log2_max_transform_block_size;
+	u8 max_transform_hierarchy_depth_inter;
+	u8 max_transform_hierarchy_depth_intra;
+	u8 pcm_sample_bit_depth_luma;
+	u8 pcm_sample_bit_depth_chroma;
+	u8 log2_min_pcm_luma_coding_block_size;
+	u8 log2_max_pcm_luma_coding_block_size;
+	u8 num_extra_slice_header_bits;
+	u8 num_ref_idx_l0_default_active;
+	u8 num_ref_idx_l1_default_active;
+	u8 init_qp;
+	u8 diff_cu_qp_delta_depth;
+	u8 num_tile_columns;
+	u8 num_tile_rows;
+	u8 log2_parallel_merge_level;
+	u8 num_ref_frames;
+	u8 num_active_dpb_entries;
+	u8 num_poc_st_curr_before;
+	u8 num_poc_st_curr_after;
+	u8 num_poc_lt_curr;
+	s8 pps_cb_qp_offset;
+	s8 pps_cr_qp_offset;
+	s8 pps_beta_offset;
+	s8 pps_tc_offset;
+	u16 column_width[20];
+	u16 row_height[22];
+	u8 poc_st_curr_before[NVDEC_HEVC_DPB_ENTRIES];
+	u8 poc_st_curr_after[NVDEC_HEVC_DPB_ENTRIES];
+	u8 poc_lt_curr[NVDEC_HEVC_DPB_ENTRIES];
+	struct {
+		u8 valid;
+		u8 long_term;
+		s32 pic_order_cnt_val;
+	} dpb[NVDEC_HEVC_DPB_ENTRIES];
+	u8 scaling_dc_16x16[6];
+	u8 scaling_dc_32x32[2];
+	u8 scaling_4x4[6][16];
+	u8 scaling_8x8[6][64];
+	u8 scaling_16x16[6][64];
+	u8 scaling_32x32[2][64];
+};
+
+#define NVDEC_HEVC_SPS_SCALING_LIST		BIT(0)
+#define NVDEC_HEVC_SPS_AMP			BIT(1)
+#define NVDEC_HEVC_SPS_SAO			BIT(2)
+#define NVDEC_HEVC_SPS_PCM			BIT(3)
+#define NVDEC_HEVC_SPS_PCM_LOOP_FILTER_DISABLED	BIT(4)
+#define NVDEC_HEVC_SPS_TEMPORAL_MVP		BIT(5)
+#define NVDEC_HEVC_SPS_STRONG_INTRA_SMOOTHING	BIT(6)
+#define NVDEC_HEVC_SPS_IDR			BIT(7)
+#define NVDEC_HEVC_SPS_IRAP			BIT(8)
+
+#define NVDEC_HEVC_PPS_DEPENDENT_SLICE_SEGMENTS	BIT(0)
+#define NVDEC_HEVC_PPS_OUTPUT_FLAG_PRESENT	BIT(1)
+#define NVDEC_HEVC_PPS_SIGN_DATA_HIDING		BIT(2)
+#define NVDEC_HEVC_PPS_CABAC_INIT_PRESENT	BIT(3)
+#define NVDEC_HEVC_PPS_CONSTRAINED_INTRA_PRED	BIT(4)
+#define NVDEC_HEVC_PPS_TRANSFORM_SKIP		BIT(5)
+#define NVDEC_HEVC_PPS_CU_QP_DELTA		BIT(6)
+#define NVDEC_HEVC_PPS_SLICE_CHROMA_QP_OFFSETS	BIT(7)
+#define NVDEC_HEVC_PPS_WEIGHTED_PRED		BIT(8)
+#define NVDEC_HEVC_PPS_WEIGHTED_BIPRED		BIT(9)
+#define NVDEC_HEVC_PPS_TRANSQUANT_BYPASS	BIT(10)
+#define NVDEC_HEVC_PPS_TILES			BIT(11)
+#define NVDEC_HEVC_PPS_ENTROPY_CODING_SYNC	BIT(12)
+#define NVDEC_HEVC_PPS_LOOP_FILTER_ACROSS_TILES	BIT(13)
+#define NVDEC_HEVC_PPS_LOOP_FILTER_ACROSS_SLICES BIT(14)
+#define NVDEC_HEVC_PPS_DEBLOCKING_CONTROL	BIT(15)
+#define NVDEC_HEVC_PPS_DEBLOCKING_OVERRIDE	BIT(16)
+#define NVDEC_HEVC_PPS_DEBLOCKING_DISABLED	BIT(17)
+#define NVDEC_HEVC_PPS_LISTS_MODIFICATION	BIT(18)
+#define NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION	BIT(19)
+#define NVDEC_HEVC_PPS_UNIFORM_SPACING		BIT(20)
+
 /* Every member starts with its struct nvdec_frame. */
 union nvdec_request {
 	struct nvdec_frame frame;
 	struct nvdec_h264_request h264;
+	struct nvdec_hevc_request hevc;
 };
 
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
+	NVDEC_CODEC_HEVC,
 };
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,

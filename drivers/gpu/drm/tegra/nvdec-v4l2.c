@@ -14,6 +14,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-h264.h>
+#include <media/v4l2-hevc.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
@@ -100,6 +101,33 @@ static const struct v4l2_ctrl_config nvdec_h264_ctrls[] = {
 	},
 };
 
+static const struct v4l2_ctrl_config nvdec_hevc_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_HEVC_SPS },
+	{ .id = V4L2_CID_STATELESS_HEVC_PPS },
+	{ .id = V4L2_CID_STATELESS_HEVC_DECODE_PARAMS },
+	{ .id = V4L2_CID_STATELESS_HEVC_SCALING_MATRIX },
+	{
+		.id = V4L2_CID_STATELESS_HEVC_DECODE_MODE,
+		.min = V4L2_STATELESS_HEVC_DECODE_MODE_FRAME_BASED,
+		.max = V4L2_STATELESS_HEVC_DECODE_MODE_FRAME_BASED,
+		.def = V4L2_STATELESS_HEVC_DECODE_MODE_FRAME_BASED,
+	}, {
+		.id = V4L2_CID_STATELESS_HEVC_START_CODE,
+		.min = V4L2_STATELESS_HEVC_START_CODE_ANNEX_B,
+		.max = V4L2_STATELESS_HEVC_START_CODE_ANNEX_B,
+		.def = V4L2_STATELESS_HEVC_START_CODE_ANNEX_B,
+	}, {
+		.id = V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
+		.min = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+		.max = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+		.def = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN,
+	}, {
+		.id = V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
+		.min = V4L2_MPEG_VIDEO_HEVC_LEVEL_1,
+		.max = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1,
+	},
+};
+
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 {
 	return container_of(file_to_v4l2_fh(file), struct nvdec_v4l2_ctx, fh);
@@ -182,8 +210,13 @@ static int nvdec_queue_setup(struct vb2_queue *vq, unsigned int *nbufs,
 	}
 
 	/* One internal surface per capture buffer, one firmware index each. */
-	if (V4L2_TYPE_IS_CAPTURE(vq->type) && *nbufs > NVDEC_H264_MAX_PICTURES)
-		*nbufs = NVDEC_H264_MAX_PICTURES;
+	if (V4L2_TYPE_IS_CAPTURE(vq->type)) {
+		unsigned int max = ctx->codec == NVDEC_CODEC_HEVC ?
+			NVDEC_HEVC_MAX_PICTURES : NVDEC_H264_MAX_PICTURES;
+
+		if (*nbufs > max)
+			*nbufs = max;
+	}
 
 	return 0;
 }
@@ -677,6 +710,280 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_validate_hevc_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_ctrl_hevc_sps *sps;
+	const struct v4l2_ctrl_hevc_decode_params *dec;
+	struct vb2_queue *cap_q = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	unsigned int i, log2_ctb;
+	const char *why;
+
+	if (!nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_HEVC_SPS) ||
+	    !nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_HEVC_PPS) ||
+	    !nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_HEVC_DECODE_PARAMS)) {
+		why = "a required control is missing from the request";
+		goto reject;
+	}
+
+	sps = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_SPS);
+	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_DECODE_PARAMS);
+
+	if (sps->bit_depth_luma_minus8 || sps->bit_depth_chroma_minus8 ||
+	    sps->chroma_format_idc != 1 ||
+	    (sps->flags & V4L2_HEVC_SPS_FLAG_SEPARATE_COLOUR_PLANE)) {
+		why = "not 8-bit 4:2:0 with a shared colour plane";
+		goto reject;
+	}
+
+	if (ALIGN(sps->pic_width_in_luma_samples, NVDEC_HEVC_CTU_SIZE) !=
+	    coded->width ||
+	    ALIGN(sps->pic_height_in_luma_samples, NVDEC_HEVC_CTU_SIZE) !=
+	    coded->height) {
+		why = "SPS dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	log2_ctb = sps->log2_min_luma_coding_block_size_minus3 + 3 +
+		   sps->log2_diff_max_min_luma_coding_block_size;
+	if (log2_ctb < 4 || log2_ctb > 6) {
+		why = "unsupported coding tree unit size";
+		goto reject;
+	}
+
+	if (dec->num_active_dpb_entries > NVDEC_HEVC_DPB_ENTRIES ||
+	    dec->num_poc_st_curr_before > NVDEC_HEVC_DPB_ENTRIES ||
+	    dec->num_poc_st_curr_after > NVDEC_HEVC_DPB_ENTRIES ||
+	    dec->num_poc_lt_curr > NVDEC_HEVC_DPB_ENTRIES) {
+		why = "decode parameters name too many references";
+		goto reject;
+	}
+
+	for (i = 0; i < dec->num_active_dpb_entries; i++) {
+		if (dec->dpb[i].field_pic ||
+		    (dec->dpb[i].flags & ~V4L2_HEVC_DPB_ENTRY_LONG_TERM_REFERENCE) ||
+		    dec->dpb[i].reserved) {
+			why = "unsupported DPB entry";
+			goto reject;
+		}
+		if (!vb2_find_buffer(cap_q, dec->dpb[i].timestamp)) {
+			why = "a DPB entry names no capture buffer";
+			goto reject;
+		}
+	}
+
+	for (i = 0; i < dec->num_poc_st_curr_before; i++)
+		if (dec->poc_st_curr_before[i] >= dec->num_active_dpb_entries)
+			goto bad_rps;
+	for (i = 0; i < dec->num_poc_st_curr_after; i++)
+		if (dec->poc_st_curr_after[i] >= dec->num_active_dpb_entries)
+			goto bad_rps;
+	for (i = 0; i < dec->num_poc_lt_curr; i++)
+		if (dec->poc_lt_curr[i] >= dec->num_active_dpb_entries)
+			goto bad_rps;
+
+	return 0;
+
+bad_rps:
+	why = "a reference set names an out-of-range DPB entry";
+reject:
+	dev_dbg(ctx->nvdec->dev, "hevc reject: %s\n", why);
+	return -EINVAL;
+}
+
+static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx,
+				       struct vb2_v4l2_buffer *src,
+				       struct vb2_v4l2_buffer *dst, bool first)
+{
+	struct nvdec_hevc_request *request = &ctx->request.hevc;
+	const struct v4l2_ctrl_hevc_scaling_matrix *scaling;
+	const struct v4l2_ctrl_hevc_decode_params *dec;
+	const struct v4l2_ctrl_hevc_sps *sps;
+	const struct v4l2_ctrl_hevc_pps *pps;
+	unsigned int i, log2_ctb, ctb_size;
+	bool tiles;
+
+	if (nvdec_validate_hevc_request(ctx))
+		return -EINVAL;
+
+	sps = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_SPS);
+	pps = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_PPS);
+	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_DECODE_PARAMS);
+	scaling = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_SCALING_MATRIX);
+
+	nvdec_snapshot_frame(ctx);
+	request->pic_width_in_luma_samples = sps->pic_width_in_luma_samples;
+	request->pic_height_in_luma_samples = sps->pic_height_in_luma_samples;
+	request->pic_order_cnt_val = dec->pic_order_cnt_val;
+	request->bit_depth = 8;
+
+	log2_ctb = sps->log2_min_luma_coding_block_size_minus3 + 3 +
+		   sps->log2_diff_max_min_luma_coding_block_size;
+	ctb_size = 1 << log2_ctb;
+	request->ctb_width = DIV_ROUND_UP(sps->pic_width_in_luma_samples, ctb_size);
+	request->ctb_height = DIV_ROUND_UP(sps->pic_height_in_luma_samples, ctb_size);
+
+	request->log2_min_luma_coding_block_size =
+		sps->log2_min_luma_coding_block_size_minus3 + 3;
+	request->log2_max_luma_coding_block_size = log2_ctb;
+	request->log2_min_transform_block_size =
+		sps->log2_min_luma_transform_block_size_minus2 + 2;
+	request->log2_max_transform_block_size =
+		request->log2_min_transform_block_size +
+		sps->log2_diff_max_min_luma_transform_block_size;
+	request->max_transform_hierarchy_depth_inter =
+		sps->max_transform_hierarchy_depth_inter;
+	request->max_transform_hierarchy_depth_intra =
+		sps->max_transform_hierarchy_depth_intra;
+
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_PCM_ENABLED) {
+		request->sps_flags |= NVDEC_HEVC_SPS_PCM;
+		request->pcm_sample_bit_depth_luma =
+			sps->pcm_sample_bit_depth_luma_minus1 + 1;
+		request->pcm_sample_bit_depth_chroma =
+			sps->pcm_sample_bit_depth_chroma_minus1 + 1;
+		request->log2_min_pcm_luma_coding_block_size =
+			sps->log2_min_pcm_luma_coding_block_size_minus3 + 3;
+		request->log2_max_pcm_luma_coding_block_size =
+			request->log2_min_pcm_luma_coding_block_size +
+			sps->log2_diff_max_min_pcm_luma_coding_block_size;
+	}
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED)
+		request->sps_flags |= NVDEC_HEVC_SPS_SCALING_LIST;
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_AMP_ENABLED)
+		request->sps_flags |= NVDEC_HEVC_SPS_AMP;
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_SAMPLE_ADAPTIVE_OFFSET)
+		request->sps_flags |= NVDEC_HEVC_SPS_SAO;
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_PCM_LOOP_FILTER_DISABLED)
+		request->sps_flags |= NVDEC_HEVC_SPS_PCM_LOOP_FILTER_DISABLED;
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_SPS_TEMPORAL_MVP_ENABLED)
+		request->sps_flags |= NVDEC_HEVC_SPS_TEMPORAL_MVP;
+	if (sps->flags & V4L2_HEVC_SPS_FLAG_STRONG_INTRA_SMOOTHING_ENABLED)
+		request->sps_flags |= NVDEC_HEVC_SPS_STRONG_INTRA_SMOOTHING;
+	if (dec->flags & V4L2_HEVC_DECODE_PARAM_FLAG_IDR_PIC)
+		request->sps_flags |= NVDEC_HEVC_SPS_IDR;
+	if (dec->flags & V4L2_HEVC_DECODE_PARAM_FLAG_IRAP_PIC)
+		request->sps_flags |= NVDEC_HEVC_SPS_IRAP;
+
+	request->num_extra_slice_header_bits = pps->num_extra_slice_header_bits;
+	request->num_ref_idx_l0_default_active =
+		pps->num_ref_idx_l0_default_active_minus1 + 1;
+	request->num_ref_idx_l1_default_active =
+		pps->num_ref_idx_l1_default_active_minus1 + 1;
+	request->init_qp = pps->init_qp_minus26 + 26;
+	request->diff_cu_qp_delta_depth = pps->diff_cu_qp_delta_depth;
+	request->pps_cb_qp_offset = pps->pps_cb_qp_offset;
+	request->pps_cr_qp_offset = pps->pps_cr_qp_offset;
+	request->pps_beta_offset = pps->pps_beta_offset_div2 * 2;
+	request->pps_tc_offset = pps->pps_tc_offset_div2 * 2;
+	request->log2_parallel_merge_level =
+		pps->log2_parallel_merge_level_minus2 + 2;
+
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_DEPENDENT_SLICE_SEGMENT_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_DEPENDENT_SLICE_SEGMENTS;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_OUTPUT_FLAG_PRESENT)
+		request->pps_flags |= NVDEC_HEVC_PPS_OUTPUT_FLAG_PRESENT;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_SIGN_DATA_HIDING_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_SIGN_DATA_HIDING;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_CABAC_INIT_PRESENT)
+		request->pps_flags |= NVDEC_HEVC_PPS_CABAC_INIT_PRESENT;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_CONSTRAINED_INTRA_PRED)
+		request->pps_flags |= NVDEC_HEVC_PPS_CONSTRAINED_INTRA_PRED;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_TRANSFORM_SKIP_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_TRANSFORM_SKIP;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_CU_QP_DELTA_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_CU_QP_DELTA;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_PPS_SLICE_CHROMA_QP_OFFSETS_PRESENT)
+		request->pps_flags |= NVDEC_HEVC_PPS_SLICE_CHROMA_QP_OFFSETS;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_WEIGHTED_PRED)
+		request->pps_flags |= NVDEC_HEVC_PPS_WEIGHTED_PRED;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_WEIGHTED_BIPRED)
+		request->pps_flags |= NVDEC_HEVC_PPS_WEIGHTED_BIPRED;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_TRANSQUANT_BYPASS_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_TRANSQUANT_BYPASS;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_ENTROPY_CODING_SYNC_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_ENTROPY_CODING_SYNC;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_LOOP_FILTER_ACROSS_TILES_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_LOOP_FILTER_ACROSS_TILES;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_PPS_LOOP_FILTER_ACROSS_SLICES_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_LOOP_FILTER_ACROSS_SLICES;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT)
+		request->pps_flags |= NVDEC_HEVC_PPS_DEBLOCKING_CONTROL;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_DEBLOCKING_FILTER_OVERRIDE_ENABLED)
+		request->pps_flags |= NVDEC_HEVC_PPS_DEBLOCKING_OVERRIDE;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_PPS_DISABLE_DEBLOCKING_FILTER)
+		request->pps_flags |= NVDEC_HEVC_PPS_DEBLOCKING_DISABLED;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_LISTS_MODIFICATION_PRESENT)
+		request->pps_flags |= NVDEC_HEVC_PPS_LISTS_MODIFICATION;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_SLICE_SEGMENT_HEADER_EXTENSION_PRESENT)
+		request->pps_flags |= NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION;
+	if (pps->flags & V4L2_HEVC_PPS_FLAG_UNIFORM_SPACING)
+		request->pps_flags |= NVDEC_HEVC_PPS_UNIFORM_SPACING;
+
+	tiles = pps->flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED;
+	if (tiles) {
+		request->pps_flags |= NVDEC_HEVC_PPS_TILES;
+		request->num_tile_columns = v4l2_hevc_pps_num_tile_columns(pps);
+		request->num_tile_rows = v4l2_hevc_pps_num_tile_rows(pps);
+		for (i = 0; i < request->num_tile_columns; i++)
+			request->column_width[i] = pps->column_width_minus1[i] + 1;
+		for (i = 0; i < request->num_tile_rows; i++)
+			request->row_height[i] = pps->row_height_minus1[i] + 1;
+	} else {
+		request->num_tile_columns = 1;
+		request->num_tile_rows = 1;
+		request->column_width[0] = request->ctb_width;
+		request->row_height[0] = request->ctb_height;
+	}
+
+	/* Slice-header bits the driver resolved and the firmware skips. */
+	request->sw_hdr_skip_length =
+		!!(pps->flags & V4L2_HEVC_PPS_FLAG_OUTPUT_FLAG_PRESENT);
+	if (!(dec->flags & V4L2_HEVC_DECODE_PARAM_FLAG_IDR_PIC))
+		request->sw_hdr_skip_length +=
+			sps->log2_max_pic_order_cnt_lsb_minus4 + 4 + 1 +
+			dec->short_term_ref_pic_set_size +
+			dec->long_term_ref_pic_set_size;
+
+	request->num_active_dpb_entries = dec->num_active_dpb_entries;
+	request->num_poc_st_curr_before = dec->num_poc_st_curr_before;
+	request->num_poc_st_curr_after = dec->num_poc_st_curr_after;
+	request->num_poc_lt_curr = dec->num_poc_lt_curr;
+	request->num_ref_frames = dec->num_poc_st_curr_before +
+				  dec->num_poc_st_curr_after +
+				  dec->num_poc_lt_curr;
+	memcpy(request->poc_st_curr_before, dec->poc_st_curr_before,
+	       sizeof(request->poc_st_curr_before));
+	memcpy(request->poc_st_curr_after, dec->poc_st_curr_after,
+	       sizeof(request->poc_st_curr_after));
+	memcpy(request->poc_lt_curr, dec->poc_lt_curr,
+	       sizeof(request->poc_lt_curr));
+	for (i = 0; i < dec->num_active_dpb_entries; i++) {
+		request->dpb[i].valid = 1;
+		request->dpb[i].long_term =
+			!!(dec->dpb[i].flags &
+			   V4L2_HEVC_DPB_ENTRY_LONG_TERM_REFERENCE);
+		request->dpb[i].pic_order_cnt_val = dec->dpb[i].pic_order_cnt_val;
+	}
+
+	if (scaling) {
+		memcpy(request->scaling_dc_16x16, scaling->scaling_list_dc_coef_16x16,
+		       sizeof(request->scaling_dc_16x16));
+		memcpy(request->scaling_dc_32x32, scaling->scaling_list_dc_coef_32x32,
+		       sizeof(request->scaling_dc_32x32));
+		memcpy(request->scaling_4x4, scaling->scaling_list_4x4,
+		       sizeof(request->scaling_4x4));
+		memcpy(request->scaling_8x8, scaling->scaling_list_8x8,
+		       sizeof(request->scaling_8x8));
+		memcpy(request->scaling_16x16, scaling->scaling_list_16x16,
+		       sizeof(request->scaling_16x16));
+		memcpy(request->scaling_32x32, scaling->scaling_list_32x32,
+		       sizeof(request->scaling_32x32));
+	}
+
+	return 0;
+}
+
 static void nvdec_job_cleanup_maps(struct nvdec_v4l2_job *job)
 {
 	unsigned int i;
@@ -711,6 +1018,10 @@ static void nvdec_job_complete(void *data, bool error)
 static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 			     struct vb2_v4l2_buffer *src, bool first)
 {
+	/* HEVC stages a whole picture at once; H.264 one slice at a time. */
+	unsigned int max_slices = ctx->codec == NVDEC_CODEC_HEVC ? 1 :
+		ctx->request.h264.pic_width_in_mbs *
+		ctx->request.h264.frame_height_in_mbs;
 	struct nvdec_engine_map *output;
 	int err;
 
@@ -721,8 +1032,7 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 	if (!err)
 		err = nvdec_engine_stage_slice(ctx->decode, output,
 					       vb2_get_plane_payload(&src->vb2_buf, 0),
-					       first, ctx->request.h264.pic_width_in_mbs *
-					       ctx->request.h264.frame_height_in_mbs);
+					       first, max_slices);
 	nvdec_engine_map_put(output);
 	return err;
 }
@@ -762,6 +1072,23 @@ static int nvdec_resolve_h264(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_resolve_hevc(struct nvdec_v4l2_ctx *ctx,
+			      struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_hevc_decode_params *dec =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_DECODE_PARAMS);
+	unsigned int i;
+	int err;
+
+	for (i = 0; i < ctx->request.hevc.num_active_dpb_entries; i++) {
+		err = nvdec_pin_reference(ctx, job, i, dec->dpb[i].timestamp);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 /* Everything that differs between the coded formats on the OUTPUT queue. */
 struct nvdec_codec_desc {
 	u32 pixelformat;
@@ -786,6 +1113,16 @@ static const struct nvdec_codec_desc nvdec_codecs[] = {
 		.num_ctrls = ARRAY_SIZE(nvdec_h264_ctrls),
 		.snapshot = nvdec_snapshot_h264_request,
 		.resolve = nvdec_resolve_h264,
+	},
+	[NVDEC_CODEC_HEVC] = {
+		.pixelformat = V4L2_PIX_FMT_HEVC_SLICE,
+		.min_width = 129,
+		.min_height = 129,
+		.align = NVDEC_HEVC_CTU_SIZE,
+		.ctrls = nvdec_hevc_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_hevc_ctrls),
+		.snapshot = nvdec_snapshot_hevc_request,
+		.resolve = nvdec_resolve_hevc,
 	},
 };
 
