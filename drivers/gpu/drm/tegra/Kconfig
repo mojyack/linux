@@ -50,7 +50,7 @@ config DRM_TEGRA_NVDEC_V4L2
 	select VIDEO_DEV
 	select V4L2_MEM2MEM_DEV
 	select V4L2_VP9
-	select VIDEOBUF2_DMA_CONTIG
+	select VIDEOBUF2_DMA_SG
 	help
 	  Enable a stateless V4L2 mem2mem decoder on top of the NVDEC engine,
 	  exposing one media device and one video node that decode H.264,
