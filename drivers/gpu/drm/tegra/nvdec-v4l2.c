@@ -323,7 +323,7 @@ static int nvdec_queue_init(void *priv, struct vb2_queue *src_vq,
 	int err;
 
 	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-	src_vq->io_modes = VB2_MMAP;
+	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	src_vq->drv_priv = ctx;
 	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 	src_vq->ops = &nvdec_qops;
@@ -339,7 +339,7 @@ static int nvdec_queue_init(void *priv, struct vb2_queue *src_vq,
 		return err;
 
 	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	dst_vq->io_modes = VB2_MMAP;
+	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	dst_vq->drv_priv = ctx;
 	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 	dst_vq->ops = &nvdec_qops;
@@ -508,6 +508,14 @@ reject:
 
 static struct dma_buf *nvdec_plane_dmabuf(struct vb2_buffer *vb)
 {
+	struct dma_buf *dmabuf;
+
+	dmabuf = vb->planes[0].dbuf;
+	if (dmabuf) {
+		get_dma_buf(dmabuf);
+		return dmabuf;
+	}
+
 	return vb->vb2_queue->mem_ops->get_dmabuf(vb, vb->planes[0].mem_priv, 0);
 }
 
@@ -1034,6 +1042,7 @@ static const struct v4l2_ioctl_ops nvdec_ioctl_ops = {
 	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
 	.vidioc_qbuf = v4l2_m2m_ioctl_qbuf,
 	.vidioc_dqbuf = v4l2_m2m_ioctl_dqbuf,
+	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
 	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
 	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
