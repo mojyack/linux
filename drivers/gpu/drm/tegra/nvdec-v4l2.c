@@ -17,7 +17,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/v4l2-vp9.h>
-#include <media/videobuf2-dma-contig.h>
+#include <media/videobuf2-dma-sg.h>
 
 #include "nvdec-engine.h"
 
@@ -403,7 +403,7 @@ static int nvdec_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->drv_priv = ctx;
 	src_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 	src_vq->ops = &nvdec_qops;
-	src_vq->mem_ops = &vb2_dma_contig_memops;
+	src_vq->mem_ops = &vb2_dma_sg_memops;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	src_vq->subsystem_flags |= VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF;
 	src_vq->supports_requests = true;
@@ -419,7 +419,7 @@ static int nvdec_queue_init(void *priv, struct vb2_queue *src_vq,
 	dst_vq->drv_priv = ctx;
 	dst_vq->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
 	dst_vq->ops = &nvdec_qops;
-	dst_vq->mem_ops = &vb2_dma_contig_memops;
+	dst_vq->mem_ops = &vb2_dma_sg_memops;
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	dst_vq->lock = &nvdec->lock;
 	dst_vq->dev = nvdec->dev;
