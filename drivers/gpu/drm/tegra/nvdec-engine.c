@@ -3,6 +3,7 @@
  * Copyright (c) 2015-2022, NVIDIA Corporation.
  */
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
@@ -47,8 +48,6 @@
 						 VIC_DETILE_WORDS + \
 						 NVDEC_DONE_WORDS)
 
-#define NVDEC_MAX_DPB_ENTRIES			NVDEC_H264_DPB_ENTRIES
-
 #define NVDEC_METHOD_INCR			0x10100002
 #define NVDEC_METHOD_APPLICATION		0x080
 #define NVDEC_METHOD_CONTROL		0x100
@@ -63,6 +62,30 @@
 #define NVDEC_METHOD_LUMA			0x10c
 #define NVDEC_METHOD_CHROMA		0x11d
 #define NVDEC_METHOD_EXECUTE		0x0c0
+#define NVDEC_HEVC_METHOD_SCALING_LIST		0x160
+#define NVDEC_HEVC_METHOD_TILE_SIZES		0x161
+#define NVDEC_HEVC_METHOD_FILTER		0x162
+
+#define NVDEC_HEVC_SETUP_SIZE			0x114
+#define NVDEC_HEVC_STATUS_OFFSET		0x200
+#define NVDEC_HEVC_SCALING_OFFSET		0x300
+#define NVDEC_HEVC_TILES_OFFSET		0x700
+#define NVDEC_HEVC_TILES_SIZE			0x900
+#define NVDEC_HEVC_VIC_CONFIG_OFFSET		0x1000
+#define NVDEC_HEVC_STATE_SIZE			0x2000
+#define NVDEC_HEVC_GATHER_WORDS		129
+#define NVDEC_HEVC_VIC_OFFSET			(NVDEC_HEVC_GATHER_WORDS + \
+						 NVDEC_DONE_WORDS)
+#define NVDEC_HEVC_TOTAL_GATHER_WORDS		(NVDEC_HEVC_VIC_OFFSET + \
+						 VIC_DETILE_WORDS + \
+						 NVDEC_DONE_WORDS)
+
+/* Per aligned luma row, as the oracle sizes them. */
+#define NVDEC_MAX_DPB_ENTRIES			NVDEC_H264_DPB_ENTRIES
+
+#define NVDEC_HEVC_FILTER_PER_ROW		480
+#define NVDEC_HEVC_SAO_PER_ROW			3840
+#define NVDEC_HEVC_BSD_PER_ROW			60
 
 struct nvdec_h264_dpb_entry {
 	__le32 flags;
@@ -131,6 +154,121 @@ static_assert(offsetof(struct nvdec_h264_setup, scaling_4x4) == 0x1c0);
 static_assert(offsetof(struct nvdec_h264_setup, scaling_8x8) == 0x220);
 static_assert(sizeof(struct nvdec_h264_setup) == NVDEC_H264_SETUP_SIZE);
 
+struct nvdec_hevc_setup {
+	u8 encryption[0x30];
+	__le32 stream_len;
+	__le32 enable_encryption;
+	__le32 key_control;
+	__le32 gptimer_timeout_value;
+	__le32 surface_format;
+	__le32 framestride[2];
+	__le32 coloc_buffer_size;
+	__le32 sao_buffer_offset;
+	__le32 bsd_control_offset;
+	__le16 pic_width_in_luma_samples;
+	__le16 pic_height_in_luma_samples;
+	__le32 sps_geometry;
+	__le32 sps_flags;
+	__le32 pps_flags0;
+	s8 pps_cb_qp_offset;
+	s8 pps_cr_qp_offset;
+	s8 pps_beta_offset;
+	s8 pps_tc_offset;
+	__le32 pps_flags1;
+	u8 num_ref_frames;
+	u8 reserved0;
+	__le16 longtermflag;
+	u8 initreflistidxl0[NVDEC_HEVC_MAX_PICTURES];
+	u8 initreflistidxl1[NVDEC_HEVC_MAX_PICTURES];
+	__le16 ref_diff_poc[NVDEC_HEVC_MAX_PICTURES];
+	u8 idr_picture_flag;
+	u8 rap_picture_flag;
+	u8 curr_pic_idx;
+	u8 pattern_id;
+	__le16 sw_hdr_skip_length;
+	__le16 reserved1;
+	u8 ecdma_cfg[0x18];
+	__le32 dxva_flags;
+	__le32 num_bits_short_term_ref_pics_in_slice;
+	u8 extensions[0x38];
+};
+
+static_assert(offsetof(struct nvdec_hevc_setup, surface_format) == 0x40);
+static_assert(offsetof(struct nvdec_hevc_setup, sps_geometry) == 0x5c);
+static_assert(offsetof(struct nvdec_hevc_setup, pps_flags1) == 0x6c);
+static_assert(offsetof(struct nvdec_hevc_setup, ref_diff_poc) == 0x94);
+static_assert(offsetof(struct nvdec_hevc_setup, sw_hdr_skip_length) == 0xb8);
+static_assert(sizeof(struct nvdec_hevc_setup) == NVDEC_HEVC_SETUP_SIZE);
+
+struct nvdec_hevc_scaling_list {
+	u8 dc_16x16[6];
+	u8 dc_32x32[2];
+	u8 reserved[8];
+	u8 list_4x4[6][16];
+	u8 list_8x8[6][64];
+	u8 list_16x16[6][64];
+	u8 list_32x32[2][64];
+};
+
+static_assert(sizeof(struct nvdec_hevc_scaling_list) == 0x3f0);
+
+#define NVDEC_HEVC_SURFACE_TILEFORMAT		GENMASK(1, 0)
+#define NVDEC_HEVC_SURFACE_GOB_HEIGHT		GENMASK(4, 2)
+#define NVDEC_HEVC_SURFACE_START_CODE		GENMASK(15, 8)
+#define NVDEC_HEVC_SURFACE_OUTPUT_MODE		GENMASK(23, 16)
+
+#define NVDEC_HEVC_GEOM_CHROMA_FORMAT		GENMASK(3, 0)
+#define NVDEC_HEVC_GEOM_BIT_DEPTH_LUMA		GENMASK(7, 4)
+#define NVDEC_HEVC_GEOM_BIT_DEPTH_CHROMA	GENMASK(11, 8)
+#define NVDEC_HEVC_GEOM_LOG2_MIN_CB		GENMASK(15, 12)
+#define NVDEC_HEVC_GEOM_LOG2_MAX_CB		GENMASK(19, 16)
+#define NVDEC_HEVC_GEOM_LOG2_MIN_TB		GENMASK(23, 20)
+#define NVDEC_HEVC_GEOM_LOG2_MAX_TB		GENMASK(27, 24)
+
+#define NVDEC_HEVC_SPS_HIER_INTER		GENMASK(2, 0)
+#define NVDEC_HEVC_SPS_HIER_INTRA		GENMASK(5, 3)
+#define NVDEC_HEVC_SPS_SCALING_LIST_EN		BIT(6)
+#define NVDEC_HEVC_SPS_AMP_EN			BIT(7)
+#define NVDEC_HEVC_SPS_SAO_EN			BIT(8)
+#define NVDEC_HEVC_SPS_PCM_EN			BIT(9)
+#define NVDEC_HEVC_SPS_PCM_DEPTH_LUMA		GENMASK(13, 10)
+#define NVDEC_HEVC_SPS_PCM_DEPTH_CHROMA	GENMASK(17, 14)
+#define NVDEC_HEVC_SPS_LOG2_MIN_PCM		GENMASK(21, 18)
+#define NVDEC_HEVC_SPS_LOG2_MAX_PCM		GENMASK(25, 22)
+#define NVDEC_HEVC_SPS_PCM_LOOP_FILTER_DIS	BIT(26)
+#define NVDEC_HEVC_SPS_TEMPORAL_MVP_EN		BIT(27)
+#define NVDEC_HEVC_SPS_STRONG_INTRA_SMOOTH	BIT(28)
+
+#define NVDEC_HEVC_PPS0_DEPENDENT_SLICES	BIT(0)
+#define NVDEC_HEVC_PPS0_OUTPUT_FLAG_PRESENT	BIT(1)
+#define NVDEC_HEVC_PPS0_EXTRA_SLICE_BITS	GENMASK(4, 2)
+#define NVDEC_HEVC_PPS0_SIGN_DATA_HIDING	BIT(5)
+#define NVDEC_HEVC_PPS0_CABAC_INIT_PRESENT	BIT(6)
+#define NVDEC_HEVC_PPS0_NUM_REF_IDX_L0		GENMASK(10, 7)
+#define NVDEC_HEVC_PPS0_NUM_REF_IDX_L1		GENMASK(14, 11)
+#define NVDEC_HEVC_PPS0_INIT_QP		GENMASK(21, 15)
+#define NVDEC_HEVC_PPS0_CONSTRAINED_INTRA	BIT(22)
+#define NVDEC_HEVC_PPS0_TRANSFORM_SKIP		BIT(23)
+#define NVDEC_HEVC_PPS0_CU_QP_DELTA		BIT(24)
+#define NVDEC_HEVC_PPS0_DIFF_CU_QP_DEPTH	GENMASK(26, 25)
+
+#define NVDEC_HEVC_PPS1_SLICE_CHROMA_QP	BIT(0)
+#define NVDEC_HEVC_PPS1_WEIGHTED_PRED		BIT(1)
+#define NVDEC_HEVC_PPS1_WEIGHTED_BIPRED	BIT(2)
+#define NVDEC_HEVC_PPS1_TRANSQUANT_BYPASS	BIT(3)
+#define NVDEC_HEVC_PPS1_TILES_ENABLED		BIT(4)
+#define NVDEC_HEVC_PPS1_ENTROPY_SYNC		BIT(5)
+#define NVDEC_HEVC_PPS1_NUM_TILE_COLUMNS	GENMASK(10, 6)
+#define NVDEC_HEVC_PPS1_NUM_TILE_ROWS		GENMASK(15, 11)
+#define NVDEC_HEVC_PPS1_LF_ACROSS_TILES	BIT(16)
+#define NVDEC_HEVC_PPS1_LF_ACROSS_SLICES	BIT(17)
+#define NVDEC_HEVC_PPS1_DEBLOCK_CONTROL	BIT(18)
+#define NVDEC_HEVC_PPS1_DEBLOCK_OVERRIDE	BIT(19)
+#define NVDEC_HEVC_PPS1_DEBLOCK_DISABLED	BIT(20)
+#define NVDEC_HEVC_PPS1_LISTS_MODIFICATION	BIT(21)
+#define NVDEC_HEVC_PPS1_LOG2_PARALLEL_MERGE	GENMASK(24, 22)
+#define NVDEC_HEVC_PPS1_SLICE_HDR_EXTENSION	BIT(25)
+
 struct nvdec_buffer {
 	struct host1x_bo bo;
 	struct kref ref;
@@ -175,15 +313,22 @@ struct nvdec_decode_context {
 	struct nvdec_engine *engine;
 	/* Serializes staging and submission of this context's pictures. */
 	struct mutex lock;
+	enum nvdec_codec codec;
 	struct nvdec_engine_map *scratch;
 	struct nvdec_buffer *input;
 	u16 width_in_mbs;
 	u16 height_in_mbs;
+	u16 coded_width;
+	u16 coded_height;
 	u32 coloc_size;
 	u32 mbhist_offset;
 	u32 mbhist_size;
 	u32 history_offset;
 	u32 history_size;
+	u32 colmv_size;
+	u32 filter_offset;
+	u32 sao_offset;
+	u32 bsd_offset;
 	bool in_flight;
 	/* Slices of the current picture, staged in ctx->input until the last. */
 	u32 *slice_offsets;
@@ -196,6 +341,7 @@ struct nvdec_decode_context {
 struct nvdec_decode_job {
 	struct nvdec_decode_context *ctx;
 	struct nvdec_h264_request request;
+	struct nvdec_hevc_request hevc;
 	struct nvdec_buffer *state;
 	struct nvdec_buffer *input;
 	struct nvdec_buffer *gather;
@@ -203,6 +349,7 @@ struct nvdec_decode_job {
 	struct nvdec_engine_map *surface;
 	struct nvdec_engine_map *capture;
 	struct nvdec_engine_map *dpb[NVDEC_H264_DPB_ENTRIES];
+	struct nvdec_engine_map *scratch_ref;
 	struct vic_engine *vic;
 	u32 slice_offsets_off;
 	struct dma_fence *fence;
@@ -1277,6 +1424,37 @@ static int nvdec_prepare_input(struct nvdec_decode_context *ctx, size_t size)
 	return 0;
 }
 
+/*
+ * HEVC carries a whole picture in one payload and the firmware finds its
+ * slices by scanning start codes, so staging is a copy behind one zero byte.
+ */
+static int nvdec_hevc_stage(struct nvdec_decode_context *ctx,
+			    struct nvdec_engine_map *output, u32 payload_size)
+{
+	u32 staged = payload_size + 1;
+	int err;
+
+	if (staged < payload_size ||
+	    !nvdec_map_is_valid(output, DMA_TO_DEVICE, payload_size))
+		return -EINVAL;
+
+	err = nvdec_prepare_input(ctx, staged);
+	if (err)
+		return err;
+
+	*(u8 *)ctx->input->cpu = 0;
+	err = nvdec_copy_output(ctx->input, 1, output, payload_size);
+	if (err)
+		return err;
+
+	if (memcmp(ctx->input->cpu + 1, "\x00\x00\x01", 3))
+		return -EINVAL;
+
+	ctx->slice_count = 1;
+	ctx->staged = staged;
+	return 0;
+}
+
 /* Slices are staged back to back and described by slice_count + 1 offsets. */
 int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
 			     struct nvdec_engine_map *output,
@@ -1288,6 +1466,13 @@ int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
 
 	if (!ctx || !output || payload_size < 3 || !max_slices)
 		return -EINVAL;
+
+	if (ctx->codec == NVDEC_CODEC_HEVC) {
+		mutex_lock(&ctx->lock);
+		err = nvdec_hevc_stage(ctx, output, payload_size);
+		mutex_unlock(&ctx->lock);
+		return err;
+	}
 
 	mutex_lock(&ctx->lock);
 	if (first) {
@@ -1364,6 +1549,8 @@ void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 	ctx->scratch = NULL;
 	ctx->width_in_mbs = 0;
 	ctx->height_in_mbs = 0;
+	ctx->coded_width = 0;
+	ctx->coded_height = 0;
 	mutex_unlock(&ctx->lock);
 }
 
@@ -1821,7 +2008,7 @@ static void nvdec_decode_job_release(struct host1x_job *job)
 }
 
 struct nvdec_decode_context *
-nvdec_engine_context_create(struct nvdec_engine *engine)
+nvdec_engine_context_create(struct nvdec_engine *engine, enum nvdec_codec codec)
 {
 	struct nvdec_decode_context *ctx;
 
@@ -1831,6 +2018,7 @@ nvdec_engine_context_create(struct nvdec_engine *engine)
 
 	kref_init(&ctx->ref);
 	ctx->engine = engine;
+	ctx->codec = codec;
 	mutex_init(&ctx->lock);
 	return ctx;
 }
@@ -2088,6 +2276,680 @@ int nvdec_engine_h264_submit(struct nvdec_decode_context *ctx,
 
 	err = nvdec_launch_job(hjob, NVDEC_H264_GATHER_WORDS,
 			       NVDEC_H264_VIC_OFFSET, fence);
+	if (err)
+		goto free_hjob;
+	mutex_unlock(&ctx->lock);
+	return 0;
+
+free_hjob:
+	nvdec_free_job(hjob);
+unlock:
+	mutex_unlock(&ctx->lock);
+	return err;
+}
+
+static int nvdec_hevc_prepare_scratch(struct nvdec_decode_context *ctx,
+				      const struct nvdec_hevc_request *request)
+{
+	u32 aligned_width, aligned_height, colmv, coloc, filter, size;
+	struct nvdec_engine_map *scratch;
+
+	if (ctx->scratch) {
+		if (ctx->coded_width != request->coded_width ||
+		    ctx->coded_height != request->coded_height)
+			return -EBUSY;
+		return 0;
+	}
+
+	aligned_width = ALIGN(request->coded_width, NVDEC_HEVC_CTU_SIZE);
+	aligned_height = ALIGN(request->coded_height, NVDEC_HEVC_CTU_SIZE);
+
+	if (check_mul_overflow(aligned_width, aligned_height, &colmv))
+		return -EOVERFLOW;
+	colmv /= 16;
+	if (check_mul_overflow(colmv, NVDEC_HEVC_MAX_PICTURES + 1U, &coloc) ||
+	    check_mul_overflow(aligned_height,
+			       (u32)(NVDEC_HEVC_FILTER_PER_ROW +
+				     NVDEC_HEVC_SAO_PER_ROW +
+				     NVDEC_HEVC_BSD_PER_ROW), &filter))
+		return -EOVERFLOW;
+
+	coloc = ALIGN(coloc, SZ_256);
+	if (check_add_overflow(coloc, filter, &size))
+		return -EOVERFLOW;
+	size = ALIGN(size, SZ_4K);
+
+	scratch = nvdec_engine_surface_create(ctx->engine, size);
+	if (IS_ERR(scratch))
+		return PTR_ERR(scratch);
+	if (upper_32_bits(scratch->iova)) {
+		nvdec_engine_map_put(scratch);
+		return -ERANGE;
+	}
+
+	ctx->scratch = scratch;
+	ctx->coded_width = request->coded_width;
+	ctx->coded_height = request->coded_height;
+	ctx->colmv_size = colmv;
+	ctx->filter_offset = coloc;
+	ctx->sao_offset = NVDEC_HEVC_FILTER_PER_ROW * aligned_height;
+	ctx->bsd_offset = (NVDEC_HEVC_FILTER_PER_ROW + NVDEC_HEVC_SAO_PER_ROW) *
+			  aligned_height;
+	return 0;
+}
+
+static int nvdec_hevc_validate_request(struct device *dev,
+				       const struct nvdec_hevc_request *request,
+				       const struct nvdec_engine_map *surface,
+				       const struct nvdec_engine_map *capture,
+				       struct nvdec_engine_map * const dpb[])
+{
+	u32 luma_size, chroma_size, surface_size, dst_size;
+	unsigned int i, tiles;
+
+	dev_dbg(dev,
+		"hevc request: %ux%u coded=%ux%u ctb=%ux%u depth=%u cb=%u/%u tb=%u/%u qp=%u sps=0x%x pps=0x%x tiles=%ux%u refs=%u poc=%d skip=%u stride=%u coff=%u payload=%u\n",
+		request->pic_width_in_luma_samples,
+		request->pic_height_in_luma_samples, request->coded_width,
+		request->coded_height, request->ctb_width, request->ctb_height,
+		request->bit_depth, request->log2_min_luma_coding_block_size,
+		request->log2_max_luma_coding_block_size,
+		request->log2_min_transform_block_size,
+		request->log2_max_transform_block_size, request->init_qp,
+		request->sps_flags, request->pps_flags, request->num_tile_columns,
+		request->num_tile_rows, request->num_ref_frames,
+		request->pic_order_cnt_val, request->sw_hdr_skip_length,
+		request->luma_stride, request->chroma_offset,
+		request->output_payload_size);
+
+	if (request->bit_depth != 8 ||
+	    !request->pic_width_in_luma_samples ||
+	    !request->pic_height_in_luma_samples ||
+	    request->pic_width_in_luma_samples > request->coded_width ||
+	    request->pic_height_in_luma_samples > request->coded_height ||
+	    request->coded_width > 4096 || request->coded_height > 4096 ||
+	    !IS_ALIGNED(request->coded_width, NVDEC_HEVC_CTU_SIZE) ||
+	    !IS_ALIGNED(request->coded_height, NVDEC_HEVC_CTU_SIZE) ||
+	    request->log2_min_luma_coding_block_size < 3 ||
+	    request->log2_max_luma_coding_block_size > 6 ||
+	    request->log2_min_luma_coding_block_size >
+	    request->log2_max_luma_coding_block_size ||
+	    request->log2_min_transform_block_size < 2 ||
+	    request->log2_max_transform_block_size > 5 ||
+	    request->log2_min_transform_block_size >
+	    request->log2_max_transform_block_size ||
+	    request->max_transform_hierarchy_depth_inter > 4 ||
+	    request->max_transform_hierarchy_depth_intra > 4 ||
+	    request->init_qp > 127 || request->diff_cu_qp_delta_depth > 3 ||
+	    request->log2_parallel_merge_level < 2 ||
+	    request->log2_parallel_merge_level > 4 ||
+	    request->num_extra_slice_header_bits > 7 ||
+	    !request->num_ref_idx_l0_default_active ||
+	    request->num_ref_idx_l0_default_active > 15 ||
+	    !request->num_ref_idx_l1_default_active ||
+	    request->num_ref_idx_l1_default_active > 15 ||
+	    request->pps_cb_qp_offset < -12 || request->pps_cb_qp_offset > 12 ||
+	    request->pps_cr_qp_offset < -12 || request->pps_cr_qp_offset > 12 ||
+	    request->pps_beta_offset < -12 || request->pps_beta_offset > 12 ||
+	    request->pps_tc_offset < -12 || request->pps_tc_offset > 12 ||
+	    request->output_payload_size < 4 ||
+	    request->num_active_dpb_entries > NVDEC_HEVC_DPB_ENTRIES ||
+	    request->num_ref_frames > NVDEC_HEVC_DPB_ENTRIES) {
+		dev_dbg(dev, "hevc reject: syntax\n");
+		return -EINVAL;
+	}
+
+	if (!request->num_tile_columns || request->num_tile_columns > 20 ||
+	    !request->num_tile_rows || request->num_tile_rows > 22 ||
+	    check_mul_overflow((unsigned int)request->num_tile_columns,
+			       (unsigned int)request->num_tile_rows, &tiles) ||
+	    tiles * 2 * sizeof(u16) > NVDEC_HEVC_TILES_OFFSET ||
+	    !request->ctb_width || !request->ctb_height) {
+		dev_dbg(dev, "hevc reject: tiles\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow((u32)request->luma_stride,
+			       (u32)ALIGN(request->coded_height, 32), &luma_size) ||
+	    check_mul_overflow((u32)request->luma_stride,
+			       (u32)ALIGN(request->coded_height / 2, 16),
+			       &chroma_size) ||
+	    check_add_overflow(request->chroma_offset, chroma_size, &surface_size) ||
+	    request->chroma_offset < luma_size ||
+	    !nvdec_map_is_valid(surface, DMA_BIDIRECTIONAL, surface_size)) {
+		dev_dbg(dev, "hevc reject: surface geometry/map\n");
+		return -EINVAL;
+	}
+
+	if (check_mul_overflow(request->dst_stride,
+			       (u32)request->crop_height / 2, &dst_size) ||
+	    check_add_overflow(request->dst_chroma_offset, dst_size, &dst_size) ||
+	    !request->crop_width || !request->crop_height ||
+	    (request->crop_width | request->crop_height |
+	     request->crop_left | request->crop_top) & 1 ||
+	    request->crop_left + request->crop_width > request->coded_width ||
+	    request->crop_top + request->crop_height > request->coded_height ||
+	    request->dst_chroma_offset < request->dst_stride *
+					 (u32)request->crop_height ||
+	    !IS_ALIGNED(request->dst_stride, SZ_256) ||
+	    request->dst_stride < request->crop_width ||
+	    !nvdec_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
+		dev_dbg(dev, "hevc reject: detile destination\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < NVDEC_HEVC_DPB_ENTRIES; i++) {
+		if (!request->dpb[i].valid) {
+			if (dpb[i]) {
+				dev_dbg(dev, "hevc reject: stray dpb map %u\n", i);
+				return -EINVAL;
+			}
+			continue;
+		}
+		if (i >= request->num_active_dpb_entries ||
+		    !nvdec_map_is_valid(dpb[i], DMA_TO_DEVICE, surface_size)) {
+			dev_dbg(dev, "hevc reject: dpb %u\n", i);
+			return -EINVAL;
+		}
+	}
+
+	if (request->num_poc_st_curr_before > NVDEC_HEVC_DPB_ENTRIES ||
+	    request->num_poc_st_curr_after > NVDEC_HEVC_DPB_ENTRIES ||
+	    request->num_poc_lt_curr > NVDEC_HEVC_DPB_ENTRIES) {
+		dev_dbg(dev, "hevc reject: reference set size\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < request->num_poc_st_curr_before; i++)
+		if (!request->dpb[request->poc_st_curr_before[i]].valid)
+			goto bad_rps;
+	for (i = 0; i < request->num_poc_st_curr_after; i++)
+		if (!request->dpb[request->poc_st_curr_after[i]].valid)
+			goto bad_rps;
+	for (i = 0; i < request->num_poc_lt_curr; i++)
+		if (!request->dpb[request->poc_lt_curr[i]].valid)
+			goto bad_rps;
+
+	return 0;
+
+bad_rps:
+	dev_dbg(dev, "hevc reject: reference set names an inactive dpb entry\n");
+	return -EINVAL;
+}
+
+static void nvdec_hevc_fill_scaling_list(void *mem,
+					 const struct nvdec_hevc_request *r)
+{
+	struct nvdec_hevc_scaling_list *list = mem;
+
+	memcpy(list->dc_16x16, r->scaling_dc_16x16, sizeof(list->dc_16x16));
+	memcpy(list->dc_32x32, r->scaling_dc_32x32, sizeof(list->dc_32x32));
+	memcpy(list->list_4x4, r->scaling_4x4, sizeof(list->list_4x4));
+	memcpy(list->list_8x8, r->scaling_8x8, sizeof(list->list_8x8));
+	memcpy(list->list_16x16, r->scaling_16x16, sizeof(list->list_16x16));
+	memcpy(list->list_32x32, r->scaling_32x32, sizeof(list->list_32x32));
+}
+
+/* Per-tile sizes in CTBs, then the boundaries in 16-pixel units. */
+static void nvdec_hevc_fill_tile_sizes(void *mem,
+				       const struct nvdec_hevc_request *r)
+{
+	unsigned int shift = r->log2_max_luma_coding_block_size - 4;
+	__le16 *bounds = (__le16 *)mem + 0x380;
+	__le16 *sizes = mem;
+	unsigned int i, j;
+	u32 sum;
+
+	if (!(r->pps_flags & NVDEC_HEVC_PPS_TILES)) {
+		sizes[0] = cpu_to_le16(r->ctb_width);
+		sizes[1] = cpu_to_le16(r->ctb_height);
+		return;
+	}
+
+	if (r->pps_flags & NVDEC_HEVC_PPS_UNIFORM_SPACING) {
+		for (i = 0; i < r->num_tile_columns; i++)
+			*bounds++ = cpu_to_le16(((i + 1) * r->ctb_width /
+						 r->num_tile_columns) << shift);
+		for (i = 0; i < r->num_tile_rows; i++)
+			*bounds++ = cpu_to_le16(((i + 1) * r->ctb_height /
+						 r->num_tile_rows) << shift);
+	} else {
+		for (i = 0, sum = 0; i < r->num_tile_columns; i++) {
+			sum += r->column_width[i];
+			*bounds++ = cpu_to_le16(sum << shift);
+		}
+		for (i = 0, sum = 0; i < r->num_tile_rows; i++) {
+			sum += r->row_height[i];
+			*bounds++ = cpu_to_le16(sum << shift);
+		}
+	}
+
+	for (i = 0; i < r->num_tile_rows; i++) {
+		for (j = 0; j < r->num_tile_columns; j++) {
+			*sizes++ = cpu_to_le16(r->column_width[j]);
+			*sizes++ = cpu_to_le16(r->row_height[i]);
+		}
+	}
+}
+
+/* The three RPS classes concatenated, repeating to fill all 16 entries. */
+static void nvdec_hevc_fill_reflist(u8 list[NVDEC_HEVC_MAX_PICTURES],
+				    const u8 *order, unsigned int count)
+{
+	unsigned int i;
+
+	for (i = 0; count && i < NVDEC_HEVC_MAX_PICTURES; i++)
+		list[i] = order[i % count];
+}
+
+static void nvdec_hevc_fill_setup(struct nvdec_decode_job *hjob, u8 current_index,
+				  const u8 picture_indices[NVDEC_HEVC_DPB_ENTRIES],
+				  s8 scratch_diff_poc)
+{
+	const struct nvdec_hevc_request *r = &hjob->hevc;
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	struct nvdec_hevc_setup *setup = hjob->state->cpu;
+	u8 order0[3 * NVDEC_HEVC_DPB_ENTRIES];
+	u8 order1[3 * NVDEC_HEVC_DPB_ENTRIES];
+	unsigned int i, n = 0, m = 0;
+	u32 mask = BIT(current_index);
+	u32 word;
+
+	setup->stream_len = cpu_to_le32(r->output_payload_size);
+	setup->surface_format = cpu_to_le32(FIELD_PREP(NVDEC_HEVC_SURFACE_START_CODE, 1));
+	setup->framestride[0] = cpu_to_le32(r->luma_stride);
+	setup->framestride[1] = cpu_to_le32(r->luma_stride);
+	setup->coloc_buffer_size = cpu_to_le32(ctx->colmv_size / 256);
+	setup->sao_buffer_offset = cpu_to_le32(ctx->sao_offset / 256);
+	setup->bsd_control_offset = cpu_to_le32(ctx->bsd_offset / 256);
+	setup->pic_width_in_luma_samples =
+		cpu_to_le16(r->pic_width_in_luma_samples);
+	setup->pic_height_in_luma_samples =
+		cpu_to_le16(r->pic_height_in_luma_samples);
+
+	word = FIELD_PREP(NVDEC_HEVC_GEOM_CHROMA_FORMAT, 1);
+	word |= FIELD_PREP(NVDEC_HEVC_GEOM_BIT_DEPTH_LUMA, r->bit_depth);
+	word |= FIELD_PREP(NVDEC_HEVC_GEOM_BIT_DEPTH_CHROMA, r->bit_depth);
+	word |= FIELD_PREP(NVDEC_HEVC_GEOM_LOG2_MIN_CB,
+			   r->log2_min_luma_coding_block_size);
+	word |= FIELD_PREP(NVDEC_HEVC_GEOM_LOG2_MAX_CB,
+			   r->log2_max_luma_coding_block_size);
+	word |= FIELD_PREP(NVDEC_HEVC_GEOM_LOG2_MIN_TB,
+			   r->log2_min_transform_block_size);
+	word |= FIELD_PREP(NVDEC_HEVC_GEOM_LOG2_MAX_TB,
+			   r->log2_max_transform_block_size);
+	setup->sps_geometry = cpu_to_le32(word);
+
+	word = FIELD_PREP(NVDEC_HEVC_SPS_HIER_INTER,
+			  r->max_transform_hierarchy_depth_inter);
+	word |= FIELD_PREP(NVDEC_HEVC_SPS_HIER_INTRA,
+			   r->max_transform_hierarchy_depth_intra);
+	if (r->sps_flags & NVDEC_HEVC_SPS_SCALING_LIST)
+		word |= NVDEC_HEVC_SPS_SCALING_LIST_EN;
+	if (r->sps_flags & NVDEC_HEVC_SPS_AMP)
+		word |= NVDEC_HEVC_SPS_AMP_EN;
+	if (r->sps_flags & NVDEC_HEVC_SPS_SAO)
+		word |= NVDEC_HEVC_SPS_SAO_EN;
+	if (r->sps_flags & NVDEC_HEVC_SPS_PCM) {
+		word |= NVDEC_HEVC_SPS_PCM_EN;
+		word |= FIELD_PREP(NVDEC_HEVC_SPS_PCM_DEPTH_LUMA,
+				   r->pcm_sample_bit_depth_luma);
+		word |= FIELD_PREP(NVDEC_HEVC_SPS_PCM_DEPTH_CHROMA,
+				   r->pcm_sample_bit_depth_chroma);
+		word |= FIELD_PREP(NVDEC_HEVC_SPS_LOG2_MIN_PCM,
+				   r->log2_min_pcm_luma_coding_block_size);
+		word |= FIELD_PREP(NVDEC_HEVC_SPS_LOG2_MAX_PCM,
+				   r->log2_max_pcm_luma_coding_block_size);
+	}
+	if (r->sps_flags & NVDEC_HEVC_SPS_PCM_LOOP_FILTER_DISABLED)
+		word |= NVDEC_HEVC_SPS_PCM_LOOP_FILTER_DIS;
+	if (r->sps_flags & NVDEC_HEVC_SPS_TEMPORAL_MVP)
+		word |= NVDEC_HEVC_SPS_TEMPORAL_MVP_EN;
+	if (r->sps_flags & NVDEC_HEVC_SPS_STRONG_INTRA_SMOOTHING)
+		word |= NVDEC_HEVC_SPS_STRONG_INTRA_SMOOTH;
+	setup->sps_flags = cpu_to_le32(word);
+
+	word = FIELD_PREP(NVDEC_HEVC_PPS0_EXTRA_SLICE_BITS,
+			  r->num_extra_slice_header_bits);
+	word |= FIELD_PREP(NVDEC_HEVC_PPS0_NUM_REF_IDX_L0,
+			   r->num_ref_idx_l0_default_active);
+	word |= FIELD_PREP(NVDEC_HEVC_PPS0_NUM_REF_IDX_L1,
+			   r->num_ref_idx_l1_default_active);
+	word |= FIELD_PREP(NVDEC_HEVC_PPS0_INIT_QP, r->init_qp);
+	word |= FIELD_PREP(NVDEC_HEVC_PPS0_DIFF_CU_QP_DEPTH,
+			   r->diff_cu_qp_delta_depth);
+	if (r->pps_flags & NVDEC_HEVC_PPS_DEPENDENT_SLICE_SEGMENTS)
+		word |= NVDEC_HEVC_PPS0_DEPENDENT_SLICES;
+	if (r->pps_flags & NVDEC_HEVC_PPS_OUTPUT_FLAG_PRESENT)
+		word |= NVDEC_HEVC_PPS0_OUTPUT_FLAG_PRESENT;
+	if (r->pps_flags & NVDEC_HEVC_PPS_SIGN_DATA_HIDING)
+		word |= NVDEC_HEVC_PPS0_SIGN_DATA_HIDING;
+	if (r->pps_flags & NVDEC_HEVC_PPS_CABAC_INIT_PRESENT)
+		word |= NVDEC_HEVC_PPS0_CABAC_INIT_PRESENT;
+	if (r->pps_flags & NVDEC_HEVC_PPS_CONSTRAINED_INTRA_PRED)
+		word |= NVDEC_HEVC_PPS0_CONSTRAINED_INTRA;
+	if (r->pps_flags & NVDEC_HEVC_PPS_TRANSFORM_SKIP)
+		word |= NVDEC_HEVC_PPS0_TRANSFORM_SKIP;
+	if (r->pps_flags & NVDEC_HEVC_PPS_CU_QP_DELTA)
+		word |= NVDEC_HEVC_PPS0_CU_QP_DELTA;
+	setup->pps_flags0 = cpu_to_le32(word);
+
+	setup->pps_cb_qp_offset = r->pps_cb_qp_offset;
+	setup->pps_cr_qp_offset = r->pps_cr_qp_offset;
+	setup->pps_beta_offset = r->pps_beta_offset;
+	setup->pps_tc_offset = r->pps_tc_offset;
+
+	word = FIELD_PREP(NVDEC_HEVC_PPS1_LOG2_PARALLEL_MERGE,
+			  r->log2_parallel_merge_level);
+	if (r->pps_flags & NVDEC_HEVC_PPS_TILES) {
+		word |= NVDEC_HEVC_PPS1_TILES_ENABLED;
+		word |= FIELD_PREP(NVDEC_HEVC_PPS1_NUM_TILE_COLUMNS,
+				   r->num_tile_columns);
+		word |= FIELD_PREP(NVDEC_HEVC_PPS1_NUM_TILE_ROWS,
+				   r->num_tile_rows);
+		if (r->pps_flags & NVDEC_HEVC_PPS_LOOP_FILTER_ACROSS_TILES)
+			word |= NVDEC_HEVC_PPS1_LF_ACROSS_TILES;
+	}
+	if (r->pps_flags & NVDEC_HEVC_PPS_SLICE_CHROMA_QP_OFFSETS)
+		word |= NVDEC_HEVC_PPS1_SLICE_CHROMA_QP;
+	if (r->pps_flags & NVDEC_HEVC_PPS_WEIGHTED_PRED)
+		word |= NVDEC_HEVC_PPS1_WEIGHTED_PRED;
+	if (r->pps_flags & NVDEC_HEVC_PPS_WEIGHTED_BIPRED)
+		word |= NVDEC_HEVC_PPS1_WEIGHTED_BIPRED;
+	if (r->pps_flags & NVDEC_HEVC_PPS_TRANSQUANT_BYPASS)
+		word |= NVDEC_HEVC_PPS1_TRANSQUANT_BYPASS;
+	if (r->pps_flags & NVDEC_HEVC_PPS_ENTROPY_CODING_SYNC)
+		word |= NVDEC_HEVC_PPS1_ENTROPY_SYNC;
+	if (r->pps_flags & NVDEC_HEVC_PPS_LOOP_FILTER_ACROSS_SLICES)
+		word |= NVDEC_HEVC_PPS1_LF_ACROSS_SLICES;
+	if (r->pps_flags & NVDEC_HEVC_PPS_DEBLOCKING_CONTROL)
+		word |= NVDEC_HEVC_PPS1_DEBLOCK_CONTROL;
+	if (r->pps_flags & NVDEC_HEVC_PPS_DEBLOCKING_OVERRIDE)
+		word |= NVDEC_HEVC_PPS1_DEBLOCK_OVERRIDE;
+	if (r->pps_flags & NVDEC_HEVC_PPS_DEBLOCKING_DISABLED)
+		word |= NVDEC_HEVC_PPS1_DEBLOCK_DISABLED;
+	if (r->pps_flags & NVDEC_HEVC_PPS_LISTS_MODIFICATION)
+		word |= NVDEC_HEVC_PPS1_LISTS_MODIFICATION;
+	if (r->pps_flags & NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION)
+		word |= NVDEC_HEVC_PPS1_SLICE_HDR_EXTENSION;
+	setup->pps_flags1 = cpu_to_le32(word);
+
+	setup->num_ref_frames = r->num_ref_frames;
+	setup->idr_picture_flag = !!(r->sps_flags & NVDEC_HEVC_SPS_IDR);
+	setup->rap_picture_flag = !!(r->sps_flags & NVDEC_HEVC_SPS_IRAP);
+	setup->curr_pic_idx = current_index;
+	/* 8-bit output needs no dithering, and 2 is what turns it off. */
+	setup->pattern_id = 2;
+	setup->sw_hdr_skip_length = cpu_to_le16(r->sw_hdr_skip_length);
+
+	for (i = 0; i < NVDEC_HEVC_DPB_ENTRIES; i++) {
+		if (!r->dpb[i].valid)
+			continue;
+		mask |= BIT(picture_indices[i]);
+		setup->ref_diff_poc[picture_indices[i]] =
+			cpu_to_le16(clamp_t(int, r->pic_order_cnt_val -
+					    r->dpb[i].pic_order_cnt_val,
+					    S8_MIN, S8_MAX));
+		if (r->dpb[i].long_term)
+			setup->longtermflag |=
+				cpu_to_le16(BIT(15 - picture_indices[i]));
+	}
+
+	for (i = 0; i < NVDEC_HEVC_MAX_PICTURES; i++) {
+		if (!(mask & BIT(i)))
+			setup->ref_diff_poc[i] = cpu_to_le16(scratch_diff_poc);
+	}
+
+	for (i = 0; i < r->num_poc_st_curr_before; i++)
+		order0[n++] = picture_indices[r->poc_st_curr_before[i]];
+	for (i = 0; i < r->num_poc_st_curr_after; i++)
+		order0[n++] = picture_indices[r->poc_st_curr_after[i]];
+	for (i = 0; i < r->num_poc_lt_curr; i++)
+		order0[n++] = picture_indices[r->poc_lt_curr[i]];
+
+	for (i = 0; i < r->num_poc_st_curr_after; i++)
+		order1[m++] = picture_indices[r->poc_st_curr_after[i]];
+	for (i = 0; i < r->num_poc_st_curr_before; i++)
+		order1[m++] = picture_indices[r->poc_st_curr_before[i]];
+	for (i = 0; i < r->num_poc_lt_curr; i++)
+		order1[m++] = picture_indices[r->poc_lt_curr[i]];
+
+	nvdec_hevc_fill_reflist(setup->initreflistidxl0, order0, n);
+	nvdec_hevc_fill_reflist(setup->initreflistidxl1, order1, m);
+
+	if (r->sps_flags & NVDEC_HEVC_SPS_SCALING_LIST)
+		nvdec_hevc_fill_scaling_list(hjob->state->cpu +
+					     NVDEC_HEVC_SCALING_OFFSET, r);
+	nvdec_hevc_fill_tile_sizes(hjob->state->cpu + NVDEC_HEVC_TILES_OFFSET, r);
+}
+
+static int nvdec_hevc_build_gather(struct nvdec_decode_job *hjob,
+				   u8 current_index,
+				   const u8 picture_indices[NVDEC_HEVC_DPB_ENTRIES])
+{
+	struct nvdec_engine_map *references[NVDEC_HEVC_MAX_PICTURES];
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	u32 *gather = hjob->gather->cpu;
+	unsigned int i, word = 0;
+	u32 syncpt_id;
+	int err;
+
+	for (i = 0; i < NVDEC_HEVC_MAX_PICTURES; i++)
+		references[i] = hjob->scratch_ref;
+	references[current_index] = hjob->surface;
+	for (i = 0; i < NVDEC_HEVC_DPB_ENTRIES; i++) {
+		if (hjob->hevc.dpb[i].valid)
+			references[picture_indices[i]] = hjob->dpb[i];
+	}
+
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_APPLICATION, 7);
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_CONTROL, 0x57);
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_PICTURE_INDEX,
+			  current_index);
+	err = nvdec_emit_address(gather, &word, NVDEC_METHOD_SETUP,
+				 hjob->state->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_INPUT,
+					 hjob->input->iova);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_STATUS,
+					 hjob->state->iova +
+					 NVDEC_HEVC_STATUS_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word,
+					 NVDEC_HEVC_METHOD_SCALING_LIST,
+					 hjob->state->iova +
+					 NVDEC_HEVC_SCALING_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word,
+					 NVDEC_HEVC_METHOD_TILE_SIZES,
+					 hjob->state->iova +
+					 NVDEC_HEVC_TILES_OFFSET);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_HEVC_METHOD_FILTER,
+					 hjob->scratch->iova + ctx->filter_offset);
+	if (!err)
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_COLOC,
+					 hjob->scratch->iova);
+	for (i = 0; !err && i < NVDEC_HEVC_MAX_PICTURES; i++) {
+		err = nvdec_emit_address(gather, &word, NVDEC_METHOD_LUMA + i,
+					 references[i]->iova);
+		if (!err)
+			err = nvdec_emit_address(gather, &word,
+						 NVDEC_METHOD_CHROMA + i,
+						 references[i]->iova +
+						 hjob->hevc.chroma_offset);
+	}
+	if (err)
+		return err;
+	nvdec_emit_method(gather, &word, NVDEC_METHOD_EXECUTE, 0x100);
+	if (WARN_ON_ONCE(word != NVDEC_HEVC_GATHER_WORDS))
+		return -EINVAL;
+
+	syncpt_id = host1x_syncpt_id(ctx->engine->client.base.syncpts[0]);
+	gather[word++] = 0x20000001;
+	gather[word++] = syncpt_id | 0x100;
+
+	err = vic_engine_emit_detile(gather, &word,
+				     hjob->state->iova +
+				     NVDEC_HEVC_VIC_CONFIG_OFFSET,
+				     hjob->surface->iova,
+				     hjob->surface->iova + hjob->hevc.chroma_offset,
+				     hjob->capture->iova,
+				     hjob->capture->iova +
+				     hjob->hevc.dst_chroma_offset);
+	if (err)
+		return err;
+
+	gather[word++] = 0x20000001;
+	gather[word++] = syncpt_id | 0x100;
+	WARN_ON_ONCE(word != NVDEC_HEVC_TOTAL_GATHER_WORDS);
+
+	print_hex_dump_debug("nvdec hevc setup: ", DUMP_PREFIX_OFFSET, 16, 4,
+			     hjob->state->cpu, NVDEC_HEVC_SETUP_SIZE, false);
+	return 0;
+}
+
+int nvdec_engine_hevc_submit(struct nvdec_decode_context *ctx,
+			     const struct nvdec_hevc_request *request,
+			     struct nvdec_engine_map *surface,
+			     struct nvdec_engine_map *capture,
+			     struct nvdec_engine_map * const dpb[NVDEC_HEVC_DPB_ENTRIES],
+			     struct dma_fence **fence,
+			     nvdec_engine_complete_t complete, void *data)
+{
+	u8 picture_indices[NVDEC_HEVC_DPB_ENTRIES] = { };
+	struct nvdec_decode_job *hjob;
+	s8 scratch_diff_poc = 0;
+	int scratch_entry = -1;
+	u8 current_index;
+	unsigned int i;
+	int err;
+
+	if (!ctx || !request || !surface || !capture || !dpb || !fence ||
+	    ctx->codec != NVDEC_CODEC_HEVC)
+		return -EINVAL;
+	*fence = NULL;
+
+	mutex_lock(&ctx->lock);
+	if (ctx->in_flight) {
+		err = -EBUSY;
+		goto unlock;
+	}
+	if (!ctx->slice_count) {
+		err = -EINVAL;
+		goto unlock;
+	}
+	hjob = kzalloc_obj(*hjob);
+	if (!hjob) {
+		err = -ENOMEM;
+		goto unlock;
+	}
+	hjob->ctx = ctx;
+	kref_get(&ctx->ref);
+	hjob->hevc = *request;
+	hjob->hevc.output_payload_size = ctx->staged;
+	hjob->complete = complete;
+	hjob->complete_data = data;
+	err = nvdec_hevc_validate_request(ctx->engine->dev, &hjob->hevc, surface,
+					  capture, dpb);
+	if (err)
+		goto free_hjob;
+
+	err = nvdec_hevc_prepare_scratch(ctx, &hjob->hevc);
+	if (err)
+		goto free_hjob;
+	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
+
+	err = nvdec_surface_index(ctx, surface, &current_index,
+				  NVDEC_HEVC_MAX_PICTURES);
+	if (err)
+		goto free_hjob;
+	for (i = 0; i < NVDEC_HEVC_DPB_ENTRIES; i++) {
+		if (!hjob->hevc.dpb[i].valid)
+			continue;
+		err = nvdec_surface_index(ctx, dpb[i], &picture_indices[i],
+					  NVDEC_HEVC_MAX_PICTURES);
+		if (err)
+			goto free_hjob;
+	}
+
+	/* An unused slot still needs a surface and a POC difference. */
+	if (hjob->hevc.num_poc_st_curr_before)
+		scratch_entry = hjob->hevc.poc_st_curr_before[0];
+	else if (hjob->hevc.num_poc_st_curr_after)
+		scratch_entry = hjob->hevc.poc_st_curr_after[0];
+	else if (hjob->hevc.num_poc_lt_curr)
+		scratch_entry = hjob->hevc.poc_lt_curr[0];
+
+	hjob->vic = vic_engine_find(ctx->engine->client.drm);
+	if (!hjob->vic) {
+		err = -ENODEV;
+		goto free_hjob;
+	}
+	hjob->state = nvdec_buffer_alloc(ctx->engine, NVDEC_HEVC_STATE_SIZE);
+	if (IS_ERR(hjob->state)) {
+		err = PTR_ERR(hjob->state);
+		hjob->state = NULL;
+		goto free_hjob;
+	}
+	hjob->input = nvdec_buffer_ref(ctx->input);
+	hjob->gather = nvdec_buffer_alloc(ctx->engine,
+					  NVDEC_HEVC_TOTAL_GATHER_WORDS * sizeof(u32));
+	if (IS_ERR(hjob->gather)) {
+		err = PTR_ERR(hjob->gather);
+		hjob->gather = NULL;
+		goto free_hjob;
+	}
+	if (upper_32_bits(hjob->state->iova) || upper_32_bits(hjob->input->iova) ||
+	    upper_32_bits(hjob->gather->iova)) {
+		err = -ERANGE;
+		goto free_hjob;
+	}
+
+	hjob->surface = nvdec_engine_map_get(surface);
+	hjob->capture = nvdec_engine_map_get(capture);
+	for (i = 0; i < NVDEC_HEVC_DPB_ENTRIES; i++) {
+		if (hjob->hevc.dpb[i].valid)
+			hjob->dpb[i] = nvdec_engine_map_get(dpb[i]);
+	}
+	if (scratch_entry >= 0) {
+		hjob->scratch_ref = hjob->dpb[scratch_entry];
+		scratch_diff_poc = clamp_t(int, hjob->hevc.pic_order_cnt_val -
+					   hjob->hevc.dpb[scratch_entry].pic_order_cnt_val,
+					   S8_MIN, S8_MAX);
+	} else {
+		hjob->scratch_ref = hjob->surface;
+	}
+	hjob->fence = nvdec_fence_create(ctx->engine);
+	if (IS_ERR(hjob->fence)) {
+		err = PTR_ERR(hjob->fence);
+		hjob->fence = NULL;
+		goto free_hjob;
+	}
+	err = nvdec_install_fences(hjob);
+	if (err)
+		goto free_hjob;
+
+	nvdec_hevc_fill_setup(hjob, current_index, picture_indices,
+			      scratch_diff_poc);
+	vic_engine_fill_detile_config(hjob->state->cpu + NVDEC_HEVC_VIC_CONFIG_OFFSET,
+				      &(struct vic_detile_params){
+					.width = hjob->hevc.coded_width,
+					.height = hjob->hevc.coded_height,
+					.left = hjob->hevc.crop_left,
+					.top = hjob->hevc.crop_top,
+					.out_width = hjob->hevc.crop_width,
+					.out_height = hjob->hevc.crop_height,
+					.src_stride = hjob->hevc.luma_stride,
+					.dst_stride = hjob->hevc.dst_stride,
+				      });
+	err = nvdec_hevc_build_gather(hjob, current_index, picture_indices);
+	if (err)
+		goto free_hjob;
+
+	err = nvdec_launch_job(hjob, NVDEC_HEVC_GATHER_WORDS,
+			       NVDEC_HEVC_VIC_OFFSET, fence);
 	if (err)
 		goto free_hjob;
 	mutex_unlock(&ctx->lock);
