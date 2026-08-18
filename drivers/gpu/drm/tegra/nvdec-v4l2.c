@@ -64,7 +64,7 @@ struct nvdec_v4l2_ctx {
 	/* Visible rectangle of the coded picture; VIC detiles only this. */
 	struct v4l2_rect crop;
 	struct v4l2_ctrl *ctrls[10];
-	struct nvdec_h264_context *h264;
+	struct nvdec_decode_context *decode;
 	struct list_head surfaces;
 	struct nvdec_v4l2_job *job;
 	/* Picture being assembled; slices of one picture share it. */
@@ -299,10 +299,10 @@ static void nvdec_stop_streaming(struct vb2_queue *vq)
 	}
 	if (V4L2_TYPE_IS_CAPTURE(vq->type)) {
 		/* Drop the size-derived scratch so the next stream may differ. */
-		nvdec_engine_h264_context_reset(ctx->h264);
+		nvdec_engine_context_reset(ctx->decode);
 		nvdec_release_surfaces(ctx);
 	} else {
-		nvdec_engine_h264_discard_slices(ctx->h264);
+		nvdec_engine_discard_slices(ctx->decode);
 	}
 }
 
@@ -539,7 +539,7 @@ static void nvdec_release_surface(struct nvdec_v4l2_ctx *ctx,
 
 	if (!surface)
 		return;
-	nvdec_engine_h264_context_release_surface(ctx->h264, surface->map);
+	nvdec_engine_context_release_surface(ctx->decode, surface->map);
 	list_del(&surface->list);
 	nvdec_engine_map_put(surface->map);
 	kfree(surface);
@@ -747,12 +747,48 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 		return err;
 	err = nvdec_engine_map_wait(output, false);
 	if (!err)
-		err = nvdec_engine_h264_stage_slice(ctx->h264, output,
-						    vb2_get_plane_payload(&src->vb2_buf, 0),
+		err = nvdec_engine_stage_slice(ctx->decode, output,
+					       vb2_get_plane_payload(&src->vb2_buf, 0),
 					first, ctx->picture.pic_width_in_mbs *
 					ctx->picture.frame_height_in_mbs);
 	nvdec_engine_map_put(output);
 	return err;
+}
+
+/* Each DPB entry names a capture buffer, and through it a pool surface. */
+static int nvdec_pin_reference(struct nvdec_v4l2_ctx *ctx,
+			       struct nvdec_v4l2_job *job, unsigned int slot,
+			       u64 timestamp)
+{
+	struct vb2_queue *cap_q = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
+	struct nvdec_v4l2_surface *surface;
+
+	surface = nvdec_find_surface(ctx, vb2_find_buffer(cap_q, timestamp));
+	if (!surface)
+		return -EINVAL;
+
+	job->dpb[slot] = nvdec_engine_map_get(surface->map);
+	return 0;
+}
+
+static int nvdec_resolve_dpb(struct nvdec_v4l2_ctx *ctx,
+			     struct nvdec_v4l2_job *job)
+{
+	unsigned int i;
+	int err;
+
+	const struct v4l2_ctrl_h264_decode_params *dec =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_DECODE_PARAMS);
+
+	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
+		if (!ctx->picture.dpb[i].valid)
+			continue;
+		err = nvdec_pin_reference(ctx, job, i, dec->dpb[i].reference_ts);
+		if (err)
+			return err;
+	}
+
+	return 0;
 }
 
 static void nvdec_device_run(void *priv)
@@ -762,7 +798,6 @@ static void nvdec_device_run(void *priv)
 	struct vb2_v4l2_buffer *dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 	struct media_request *req = src ? src->vb2_buf.req_obj.req : NULL;
 	struct nvdec_v4l2_job *job;
-	const struct v4l2_ctrl_h264_decode_params *dec;
 	const struct v4l2_ctrl_h264_slice_params *slice;
 	unsigned int i;
 	bool controls_set_up = false;
@@ -810,22 +845,9 @@ static void nvdec_device_run(void *priv)
 	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, &job->capture);
 	if (err)
 		goto free_job;
-	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_DECODE_PARAMS);
-	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
-		struct vb2_buffer *vb;
-		struct nvdec_v4l2_surface *surface;
-
-		if (!ctx->picture.dpb[i].valid)
-			continue;
-		vb = vb2_find_buffer(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx),
-				     dec->dpb[i].reference_ts);
-		surface = nvdec_find_surface(ctx, vb);
-		if (!surface) {
-			err = -EINVAL;
-			goto free_job;
-		}
-		job->dpb[i] = nvdec_engine_map_get(surface->map);
-	}
+	err = nvdec_resolve_dpb(ctx, job);
+	if (err)
+		goto free_job;
 	err = nvdec_engine_map_wait(job->capture, true);
 	for (i = 0; !err && i < NVDEC_H264_DPB_ENTRIES; i++) {
 		if (job->dpb[i])
@@ -834,7 +856,7 @@ static void nvdec_device_run(void *priv)
 	if (err)
 		goto free_job;
 	ctx->job = job;
-	err = nvdec_engine_h264_submit(ctx->h264, &ctx->picture,
+	err = nvdec_engine_h264_submit(ctx->decode, &ctx->picture,
 				       job->surface->map, job->capture, job->dpb,
 					&job->fence, nvdec_job_complete, job);
 	if (err) {
@@ -851,7 +873,7 @@ free_job:
 fail:
 	if (controls_set_up)
 		v4l2_ctrl_request_complete(req, &ctx->ctrl_hdl);
-	nvdec_engine_h264_discard_slices(ctx->h264);
+	nvdec_engine_discard_slices(ctx->decode);
 	src->flags &= ~V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF;
 	v4l2_m2m_buf_done_and_job_finish(ctx->nvdec->m2m_dev, ctx->fh.m2m_ctx,
 					 VB2_BUF_STATE_ERROR);
@@ -1064,9 +1086,9 @@ static int nvdec_open(struct file *file)
 		return -ENOMEM;
 	ctx->nvdec = nvdec;
 	INIT_LIST_HEAD(&ctx->surfaces);
-	ctx->h264 = nvdec_engine_h264_context_create(nvdec->engine);
-	if (IS_ERR(ctx->h264)) {
-		err = PTR_ERR(ctx->h264);
+	ctx->decode = nvdec_engine_context_create(nvdec->engine);
+	if (IS_ERR(ctx->decode)) {
+		err = PTR_ERR(ctx->decode);
 		goto free_ctx;
 	}
 	v4l2_fh_init(&ctx->fh, video_devdata(file));
@@ -1092,7 +1114,7 @@ free_ctrls:
 	err = ctx->ctrl_hdl.error ?: err;
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
-	nvdec_engine_h264_context_destroy(ctx->h264);
+	nvdec_engine_context_destroy(ctx->decode);
 free_ctx:
 	kfree(ctx);
 	return err;
@@ -1107,7 +1129,7 @@ static int nvdec_release(struct file *file)
 	nvdec_release_surfaces(ctx);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
-	nvdec_engine_h264_context_destroy(ctx->h264);
+	nvdec_engine_context_destroy(ctx->decode);
 	kfree(ctx);
 	return 0;
 }

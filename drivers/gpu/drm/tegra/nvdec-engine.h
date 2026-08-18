@@ -19,7 +19,7 @@ struct nvdec_v4l2;
 
 struct nvdec_engine;
 struct nvdec_engine_map;
-struct nvdec_h264_context;
+struct nvdec_decode_context;
 
 #define NVDEC_H264_DPB_ENTRIES	16
 /* 16 references plus the current picture; one firmware index each. */
@@ -103,7 +103,7 @@ struct nvdec_h264_request {
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,
 					     void *data);
-typedef void (*nvdec_engine_h264_complete_t)(void *data, bool error);
+typedef void (*nvdec_engine_complete_t)(void *data, bool error);
 
 #define NVIDIA_TEGRA_210_NVDEC_FIRMWARE "nvidia/tegra210/nvdec.bin"
 #define NVIDIA_TEGRA_186_NVDEC_FIRMWARE "nvidia/tegra186/nvdec.bin"
@@ -146,24 +146,24 @@ int nvdec_engine_map_wait(struct nvdec_engine_map *map, bool write);
 int nvdec_engine_map_add_fence(struct nvdec_engine_map *map,
 			       struct dma_fence *fence, bool write);
 
-struct nvdec_h264_context *
-nvdec_engine_h264_context_create(struct nvdec_engine *engine);
-void nvdec_engine_h264_context_destroy(struct nvdec_h264_context *ctx);
-void nvdec_engine_h264_context_release_surface(struct nvdec_h264_context *ctx,
-					       struct nvdec_engine_map *surface);
-int nvdec_engine_h264_stage_slice(struct nvdec_h264_context *ctx,
-				  struct nvdec_engine_map *output,
+struct nvdec_decode_context *
+nvdec_engine_context_create(struct nvdec_engine *engine);
+void nvdec_engine_context_destroy(struct nvdec_decode_context *ctx);
+void nvdec_engine_context_release_surface(struct nvdec_decode_context *ctx,
+					  struct nvdec_engine_map *surface);
+int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
+			     struct nvdec_engine_map *output,
 				  u32 payload_size, bool first,
 				  unsigned int max_slices);
-void nvdec_engine_h264_discard_slices(struct nvdec_h264_context *ctx);
-void nvdec_engine_h264_context_reset(struct nvdec_h264_context *ctx);
-int nvdec_engine_h264_submit(struct nvdec_h264_context *ctx,
+void nvdec_engine_discard_slices(struct nvdec_decode_context *ctx);
+void nvdec_engine_context_reset(struct nvdec_decode_context *ctx);
+int nvdec_engine_h264_submit(struct nvdec_decode_context *ctx,
 			     const struct nvdec_h264_request *request,
 			     struct nvdec_engine_map *surface,
 			     struct nvdec_engine_map *capture,
 			     struct nvdec_engine_map * const dpb[NVDEC_H264_DPB_ENTRIES],
 			     struct dma_fence **fence,
-			     nvdec_engine_h264_complete_t complete, void *data);
+			     nvdec_engine_complete_t complete, void *data);
 
 extern const struct dev_pm_ops nvdec_engine_pm_ops;
 extern const struct of_device_id nvdec_engine_of_match[];
