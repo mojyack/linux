@@ -206,16 +206,32 @@ struct nvdec_hevc_request {
 #define NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION	BIT(19)
 #define NVDEC_HEVC_PPS_UNIFORM_SPACING		BIT(20)
 
+/* Golden, altref and last; the current picture takes the fourth slot. */
+#define NVDEC_VP8_REFS		3
+
+/* Copied, validated VP8 state. This is not a V4L2 control layout. */
+struct nvdec_vp8_request {
+	struct nvdec_frame frame;
+	u8 version;
+	u8 flags;
+	u32 first_part_size;
+};
+
+#define NVDEC_VP8_REQ_KEY_FRAME		BIT(0)
+#define NVDEC_VP8_REQ_SEGMENT_UPDATE	BIT(1)
+
 /* Every member starts with its struct nvdec_frame. */
 union nvdec_request {
 	struct nvdec_frame frame;
 	struct nvdec_h264_request h264;
 	struct nvdec_hevc_request hevc;
+	struct nvdec_vp8_request vp8;
 };
 
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
 	NVDEC_CODEC_HEVC,
+	NVDEC_CODEC_VP8,
 };
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,
@@ -253,7 +269,8 @@ int nvdec_engine_submit_job(struct nvdec_engine *engine,
 
 struct nvdec_engine_map *
 nvdec_engine_map_create(struct nvdec_engine *engine, struct dma_buf *dmabuf,
-			size_t size, enum dma_data_direction direction);
+			unsigned long offset, size_t size,
+			enum dma_data_direction direction);
 struct nvdec_engine_map *
 nvdec_engine_surface_create(struct nvdec_engine *engine, size_t size);
 struct nvdec_engine_map *nvdec_engine_map_get(struct nvdec_engine_map *map);

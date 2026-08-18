@@ -128,6 +128,11 @@ static const struct v4l2_ctrl_config nvdec_hevc_ctrls[] = {
 	},
 };
 
+/* The firmware parses the frame header, so one control is the whole ABI. */
+static const struct v4l2_ctrl_config nvdec_vp8_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_VP8_FRAME },
+};
+
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 {
 	return container_of(file_to_v4l2_fh(file), struct nvdec_v4l2_ctx, fh);
@@ -559,16 +564,19 @@ static int nvdec_capture_surface(struct nvdec_v4l2_ctx *ctx,
 
 static int nvdec_map_buffer(struct nvdec_v4l2_ctx *ctx, struct vb2_buffer *vb,
 			    enum dma_data_direction direction,
+			    unsigned long offset,
 			    struct nvdec_engine_map **result)
 {
 	struct dma_buf *dmabuf;
 	struct nvdec_engine_map *map;
 
+	if (offset >= vb2_plane_size(vb, 0))
+		return -EINVAL;
 	dmabuf = nvdec_plane_dmabuf(vb);
 	if (!dmabuf)
 		return -ENOMEM;
-	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf,
-				      vb2_plane_size(vb, 0), direction);
+	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf, offset,
+				      vb2_plane_size(vb, 0) - offset, direction);
 	dma_buf_put(dmabuf);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
@@ -984,6 +992,77 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_validate_vp8_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	const struct v4l2_ctrl_vp8_frame *frame;
+	const char *why;
+
+	if (!nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_VP8_FRAME)) {
+		why = "the frame control is missing from the request";
+		goto reject;
+	}
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	if (!frame) {
+		why = "control handler lookup failed";
+		goto reject;
+	}
+
+	if (frame->version > 3) {
+		why = "unsupported bitstream version";
+		goto reject;
+	}
+
+	/* The decoded picture is the coded size; there is no upscaler. */
+	if (frame->horizontal_scale || frame->vertical_scale) {
+		why = "upscaling is not supported";
+		goto reject;
+	}
+
+	if (ALIGN(frame->width, 16) != coded->width ||
+	    ALIGN(frame->height, 16) != coded->height) {
+		why = "frame dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	if (!frame->first_part_size) {
+		why = "empty first partition";
+		goto reject;
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "vp8 reject: %s\n", why);
+	return -EINVAL;
+}
+
+/* The firmware re-parses the header, so little of the control is used. */
+static int nvdec_snapshot_vp8_request(struct nvdec_v4l2_ctx *ctx,
+				      struct vb2_v4l2_buffer *src,
+				      struct vb2_v4l2_buffer *dst, bool first)
+{
+	struct nvdec_vp8_request *request = &ctx->request.vp8;
+	const struct v4l2_ctrl_vp8_frame *frame;
+
+	if (nvdec_validate_vp8_request(ctx))
+		return -EINVAL;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+
+	nvdec_snapshot_frame(ctx);
+	request->version = frame->version;
+	request->first_part_size = frame->first_part_size;
+	if (frame->flags & V4L2_VP8_FRAME_FLAG_KEY_FRAME)
+		request->flags |= NVDEC_VP8_REQ_KEY_FRAME;
+	if ((frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_ENABLED) &&
+	    (frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_UPDATE_FEATURE_DATA))
+		request->flags |= NVDEC_VP8_REQ_SEGMENT_UPDATE;
+
+	return 0;
+}
+
 static void nvdec_job_cleanup_maps(struct nvdec_v4l2_job *job)
 {
 	unsigned int i;
@@ -1018,20 +1097,29 @@ static void nvdec_job_complete(void *data, bool error)
 static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 			     struct vb2_v4l2_buffer *src, bool first)
 {
-	/* HEVC stages a whole picture at once; H.264 one slice at a time. */
-	unsigned int max_slices = ctx->codec == NVDEC_CODEC_HEVC ? 1 :
+	/* Only H.264 stages one slice at a time; the others a whole picture. */
+	unsigned int max_slices = ctx->codec != NVDEC_CODEC_H264 ? 1 :
 		ctx->request.h264.pic_width_in_mbs *
 		ctx->request.h264.frame_height_in_mbs;
+	u32 payload = vb2_get_plane_payload(&src->vb2_buf, 0);
 	struct nvdec_engine_map *output;
+	unsigned long offset = 0;
 	int err;
 
-	err = nvdec_map_buffer(ctx, &src->vb2_buf, DMA_TO_DEVICE, &output);
+	/* VP8 reaches the firmware without its uncompressed data chunk. */
+	if (ctx->codec == NVDEC_CODEC_VP8) {
+		offset = ctx->request.vp8.flags & NVDEC_VP8_REQ_KEY_FRAME ? 10 : 3;
+		if (payload <= offset)
+			return -EINVAL;
+		payload -= offset;
+	}
+
+	err = nvdec_map_buffer(ctx, &src->vb2_buf, DMA_TO_DEVICE, offset, &output);
 	if (err)
 		return err;
 	err = nvdec_engine_map_wait(output, false);
 	if (!err)
-		err = nvdec_engine_stage_slice(ctx->decode, output,
-					       vb2_get_plane_payload(&src->vb2_buf, 0),
+		err = nvdec_engine_stage_slice(ctx->decode, output, payload,
 					       first, max_slices);
 	nvdec_engine_map_put(output);
 	return err;
@@ -1089,6 +1177,25 @@ static int nvdec_resolve_hevc(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+/* VP8 slots are roles, not DPB entries: golden, altref, last. */
+static int nvdec_resolve_vp8(struct nvdec_v4l2_ctx *ctx,
+			     struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_vp8_frame *frame =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	const u64 timestamps[NVDEC_VP8_REFS] = {
+		frame->golden_frame_ts, frame->alt_frame_ts,
+		frame->last_frame_ts,
+	};
+	unsigned int i;
+
+	/* A reference the client does not name is the current picture. */
+	for (i = 0; i < NVDEC_VP8_REFS; i++)
+		nvdec_pin_reference(ctx, job, i, timestamps[i]);
+
+	return 0;
+}
+
 /* Everything that differs between the coded formats on the OUTPUT queue. */
 struct nvdec_codec_desc {
 	u32 pixelformat;
@@ -1123,6 +1230,16 @@ static const struct nvdec_codec_desc nvdec_codecs[] = {
 		.num_ctrls = ARRAY_SIZE(nvdec_hevc_ctrls),
 		.snapshot = nvdec_snapshot_hevc_request,
 		.resolve = nvdec_resolve_hevc,
+	},
+	[NVDEC_CODEC_VP8] = {
+		.pixelformat = V4L2_PIX_FMT_VP8_FRAME,
+		.min_width = 48,
+		.min_height = 16,
+		.align = 16,
+		.ctrls = nvdec_vp8_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_vp8_ctrls),
+		.snapshot = nvdec_snapshot_vp8_request,
+		.resolve = nvdec_resolve_vp8,
 	},
 };
 
@@ -1228,7 +1345,8 @@ static void nvdec_device_run(void *priv)
 	err = nvdec_capture_surface(ctx, &dst->vb2_buf, &job->surface);
 	if (err)
 		goto free_job;
-	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, &job->capture);
+	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, 0,
+			       &job->capture);
 	if (err)
 		goto free_job;
 	err = desc->resolve(ctx, job);
