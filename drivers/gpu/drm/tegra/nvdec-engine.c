@@ -63,8 +63,11 @@
 #define NVDEC_VP9_METHOD_COL_MVREAD		0x176
 #define NVDEC_VP9_METHOD_FILTER		0x177
 
-/* The NVDEC methods, OP_DONE, the VIC detile and OP_DONE. */
+/* The NVDEC methods, OP_DONE, then per VIC pass the detile and OP_DONE. */
 #define NVDEC_GATHER_WORDS			256
+/* The state buffer ends in one VIC config per detile pass. */
+#define NVDEC_VIC_CONFIG_STRIDE		0x800
+#define NVDEC_MAX_VIC_PASSES			2
 
 #define NVDEC_H264_SETUP_SIZE			0x2fc
 #define NVDEC_H264_STATUS_OFFSET		0x300
@@ -485,6 +488,8 @@ static_assert(offsetof(struct nvdec_vp9_counts, coeff) == 0x6d0);
 static_assert(offsetof(struct nvdec_vp9_counts, eob) == 0x2ad0);
 static_assert(sizeof(struct nvdec_vp9_counts) == 0x33d0);
 
+static_assert(VIC_CONFIG_SIZE <= NVDEC_VIC_CONFIG_STRIDE);
+
 struct nvdec_engine_map {
 	struct kref ref;
 	struct tegra_bo *bo;
@@ -566,6 +571,7 @@ struct nvdec_decode_job {
 	u8 picture_index;
 	u8 picture_indices[NVDEC_MAX_REFS];
 	u8 dpb_slots[NVDEC_MAX_REFS];
+	u8 vic_passes;
 	unsigned int vic_offset;
 	u32 slice_offsets_off;
 	struct vic_engine *vic;
@@ -582,7 +588,7 @@ struct nvdec_codec_ops {
 	u8 application;
 	u16 setup_size;
 	u16 status_offset;
-	/* The state buffer's VIC config, after the codec's own tables. */
+	/* The state buffer's first VIC config, after the codec's own tables. */
 	u16 vic_config;
 	/* Written after the bitstream when the firmware takes slice offsets. */
 	const u8 *termination;
@@ -1497,7 +1503,7 @@ void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 
 /* The decode surface and the detile destination, as every codec lays them out. */
 static int nvdec_validate_frame(struct device *dev, const struct nvdec_frame *f,
-				unsigned int align,
+				unsigned int align, unsigned int sample_bytes,
 				const struct nvdec_engine_map *surface,
 				const struct nvdec_engine_map *capture,
 				u32 *surface_size)
@@ -1524,7 +1530,7 @@ static int nvdec_validate_frame(struct device *dev, const struct nvdec_frame *f,
 			       (u32)ALIGN(f->coded_height / 2, 16), &chroma_size) ||
 	    check_add_overflow(f->chroma_offset, chroma_size, surface_size) ||
 	    f->chroma_offset < luma_size || !IS_ALIGNED(f->luma_stride, 16) ||
-	    f->luma_stride < f->coded_width ||
+	    f->luma_stride < f->coded_width * sample_bytes ||
 	    !nvdec_map_is_valid(surface, DMA_BIDIRECTIONAL, *surface_size)) {
 		dev_dbg(dev, "reject: surface geometry/map\n");
 		return -EINVAL;
@@ -1538,7 +1544,7 @@ static int nvdec_validate_frame(struct device *dev, const struct nvdec_frame *f,
 	    f->crop_top + f->crop_height > f->coded_height ||
 	    f->dst_chroma_offset < f->dst_stride * (u32)f->crop_height ||
 	    !IS_ALIGNED(f->dst_stride, SZ_256) ||
-	    f->dst_stride < f->crop_width ||
+	    f->dst_stride < f->crop_width * sample_bytes ||
 	    !nvdec_map_is_valid(capture, DMA_FROM_DEVICE, dst_size)) {
 		dev_dbg(dev, "reject: detile destination\n");
 		return -EINVAL;
@@ -1818,7 +1824,7 @@ static int nvdec_h264_prepare(struct nvdec_decode_job *hjob)
 	int err;
 
 	request->slice_count = ctx->slice_count;
-	err = nvdec_validate_frame(dev, &request->frame, 16, hjob->surface,
+	err = nvdec_validate_frame(dev, &request->frame, 16, 1, hjob->surface,
 				   hjob->capture, &surface_size);
 	if (!err)
 		err = nvdec_h264_validate_request(dev, request, hjob->dpb,
@@ -2002,6 +2008,7 @@ void nvdec_engine_context_release_surface(struct nvdec_decode_context *ctx,
 	mutex_unlock(&ctx->lock);
 }
 
+/* P010 has no VIC format and is detiled one plane per pass. */
 static void nvdec_fill_detile(struct nvdec_decode_job *hjob)
 {
 	const struct nvdec_frame *f = &hjob->req.frame;
@@ -2014,10 +2021,17 @@ static void nvdec_fill_detile(struct nvdec_decode_job *hjob)
 		.out_height = f->crop_height,
 		.src_stride = f->luma_stride,
 		.dst_stride = f->dst_stride,
+		.pass = VIC_DETILE_NV12,
 	};
+	unsigned int i;
 
-	vic_engine_fill_detile_config(hjob->state->cpu + hjob->ops->vic_config,
-				      &params);
+	for (i = 0; i < hjob->vic_passes; i++) {
+		if (hjob->vic_passes > 1)
+			params.pass = i ? VIC_DETILE_P010_CHROMA :
+					  VIC_DETILE_P010_LUMA;
+		vic_engine_fill_detile_config(hjob->state->cpu + hjob->ops->vic_config +
+					      i * NVDEC_VIC_CONFIG_STRIDE, &params);
+	}
 }
 
 static int nvdec_build_gather(struct nvdec_decode_job *hjob)
@@ -2026,6 +2040,8 @@ static int nvdec_build_gather(struct nvdec_decode_job *hjob)
 	const struct nvdec_frame *f = &hjob->req.frame;
 	struct nvdec_engine *engine = hjob->ctx->engine;
 	u32 syncpt = host1x_syncpt_id(engine->client.base.syncpts[0]);
+	dma_addr_t src_chroma = hjob->surface->iova + f->chroma_offset;
+	dma_addr_t dst_chroma = hjob->capture->iova + f->dst_chroma_offset;
 	dma_addr_t state = hjob->state->iova;
 	struct falcon_gather g = {
 		.words = hjob->gather->cpu,
@@ -2050,28 +2066,34 @@ static int nvdec_build_gather(struct nvdec_decode_job *hjob)
 	falcon_gather_op_done(&g, syncpt);
 	hjob->vic_offset = g.count;
 
-	vic_engine_emit_detile(&g, state + ops->vic_config, hjob->surface->iova,
-			       hjob->surface->iova + f->chroma_offset,
-			       hjob->capture->iova,
-			       hjob->capture->iova + f->dst_chroma_offset);
-	falcon_gather_op_done(&g, syncpt);
+	/* A P010 chroma pass takes the chroma planes through the luma methods. */
+	for (i = 0; i < hjob->vic_passes; i++) {
+		vic_engine_emit_detile(&g, state + ops->vic_config +
+				       i * NVDEC_VIC_CONFIG_STRIDE,
+				       i ? src_chroma : hjob->surface->iova,
+				       src_chroma,
+				       i ? dst_chroma : hjob->capture->iova,
+				       dst_chroma);
+		falcon_gather_op_done(&g, syncpt);
+	}
 
 	print_hex_dump_debug("nvdec setup: ", DUMP_PREFIX_OFFSET, 16, 4,
 			     hjob->state->cpu, ops->setup_size, false);
 	return g.err;
 }
 
-/* One host1x job: NVDEC and OP_DONE, then a wait into VIC, detile, OP_DONE. */
+/* One host1x job: NVDEC and OP_DONE, then per VIC pass wait, detile, OP_DONE. */
 static int nvdec_launch_job(struct nvdec_decode_job *hjob,
 			    struct dma_fence **fence)
 {
 	struct nvdec_decode_context *ctx = hjob->ctx;
 	struct nvdec_engine *engine = ctx->engine;
 	struct host1x_bo *gather = &hjob->gather->bo->base;
+	unsigned int i, offset = hjob->vic_offset;
 	struct host1x_job *job;
 	int err;
 
-	job = host1x_job_alloc(engine->channel, 3, 0, true);
+	job = host1x_job_alloc(engine->channel, 1 + 2 * hjob->vic_passes, 0, true);
 	if (!job)
 		return -ENOMEM;
 
@@ -2079,13 +2101,16 @@ static int nvdec_launch_job(struct nvdec_decode_job *hjob,
 	job->class = HOST1X_CLASS_NVDEC;
 	job->serialize = true;
 	job->syncpt = host1x_syncpt_get(engine->client.base.syncpts[0]);
-	job->syncpt_incrs = 2;	/* NVDEC OP_DONE, then VIC OP_DONE */
+	job->syncpt_incrs = 1 + hjob->vic_passes;
 	job->timeout = 10000;
-	host1x_job_add_gather(job, gather, hjob->vic_offset, 0);
-	host1x_job_add_wait(job, host1x_syncpt_id(job->syncpt), 1, true,
-			    HOST1X_CLASS_VIC);
-	host1x_job_add_gather(job, gather, VIC_DETILE_WORDS + 2,
-			      hjob->vic_offset * sizeof(u32));
+	host1x_job_add_gather(job, gather, offset, 0);
+	for (i = 0; i < hjob->vic_passes; i++) {
+		host1x_job_add_wait(job, host1x_syncpt_id(job->syncpt), 1 + i,
+				    true, HOST1X_CLASS_VIC);
+		host1x_job_add_gather(job, gather, VIC_DETILE_WORDS + 2,
+				      offset * sizeof(u32));
+		offset += VIC_DETILE_WORDS + 2;
+	}
 
 	err = pm_runtime_resume_and_get(engine->dev);
 	if (err < 0)
@@ -2185,7 +2210,7 @@ static int nvdec_hevc_validate_request(struct device *dev,
 		request->num_tile_rows, request->num_ref_frames,
 		request->pic_order_cnt_val, request->sw_hdr_skip_length);
 
-	if (request->bit_depth != 8 ||
+	if ((request->bit_depth != 8 && request->bit_depth != 10) ||
 	    !request->pic_width_in_luma_samples ||
 	    !request->pic_height_in_luma_samples ||
 	    request->pic_width_in_luma_samples > request->frame.coded_width ||
@@ -2363,9 +2388,14 @@ static void nvdec_hevc_fill_setup(struct nvdec_decode_job *hjob)
 	u32 word;
 
 	setup->stream_len = cpu_to_le32(r->frame.output_payload_size);
-	setup->surface_format = cpu_to_le32(FIELD_PREP(NVDEC_HEVC_SURFACE_START_CODE, 1));
-	setup->framestride[0] = cpu_to_le32(r->frame.luma_stride);
-	setup->framestride[1] = cpu_to_le32(r->frame.luma_stride);
+	word = FIELD_PREP(NVDEC_HEVC_SURFACE_START_CODE, 1);
+	if (r->bit_depth > 8)
+		word |= FIELD_PREP(NVDEC_HEVC_SURFACE_OUTPUT_MODE, 1);
+	setup->surface_format = cpu_to_le32(word);
+	/* 10-bit output counts the stride in samples, not bytes. */
+	word = r->bit_depth > 8 ? r->frame.luma_stride / 2 : r->frame.luma_stride;
+	setup->framestride[0] = cpu_to_le32(word);
+	setup->framestride[1] = cpu_to_le32(word);
 	setup->coloc_buffer_size = cpu_to_le32(ctx->colmv_size / 256);
 	setup->sao_buffer_offset = cpu_to_le32(ctx->sao_offset / 256);
 	setup->bsd_control_offset = cpu_to_le32(ctx->bsd_offset / 256);
@@ -2535,13 +2565,14 @@ static int nvdec_hevc_prepare(struct nvdec_decode_job *hjob)
 	struct nvdec_hevc_request *request = &hjob->req.hevc;
 	struct nvdec_decode_context *ctx = hjob->ctx;
 	struct device *dev = ctx->engine->dev;
+	unsigned int i, sample_bytes = request->bit_depth > 8 ? 2 : 1;
 	int entry = nvdec_hevc_scratch_entry(request);
 	u32 surface_size;
-	unsigned int i;
 	int err;
 
 	err = nvdec_validate_frame(dev, &request->frame, NVDEC_HEVC_CTU_SIZE,
-				   hjob->surface, hjob->capture, &surface_size);
+				   sample_bytes, hjob->surface, hjob->capture,
+				   &surface_size);
 	if (!err)
 		err = nvdec_hevc_validate_request(dev, request, hjob->dpb,
 						  surface_size);
@@ -2574,6 +2605,7 @@ static int nvdec_hevc_prepare(struct nvdec_decode_job *hjob)
 			hjob->pictures[hjob->picture_indices[i]] = hjob->dpb[i];
 	}
 
+	hjob->vic_passes = request->bit_depth > 8 ? 2 : 1;
 	return 0;
 }
 
@@ -2901,7 +2933,7 @@ static int nvdec_vp8_prepare(struct nvdec_decode_job *hjob)
 	u32 surface_size;
 	int err;
 
-	err = nvdec_validate_frame(dev, &request->frame, 16, hjob->surface,
+	err = nvdec_validate_frame(dev, &request->frame, 16, 1, hjob->surface,
 				   hjob->capture, &surface_size);
 	if (!err)
 		err = nvdec_validate_refs(dev, hjob->dpb, NVDEC_VP8_REFS,
@@ -3328,7 +3360,7 @@ static int nvdec_vp9_prepare(struct nvdec_decode_job *hjob)
 	u32 surface_size;
 	int err;
 
-	err = nvdec_validate_frame(dev, &request->frame, NVDEC_VP9_SB_SIZE,
+	err = nvdec_validate_frame(dev, &request->frame, NVDEC_VP9_SB_SIZE, 1,
 				   hjob->surface, hjob->capture, &surface_size);
 	if (!err)
 		err = nvdec_validate_refs(dev, hjob->dpb, NVDEC_VP9_REFS,
@@ -3427,6 +3459,7 @@ int nvdec_engine_submit(struct nvdec_decode_context *ctx,
 	hjob->req.frame.output_payload_size = ctx->staged;
 	hjob->complete = complete;
 	hjob->complete_data = data;
+	hjob->vic_passes = 1;
 	hjob->surface = nvdec_engine_map_get(surface);
 	hjob->capture = nvdec_engine_map_get(capture);
 	for (i = 0; i < NVDEC_MAX_REFS; i++) {
@@ -3445,7 +3478,8 @@ int nvdec_engine_submit(struct nvdec_decode_context *ctx,
 	}
 	hjob->input = nvdec_engine_map_get(ctx->input);
 	hjob->state = nvdec_buffer_create(ctx->engine, hjob->ops->vic_config +
-					  VIC_CONFIG_SIZE, true);
+					  NVDEC_MAX_VIC_PASSES *
+					  NVDEC_VIC_CONFIG_STRIDE, true);
 	if (IS_ERR(hjob->state)) {
 		err = PTR_ERR(hjob->state);
 		hjob->state = NULL;
