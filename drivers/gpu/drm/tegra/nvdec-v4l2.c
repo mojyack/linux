@@ -335,15 +335,6 @@ static int nvdec_queue_setup(struct vb2_queue *vq, unsigned int *nbufs,
 		sizes[0] = size;
 	}
 
-	/* One internal surface per capture buffer, one firmware index each. */
-	if (V4L2_TYPE_IS_CAPTURE(vq->type)) {
-		unsigned int max = ctx->codec == NVDEC_CODEC_HEVC ?
-			NVDEC_HEVC_MAX_PICTURES : NVDEC_H264_MAX_PICTURES;
-
-		if (*nbufs > max)
-			*nbufs = max;
-	}
-
 	return 0;
 }
 

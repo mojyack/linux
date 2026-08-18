@@ -1943,6 +1943,27 @@ static int nvdec_h264_validate_request(struct device *dev,
 	return 0;
 }
 
+/* An index is needed only while the surface is current or a reference. */
+static void nvdec_recycle_indices(struct nvdec_decode_context *ctx,
+				  struct nvdec_engine_map *cur,
+				  struct nvdec_engine_map * const *dpb,
+				  unsigned int entries)
+{
+	unsigned int i, j;
+
+	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++) {
+		if (!ctx->surfaces[i].map || ctx->surfaces[i].map == cur)
+			continue;
+		for (j = 0; j < entries; j++)
+			if (ctx->surfaces[i].map == dpb[j])
+				break;
+		if (j < entries)
+			continue;
+		nvdec_engine_map_put(ctx->surfaces[i].map);
+		ctx->surfaces[i].map = NULL;
+	}
+}
+
 static int nvdec_surface_index(struct nvdec_decode_context *ctx,
 			       struct nvdec_engine_map *map, u8 *index,
 			       unsigned int slots)
@@ -1952,7 +1973,12 @@ static int nvdec_surface_index(struct nvdec_decode_context *ctx,
 	for (i = 0; i < NVDEC_H264_MAX_PICTURES; i++) {
 		if (ctx->surfaces[i].map == map) {
 			*index = ctx->surfaces[i].picture_index;
-			return *index < slots ? 0 : -ENOSPC;
+			if (*index < slots)
+				return 0;
+			dev_dbg(ctx->engine->dev,
+				"picture index %u is outside the %u firmware slots\n",
+				*index, slots);
+			return -ENOSPC;
 		}
 	}
 
@@ -1966,6 +1992,8 @@ static int nvdec_surface_index(struct nvdec_decode_context *ctx,
 		}
 	}
 
+	dev_dbg(ctx->engine->dev, "no free picture index among %u slots\n",
+		slots);
 	return -ENOSPC;
 }
 
@@ -2486,6 +2514,7 @@ int nvdec_engine_h264_submit(struct nvdec_decode_context *ctx,
 	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
 	hjob->slice_offsets_off = ALIGN(ctx->staged + 16, SZ_256);
 
+	nvdec_recycle_indices(ctx, surface, dpb, NVDEC_H264_DPB_ENTRIES);
 	err = nvdec_surface_index(ctx, surface, &current_index,
 				  NVDEC_H264_MAX_PICTURES);
 	if (err)
@@ -3179,6 +3208,7 @@ int nvdec_engine_hevc_submit(struct nvdec_decode_context *ctx,
 		goto free_hjob;
 	hjob->scratch = nvdec_engine_map_get(ctx->scratch);
 
+	nvdec_recycle_indices(ctx, surface, dpb, NVDEC_HEVC_DPB_ENTRIES);
 	err = nvdec_surface_index(ctx, surface, &current_index,
 				  NVDEC_HEVC_MAX_PICTURES);
 	if (err)
