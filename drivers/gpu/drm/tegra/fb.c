@@ -46,6 +46,7 @@ int tegra_fb_get_tiling(struct drm_framebuffer *framebuffer,
 			tiling->sector_layout = TEGRA_BO_SECTOR_LAYOUT_GPU;
 
 		modifier &= ~DRM_FORMAT_MOD_NVIDIA_SECTOR_LAYOUT;
+		modifier = drm_fourcc_canonicalize_nvidia_format_mod(modifier);
 	}
 
 	switch (modifier) {
@@ -59,32 +60,32 @@ int tegra_fb_get_tiling(struct drm_framebuffer *framebuffer,
 		tiling->value = 0;
 		break;
 
-	case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(0):
+	case TEGRA_BLOCK_LINEAR_2D(0):
 		tiling->mode = TEGRA_BO_TILING_MODE_BLOCK;
 		tiling->value = 0;
 		break;
 
-	case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(1):
+	case TEGRA_BLOCK_LINEAR_2D(1):
 		tiling->mode = TEGRA_BO_TILING_MODE_BLOCK;
 		tiling->value = 1;
 		break;
 
-	case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(2):
+	case TEGRA_BLOCK_LINEAR_2D(2):
 		tiling->mode = TEGRA_BO_TILING_MODE_BLOCK;
 		tiling->value = 2;
 		break;
 
-	case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(3):
+	case TEGRA_BLOCK_LINEAR_2D(3):
 		tiling->mode = TEGRA_BO_TILING_MODE_BLOCK;
 		tiling->value = 3;
 		break;
 
-	case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(4):
+	case TEGRA_BLOCK_LINEAR_2D(4):
 		tiling->mode = TEGRA_BO_TILING_MODE_BLOCK;
 		tiling->value = 4;
 		break;
 
-	case DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK(5):
+	case TEGRA_BLOCK_LINEAR_2D(5):
 		tiling->mode = TEGRA_BO_TILING_MODE_BLOCK;
 		tiling->value = 5;
 		break;

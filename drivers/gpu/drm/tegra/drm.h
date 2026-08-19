@@ -25,6 +25,10 @@
 /* XXX move to include/uapi/drm/drm_fourcc.h? */
 #define DRM_FORMAT_MOD_NVIDIA_SECTOR_LAYOUT BIT_ULL(22)
 
+/* canonical (page kind 0xfe) form of DRM_FORMAT_MOD_NVIDIA_16BX2_BLOCK() */
+#define TEGRA_BLOCK_LINEAR_2D(h) \
+	DRM_FORMAT_MOD_NVIDIA_BLOCK_LINEAR_2D(0, 0, 0, 0xfe, (h))
+
 struct drm_fb_helper;
 struct drm_fb_helper_surface_size;
 
