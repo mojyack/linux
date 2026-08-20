@@ -267,6 +267,29 @@ struct nvdec_vp9_request {
 #define NVDEC_VP9_REQ_SEG_ABS_DELTA	BIT(10)
 #define NVDEC_VP9_REQ_LF_DELTA_ENABLED	BIT(11)
 
+/* Forward and backward references; the current picture takes the first slot. */
+#define NVDEC_MPEG2_REFS	2
+
+/* Copied, validated MPEG-2 state. This is not a V4L2 control layout. */
+struct nvdec_mpeg2_request {
+	struct nvdec_frame frame;
+	u32 slice_count;
+	u8 picture_coding_type;
+	u8 intra_dc_precision;
+	u8 flags;
+	u8 f_code[4];
+	/* Raster order, which is not the order the V4L2 control carries. */
+	u8 quant_intra[64];
+	u8 quant_non_intra[64];
+};
+
+#define NVDEC_MPEG2_REQ_FRAME_PRED_DCT	BIT(0)
+#define NVDEC_MPEG2_REQ_CONCEALMENT_MV	BIT(1)
+#define NVDEC_MPEG2_REQ_INTRA_VLC	BIT(2)
+#define NVDEC_MPEG2_REQ_ALT_SCAN	BIT(3)
+#define NVDEC_MPEG2_REQ_Q_SCALE_TYPE	BIT(4)
+#define NVDEC_MPEG2_REQ_TOP_FIELD_FIRST	BIT(5)
+
 /* Every member starts with its struct nvdec_frame. */
 union nvdec_request {
 	struct nvdec_frame frame;
@@ -274,6 +297,7 @@ union nvdec_request {
 	struct nvdec_hevc_request hevc;
 	struct nvdec_vp8_request vp8;
 	struct nvdec_vp9_request vp9;
+	struct nvdec_mpeg2_request mpeg2;
 };
 
 enum nvdec_codec {
@@ -281,6 +305,7 @@ enum nvdec_codec {
 	NVDEC_CODEC_HEVC,
 	NVDEC_CODEC_VP8,
 	NVDEC_CODEC_VP9,
+	NVDEC_CODEC_MPEG2,
 };
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,

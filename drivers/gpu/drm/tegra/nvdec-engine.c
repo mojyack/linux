@@ -94,6 +94,12 @@
 /* Two unexplained u16 constants the oracle plants in the tile-size buffer. */
 #define NVDEC_VP9_TILES_MAGIC			0x37a
 
+#define NVDEC_MPEG2_SETUP_SIZE			0x158
+#define NVDEC_MPEG2_STATUS_OFFSET		0x200
+
+/* Firmware picture slots: current, forward reference, backward reference. */
+#define NVDEC_MPEG2_MAX_PICTURES		3
+
 /* Per aligned luma row, as the oracle sizes them. */
 #define NVDEC_VP9_FILTER_PER_ROW		988
 #define NVDEC_VP9_BSD_PER_ROW			912
@@ -487,6 +493,55 @@ static_assert(offsetof(struct nvdec_vp9_counts, mv) == 0x528);
 static_assert(offsetof(struct nvdec_vp9_counts, coeff) == 0x6d0);
 static_assert(offsetof(struct nvdec_vp9_counts, eob) == 0x2ad0);
 static_assert(sizeof(struct nvdec_vp9_counts) == 0x33d0);
+
+struct nvdec_mpeg2_setup {
+	u8 encryption[0x48];
+	__le32 stream_len;
+	__le32 slice_count;
+	__le32 gptimer_timeout_value;
+	__le16 frame_width;
+	__le16 frame_height;
+	u8 picture_structure;
+	u8 picture_coding_type;
+	u8 intra_dc_precision;
+	u8 frame_pred_frame_dct;
+	u8 concealment_motion_vectors;
+	u8 intra_vlc_format;
+	u8 surface_format;
+	u8 reserved0;
+	u8 f_code[4];
+	__le16 pic_width_in_mbs;
+	__le16 frame_height_in_mbs;
+	__le32 pitch_luma;
+	__le32 pitch_chroma;
+	__le32 luma_top_offset;
+	__le32 luma_bot_offset;
+	__le32 luma_frame_offset;
+	__le32 chroma_top_offset;
+	__le32 chroma_bot_offset;
+	__le32 chroma_frame_offset;
+	__le32 history_buffer_size;
+	__le16 output_memory_layout;
+	__le16 alternate_scan;
+	__le16 secondfield;
+	__le16 rounding_type;
+	__le32 mb_info_size;
+	__le32 q_scale_type;
+	__le32 top_field_first;
+	__le32 full_pel_fwd_vector;
+	__le32 full_pel_bwd_vector;
+	u8 quant_intra[64];
+	u8 quant_non_intra[64];
+	__le32 ref_memory_layout[2];
+	u8 display[0x1c];
+	u8 ssm[0xc];
+};
+
+static_assert(offsetof(struct nvdec_mpeg2_setup, f_code) == 0x60);
+static_assert(offsetof(struct nvdec_mpeg2_setup, pitch_luma) == 0x68);
+static_assert(offsetof(struct nvdec_mpeg2_setup, quant_intra) == 0xa8);
+static_assert(offsetof(struct nvdec_mpeg2_setup, ref_memory_layout) == 0x128);
+static_assert(sizeof(struct nvdec_mpeg2_setup) == NVDEC_MPEG2_SETUP_SIZE);
 
 static_assert(VIC_CONFIG_SIZE <= NVDEC_VIC_CONFIG_STRIDE);
 
@@ -1367,6 +1422,49 @@ static int nvdec_prepare_input(struct nvdec_decode_context *ctx, size_t size)
 	return 0;
 }
 
+static int nvdec_record_slice(struct nvdec_decode_context *ctx,
+			      unsigned int index, u32 offset)
+{
+	if (index + 1 > ctx->max_slices) {
+		unsigned int want = max(ctx->max_slices * 2, 8U);
+		u32 *offsets = krealloc_array(ctx->slice_offsets, want + 1,
+					      sizeof(*offsets), GFP_KERNEL);
+
+		if (!offsets)
+			return -ENOMEM;
+		ctx->slice_offsets = offsets;
+		ctx->max_slices = want;
+	}
+
+	ctx->slice_offsets[index] = offset;
+	return 0;
+}
+
+/* The firmware needs one offset per slice and the payload carries them all. */
+static int nvdec_mpeg2_scan_slices(struct nvdec_decode_context *ctx)
+{
+	const u8 *data = ctx->input->cpu;
+	unsigned int count = 0;
+	int err;
+	u32 i;
+
+	for (i = 0; i + 4 <= ctx->staged; i++) {
+		if (data[i] || data[i + 1] || data[i + 2] != 1 ||
+		    data[i + 3] < 0x01 || data[i + 3] > 0xaf)
+			continue;
+		err = nvdec_record_slice(ctx, count++, i);
+		if (err)
+			return err;
+		i += 3;
+	}
+
+	if (!count)
+		return -EINVAL;
+	ctx->slice_count = count;
+	return 0;
+}
+
+/* Only HEVC needs a lead zero byte, so its scan sees 00 00 00 01. */
 static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
 			     struct nvdec_engine_map *output, u32 payload_size)
 {
@@ -1375,7 +1473,7 @@ static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
 	u32 staged = payload_size + lead;
 	int err;
 
-	if (staged < payload_size ||
+	if (staged < payload_size || staged > U32_MAX - 16 - SZ_256 ||
 	    !nvdec_map_is_valid(output, DMA_TO_DEVICE, payload_size))
 		return -EINVAL;
 
@@ -1394,6 +1492,18 @@ static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
 
 	ctx->slice_count = 1;
 	ctx->staged = staged;
+
+	/* The offset array and the 16-byte terminator follow the bitstream. */
+	if (ctx->codec == NVDEC_CODEC_MPEG2) {
+		err = nvdec_mpeg2_scan_slices(ctx);
+		if (err)
+			return err;
+		err = nvdec_prepare_input(ctx, ALIGN(staged + 16, SZ_256) +
+					       (ctx->slice_count + 1) * sizeof(u32));
+		if (err)
+			return err;
+	}
+
 	return 0;
 }
 
@@ -1431,18 +1541,9 @@ int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
 		goto unlock;
 	}
 
-	if (ctx->slice_count + 1 > ctx->max_slices) {
-		unsigned int want = max(ctx->max_slices * 2, 8U);
-		u32 *offsets = krealloc_array(ctx->slice_offsets, want + 1,
-					      sizeof(*offsets), GFP_KERNEL);
-
-		if (!offsets) {
-			err = -ENOMEM;
-			goto unlock;
-		}
-		ctx->slice_offsets = offsets;
-		ctx->max_slices = want;
-	}
+	err = nvdec_record_slice(ctx, ctx->slice_count, staged - payload_size);
+	if (err)
+		goto unlock;
 
 	/* The offset array and the 16-byte terminator follow the bitstream. */
 	err = nvdec_prepare_input(ctx, ALIGN(staged + 16, SZ_256) +
@@ -3432,11 +3533,117 @@ static const struct nvdec_codec_ops nvdec_vp9_ops = {
 	.submitted = nvdec_vp9_submitted,
 };
 
+static int nvdec_mpeg2_validate_request(struct device *dev,
+					const struct nvdec_mpeg2_request *request)
+{
+	dev_dbg(dev, "mpeg2 request: type=%u dc=%u flags=0x%x slices=%u\n",
+		request->picture_coding_type, request->intra_dc_precision,
+		request->flags, request->slice_count);
+
+	if (!request->slice_count ||
+	    request->slice_count > (u32)(request->frame.coded_width / 16) *
+				   (request->frame.coded_height / 16) ||
+	    request->intra_dc_precision > 3) {
+		dev_dbg(dev, "mpeg2 reject: syntax\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static void nvdec_mpeg2_fill_setup(struct nvdec_decode_job *hjob)
+{
+	const struct nvdec_mpeg2_request *r = &hjob->req.mpeg2;
+	struct nvdec_mpeg2_setup *setup = hjob->state->cpu;
+
+	memset(setup, 0, sizeof(*setup));
+	setup->stream_len = cpu_to_le32(r->frame.output_payload_size + 16);
+	setup->slice_count = cpu_to_le32(r->slice_count);
+	setup->frame_width = cpu_to_le16(r->frame.coded_width);
+	setup->frame_height = cpu_to_le16(r->frame.coded_height);
+	/* Frame pictures only; field pictures are refused before submission. */
+	setup->picture_structure = 3;
+	setup->picture_coding_type = r->picture_coding_type;
+	setup->intra_dc_precision = r->intra_dc_precision;
+	setup->frame_pred_frame_dct =
+		!!(r->flags & NVDEC_MPEG2_REQ_FRAME_PRED_DCT);
+	setup->concealment_motion_vectors =
+		!!(r->flags & NVDEC_MPEG2_REQ_CONCEALMENT_MV);
+	setup->intra_vlc_format = !!(r->flags & NVDEC_MPEG2_REQ_INTRA_VLC);
+	memcpy(setup->f_code, r->f_code, sizeof(setup->f_code));
+	setup->pic_width_in_mbs = cpu_to_le16(r->frame.coded_width / 16);
+	setup->frame_height_in_mbs = cpu_to_le16(r->frame.coded_height / 16);
+	setup->pitch_luma = cpu_to_le32(r->frame.luma_stride);
+	setup->pitch_chroma = cpu_to_le32(r->frame.luma_stride);
+	setup->alternate_scan = cpu_to_le16(!!(r->flags & NVDEC_MPEG2_REQ_ALT_SCAN));
+	setup->q_scale_type = cpu_to_le32(!!(r->flags & NVDEC_MPEG2_REQ_Q_SCALE_TYPE));
+	setup->top_field_first =
+		cpu_to_le32(!!(r->flags & NVDEC_MPEG2_REQ_TOP_FIELD_FIRST));
+	memcpy(setup->quant_intra, r->quant_intra, sizeof(setup->quant_intra));
+	memcpy(setup->quant_non_intra, r->quant_non_intra,
+	       sizeof(setup->quant_non_intra));
+}
+
+static int nvdec_mpeg2_prepare(struct nvdec_decode_job *hjob)
+{
+	struct nvdec_mpeg2_request *request = &hjob->req.mpeg2;
+	struct nvdec_decode_context *ctx = hjob->ctx;
+	struct device *dev = ctx->engine->dev;
+	u32 surface_size;
+	int err;
+
+	request->slice_count = ctx->slice_count;
+	err = nvdec_validate_frame(dev, &request->frame, 16, 1, hjob->surface,
+				   hjob->capture, &surface_size);
+	if (!err)
+		err = nvdec_validate_refs(dev, hjob->dpb, NVDEC_MPEG2_REFS,
+					  surface_size);
+	if (!err)
+		err = nvdec_mpeg2_validate_request(dev, request);
+	if (err)
+		return err;
+
+	/* Slots are roles: current, forward, backward. */
+	hjob->num_pictures = NVDEC_MPEG2_MAX_PICTURES;
+	hjob->pictures[0] = hjob->surface;
+	hjob->pictures[1] = hjob->dpb[0] ?: hjob->surface;
+	/* An unnamed backward reference is the forward one, never the target. */
+	hjob->pictures[2] = hjob->dpb[1] ?: hjob->pictures[1];
+	return 0;
+}
+
+static void nvdec_mpeg2_emit(struct nvdec_decode_job *hjob,
+			     struct falcon_gather *g)
+{
+	falcon_gather_address(g, NVDEC_METHOD_SLICE_OFFSETS,
+			      hjob->input->iova + hjob->slice_offsets_off);
+	dev_dbg(hjob->ctx->engine->dev, "mpeg2 pictures: cur=%pad fwd=%s bwd=%s\n",
+		&hjob->surface->iova, hjob->dpb[0] ? "ref" : "self",
+		hjob->dpb[1] ? "ref" : "self");
+}
+
+static const u8 nvdec_mpeg2_termination[16] = {
+	0x00, 0x00, 0x01, 0xb7, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x01, 0xb7, 0x00, 0x00, 0x00, 0x00,
+};
+
+static const struct nvdec_codec_ops nvdec_mpeg2_ops = {
+	.application = 1,
+	.setup_size = NVDEC_MPEG2_SETUP_SIZE,
+	.status_offset = NVDEC_MPEG2_STATUS_OFFSET,
+	.vic_config = 0x400,
+	.termination = nvdec_mpeg2_termination,
+	.prepare = nvdec_mpeg2_prepare,
+	.fill = nvdec_mpeg2_fill_setup,
+	.emit = nvdec_mpeg2_emit,
+};
+
 static const struct nvdec_codec_ops *const nvdec_codec_ops[] = {
 	[NVDEC_CODEC_H264] = &nvdec_h264_ops,
 	[NVDEC_CODEC_HEVC] = &nvdec_hevc_ops,
 	[NVDEC_CODEC_VP8] = &nvdec_vp8_ops,
 	[NVDEC_CODEC_VP9] = &nvdec_vp9_ops,
+	[NVDEC_CODEC_MPEG2] = &nvdec_mpeg2_ops,
 };
 
 /* The staged bitstream is followed by its terminator and the slice offsets. */

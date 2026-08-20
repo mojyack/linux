@@ -152,6 +152,25 @@ static const struct v4l2_ctrl_config nvdec_vp9_ctrls[] = {
 	{ .id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR },
 };
 
+/* The firmware parses the slice headers, so the picture layer is the whole ABI. */
+static const struct v4l2_ctrl_config nvdec_mpeg2_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_MPEG2_SEQUENCE },
+	{ .id = V4L2_CID_STATELESS_MPEG2_PICTURE },
+	{ .id = V4L2_CID_STATELESS_MPEG2_QUANTISATION },
+};
+
+/* Scan position to raster position; the control is in zigzag order. */
+static const u8 nvdec_mpeg2_zigzag[64] = {
+	 0,  1,  8, 16,  9,  2,  3, 10,
+	17, 24, 32, 25, 18, 11,  4,  5,
+	12, 19, 26, 33, 40, 48, 41, 34,
+	27, 20, 13,  6,  7, 14, 21, 28,
+	35, 42, 49, 56, 57, 50, 43, 36,
+	29, 22, 15, 23, 30, 37, 44, 51,
+	58, 59, 52, 45, 38, 31, 39, 46,
+	53, 60, 61, 54, 47, 55, 62, 63,
+};
+
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 {
 	return container_of(file_to_v4l2_fh(file), struct nvdec_v4l2_ctx, fh);
@@ -1287,6 +1306,106 @@ static int nvdec_snapshot_vp9_request(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_validate_mpeg2_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	const struct v4l2_ctrl_mpeg2_quantisation *quant;
+	const struct v4l2_ctrl_mpeg2_sequence *seq;
+	const struct v4l2_ctrl_mpeg2_picture *pic;
+	const char *why;
+
+	if (!nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_MPEG2_SEQUENCE) ||
+	    !nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE)) {
+		why = "a required control is missing from the request";
+		goto reject;
+	}
+
+	seq = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_SEQUENCE);
+	pic = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
+	quant = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_QUANTISATION);
+	if (!seq || !pic || !quant) {
+		why = "control handler lookup failed";
+		goto reject;
+	}
+
+	/* The control persists across requests; its all-zero default cannot. */
+	if (!quant->intra_quantiser_matrix[0]) {
+		why = "the quantisation matrices were never set";
+		goto reject;
+	}
+
+	if (seq->chroma_format != 1) {
+		why = "only 4:2:0 chroma is supported";
+		goto reject;
+	}
+
+	if (ALIGN(seq->horizontal_size, 16) != coded->width ||
+	    ALIGN(seq->vertical_size, 16) != coded->height) {
+		why = "sequence dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	/* A field picture needs two requests to fill one capture buffer. */
+	if (pic->picture_structure != V4L2_MPEG2_PIC_FRAME) {
+		why = "field pictures are not supported";
+		goto reject;
+	}
+
+	if (pic->picture_coding_type < V4L2_MPEG2_PIC_CODING_TYPE_I ||
+	    pic->picture_coding_type > V4L2_MPEG2_PIC_CODING_TYPE_B) {
+		why = "unsupported picture coding type";
+		goto reject;
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "mpeg2 reject: %s\n", why);
+	return -EINVAL;
+}
+
+static int nvdec_snapshot_mpeg2_request(struct nvdec_v4l2_ctx *ctx,
+					struct vb2_v4l2_buffer *src,
+					struct vb2_v4l2_buffer *dst, bool first)
+{
+	struct nvdec_mpeg2_request *request = &ctx->request.mpeg2;
+	const struct v4l2_ctrl_mpeg2_quantisation *quant;
+	const struct v4l2_ctrl_mpeg2_picture *pic;
+	unsigned int i;
+
+	if (nvdec_validate_mpeg2_request(ctx))
+		return -EINVAL;
+
+	pic = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
+	quant = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_QUANTISATION);
+
+	nvdec_snapshot_frame(ctx);
+	request->picture_coding_type = pic->picture_coding_type;
+	request->intra_dc_precision = pic->intra_dc_precision;
+	memcpy(request->f_code, pic->f_code, sizeof(request->f_code));
+	if (pic->flags & V4L2_MPEG2_PIC_FLAG_FRAME_PRED_DCT)
+		request->flags |= NVDEC_MPEG2_REQ_FRAME_PRED_DCT;
+	if (pic->flags & V4L2_MPEG2_PIC_FLAG_CONCEALMENT_MV)
+		request->flags |= NVDEC_MPEG2_REQ_CONCEALMENT_MV;
+	if (pic->flags & V4L2_MPEG2_PIC_FLAG_INTRA_VLC)
+		request->flags |= NVDEC_MPEG2_REQ_INTRA_VLC;
+	if (pic->flags & V4L2_MPEG2_PIC_FLAG_ALT_SCAN)
+		request->flags |= NVDEC_MPEG2_REQ_ALT_SCAN;
+	if (pic->flags & V4L2_MPEG2_PIC_FLAG_Q_SCALE_TYPE)
+		request->flags |= NVDEC_MPEG2_REQ_Q_SCALE_TYPE;
+	if (pic->flags & V4L2_MPEG2_PIC_FLAG_TOP_FIELD_FIRST)
+		request->flags |= NVDEC_MPEG2_REQ_TOP_FIELD_FIRST;
+
+	for (i = 0; i < ARRAY_SIZE(nvdec_mpeg2_zigzag); i++) {
+		u8 n = nvdec_mpeg2_zigzag[i];
+
+		request->quant_intra[n] = quant->intra_quantiser_matrix[i];
+		request->quant_non_intra[n] = quant->non_intra_quantiser_matrix[i];
+	}
+
+	return 0;
+}
+
 struct nvdec_vp9_tx_and_skip {
 	u8 tx8[2][1];
 	u8 tx16[2][2];
@@ -1514,6 +1633,23 @@ static int nvdec_resolve_vp9(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+/* MPEG-2 names at most a forward and a backward reference. */
+static int nvdec_resolve_mpeg2(struct nvdec_v4l2_ctx *ctx,
+			       struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_mpeg2_picture *pic =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
+	const u64 timestamps[NVDEC_MPEG2_REFS] = {
+		pic->forward_ref_ts, pic->backward_ref_ts,
+	};
+	unsigned int i;
+
+	for (i = 0; i < NVDEC_MPEG2_REFS; i++)
+		nvdec_pin_reference(ctx, job, i, timestamps[i]);
+
+	return 0;
+}
+
 /* Everything that differs between the coded formats on the OUTPUT queue. */
 struct nvdec_codec_desc {
 	u32 pixelformat;
@@ -1568,6 +1704,16 @@ static const struct nvdec_codec_desc nvdec_codecs[] = {
 		.num_ctrls = ARRAY_SIZE(nvdec_vp9_ctrls),
 		.snapshot = nvdec_snapshot_vp9_request,
 		.resolve = nvdec_resolve_vp9,
+	},
+	[NVDEC_CODEC_MPEG2] = {
+		.pixelformat = V4L2_PIX_FMT_MPEG2_SLICE,
+		.min_width = 48,
+		.min_height = 16,
+		.align = 16,
+		.ctrls = nvdec_mpeg2_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_mpeg2_ctrls),
+		.snapshot = nvdec_snapshot_mpeg2_request,
+		.resolve = nvdec_resolve_mpeg2,
 	},
 };
 
