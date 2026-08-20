@@ -290,11 +290,46 @@ struct nvdec_vp9_request {
 #define NVDEC_VP9_REQ_SEG_ABS_DELTA	BIT(10)
 #define NVDEC_VP9_REQ_LF_DELTA_ENABLED	BIT(11)
 
+/* Forward and backward references; the current picture takes the first slot. */
+#define NVDEC_MPEG2_REFS	2
+
+/* Copied, validated MPEG-2 state. This is not a V4L2 control layout. */
+struct nvdec_mpeg2_request {
+	u16 coded_width;
+	u16 coded_height;
+	/* Visible rectangle VIC detiles out of the coded picture. */
+	u16 crop_left;
+	u16 crop_top;
+	u16 crop_width;
+	u16 crop_height;
+	u16 luma_stride;
+	u32 chroma_offset;
+	u32 dst_stride;
+	u32 dst_chroma_offset;
+	u32 output_payload_size;
+	u32 slice_count;
+	u8 picture_coding_type;
+	u8 intra_dc_precision;
+	u8 flags;
+	u8 f_code[4];
+	/* Raster order, which is not the order the V4L2 control carries. */
+	u8 quant_intra[64];
+	u8 quant_non_intra[64];
+};
+
+#define NVDEC_MPEG2_REQ_FRAME_PRED_DCT	BIT(0)
+#define NVDEC_MPEG2_REQ_CONCEALMENT_MV	BIT(1)
+#define NVDEC_MPEG2_REQ_INTRA_VLC	BIT(2)
+#define NVDEC_MPEG2_REQ_ALT_SCAN	BIT(3)
+#define NVDEC_MPEG2_REQ_Q_SCALE_TYPE	BIT(4)
+#define NVDEC_MPEG2_REQ_TOP_FIELD_FIRST	BIT(5)
+
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
 	NVDEC_CODEC_HEVC,
 	NVDEC_CODEC_VP8,
 	NVDEC_CODEC_VP9,
+	NVDEC_CODEC_MPEG2,
 };
 
 typedef void (*nvdec_engine_job_complete_t)(struct host1x_job *job,
@@ -383,6 +418,13 @@ int nvdec_engine_vp9_submit(struct nvdec_decode_context *ctx,
 			    nvdec_engine_complete_t complete, void *data);
 int nvdec_engine_vp9_counts(struct nvdec_decode_context *ctx,
 			    struct v4l2_vp9_frame_symbol_counts *counts);
+int nvdec_engine_mpeg2_submit(struct nvdec_decode_context *ctx,
+			      const struct nvdec_mpeg2_request *request,
+			      struct nvdec_engine_map *surface,
+			      struct nvdec_engine_map *capture,
+			      struct nvdec_engine_map * const refs[NVDEC_MPEG2_REFS],
+			      struct dma_fence **fence,
+			      nvdec_engine_complete_t complete, void *data);
 
 extern const struct dev_pm_ops nvdec_engine_pm_ops;
 extern const struct of_device_id nvdec_engine_of_match[];
