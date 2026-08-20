@@ -517,6 +517,21 @@ static int nvdec_validate_reflist(const struct v4l2_h264_reference *refs,
 	return 0;
 }
 
+/* FrameHeightInMbs = (2 - frame_mbs_only_flag) * PicHeightInMapUnits. */
+static u32 nvdec_h264_frame_height_in_mbs(const struct v4l2_ctrl_h264_sps *sps)
+{
+	return ((sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ? 1 : 2) *
+	       (sps->pic_height_in_map_units_minus1 + 1);
+}
+
+static bool nvdec_h264_mbaff(const struct v4l2_ctrl_h264_sps *sps,
+			     const struct v4l2_ctrl_h264_decode_params *dec)
+{
+	return (sps->flags & V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD) &&
+	       !(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) &&
+	       !(dec->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC);
+}
+
 static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 {
 	const struct v4l2_ctrl_h264_sps *sps;
@@ -525,6 +540,7 @@ static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	const struct v4l2_ctrl_h264_slice_params *slice;
 	const char *why;
 	unsigned int i, l0, l1;
+	u32 mbs;
 
 	if (!nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_H264_SPS) ||
 	    !nvdec_ctrl_is_new(ctx, V4L2_CID_STATELESS_H264_PPS) ||
@@ -550,9 +566,7 @@ static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	if (sps->level_idc < 10 || sps->level_idc > 51 ||
 	    sps->chroma_format_idc != 1 || sps->bit_depth_luma_minus8 ||
 	    sps->bit_depth_chroma_minus8 ||
-	    !(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) ||
 	    (sps->flags & (V4L2_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE |
-			   V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD |
 			   V4L2_H264_SPS_FLAG_QPPRIME_Y_ZERO_TRANSFORM_BYPASS))) {
 		why = "sps";
 		goto reject;
@@ -586,9 +600,12 @@ static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 		why = "slice order";
 		goto reject;
 	}
-	if (slice->first_mb_in_slice >=
-	    (u32)(sps->pic_width_in_mbs_minus1 + 1) *
-	    (sps->pic_height_in_map_units_minus1 + 1)) {
+	/* It counts macroblock pairs, not macroblocks, when MbaffFrameFlag is set. */
+	mbs = (u32)(sps->pic_width_in_mbs_minus1 + 1) *
+	      nvdec_h264_frame_height_in_mbs(sps);
+	if (nvdec_h264_mbaff(sps, dec))
+		mbs /= 2;
+	if (slice->first_mb_in_slice >= mbs) {
 		why = "first_mb_in_slice out of range";
 		goto reject;
 	}
@@ -771,7 +788,7 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	request->nal_ref_idc = dec->nal_ref_idc;
 	request->frame_num = dec->frame_num;
 	request->pic_width_in_mbs = sps->pic_width_in_mbs_minus1 + 1;
-	request->frame_height_in_mbs = sps->pic_height_in_map_units_minus1 + 1;
+	request->frame_height_in_mbs = nvdec_h264_frame_height_in_mbs(sps);
 	request->luma_stride = nvdec_surface_stride(ctx);
 	request->chroma_stride = request->luma_stride;
 	request->chroma_offset = nvdec_surface_chroma_offset(ctx);
@@ -790,6 +807,8 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	request->num_slice_groups_minus1 = pps->num_slice_groups_minus1;
 	if (sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY)
 		request->flags |= NVDEC_H264_REQ_FRAME_MBS_ONLY;
+	if (nvdec_h264_mbaff(sps, dec))
+		request->flags |= NVDEC_H264_REQ_MBAFF;
 	if (sps->flags & V4L2_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO)
 		request->flags |= NVDEC_H264_REQ_DELTA_POC_ZERO;
 	if (sps->flags & V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE)

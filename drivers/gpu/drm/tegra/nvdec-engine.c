@@ -1972,11 +1972,11 @@ static int nvdec_h264_validate_request(struct device *dev,
 	    request->pic_order_cnt_type > 2 ||
 	    request->log2_max_pic_order_cnt_lsb_minus4 > 12 ||
 	    request->max_num_ref_frames > NVDEC_H264_DPB_ENTRIES ||
-	    !(request->flags & NVDEC_H264_REQ_FRAME_MBS_ONLY) ||
-	    (request->flags & (NVDEC_H264_REQ_MBAFF |
-			       NVDEC_H264_REQ_SEPARATE_COLOUR |
+	    (request->flags & (NVDEC_H264_REQ_SEPARATE_COLOUR |
 			       NVDEC_H264_REQ_FIELD |
 			       NVDEC_H264_REQ_BOTTOM_FIELD)) ||
+	    ((request->flags & NVDEC_H264_REQ_MBAFF) &&
+	     (request->flags & NVDEC_H264_REQ_FRAME_MBS_ONLY)) ||
 	    !request->pic_width_in_mbs || !request->frame_height_in_mbs ||
 	    request->pic_width_in_mbs > 256 || request->frame_height_in_mbs > 256 ||
 	    request->num_slice_groups_minus1 ||
@@ -2185,7 +2185,8 @@ static void nvdec_h264_fill_setup(struct nvdec_decode_job *hjob, u8 current_inde
 		cpu_to_le32(request->log2_max_pic_order_cnt_lsb_minus4);
 	setup->delta_pic_order_always_zero_flag =
 		cpu_to_le32(!!(request->flags & NVDEC_H264_REQ_DELTA_POC_ZERO));
-	setup->frame_mbs_only_flag = cpu_to_le32(1);
+	setup->frame_mbs_only_flag =
+		cpu_to_le32(!!(request->flags & NVDEC_H264_REQ_FRAME_MBS_ONLY));
 	setup->pic_width_in_mbs = cpu_to_le32(request->pic_width_in_mbs);
 	setup->frame_height_in_mbs = cpu_to_le32(request->frame_height_in_mbs);
 	setup->entropy_coding_mode_flag =
@@ -2206,7 +2207,8 @@ static void nvdec_h264_fill_setup(struct nvdec_decode_job *hjob, u8 current_inde
 	setup->pitch_chroma = cpu_to_le32(request->chroma_stride);
 	setup->history_buffer_size = cpu_to_le32(ctx->history_size / 256);
 
-	picture_flags = !!(request->flags & NVDEC_H264_REQ_DIRECT_8X8) << 1;
+	picture_flags = !!(request->flags & NVDEC_H264_REQ_MBAFF);
+	picture_flags |= !!(request->flags & NVDEC_H264_REQ_DIRECT_8X8) << 1;
 	picture_flags |= !!(request->pps_flags & NVDEC_H264_PPS_WEIGHTED_PRED) << 2;
 	picture_flags |= !!(request->pps_flags & NVDEC_H264_PPS_CONSTRAINED_INTRA) << 3;
 	picture_flags |= !!request->nal_ref_idc << 4;
