@@ -1401,7 +1401,9 @@ static int nvdec_snapshot_vp9_request(struct nvdec_v4l2_ctx *ctx)
 	return 0;
 }
 
-static int nvdec_validate_mpeg2_request(struct nvdec_v4l2_ctx *ctx)
+static int nvdec_validate_mpeg2_request(struct nvdec_v4l2_ctx *ctx,
+					const struct vb2_v4l2_buffer *src,
+					const struct vb2_v4l2_buffer *dst)
 {
 	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
 	const struct v4l2_ctrl_mpeg2_quantisation *quant;
@@ -1440,9 +1442,16 @@ static int nvdec_validate_mpeg2_request(struct nvdec_v4l2_ctx *ctx)
 		goto reject;
 	}
 
-	/* A field picture needs two requests to fill one capture buffer. */
-	if (pic->picture_structure != V4L2_MPEG2_PIC_FRAME) {
-		why = "field pictures are not supported";
+	if (!pic->picture_structure ||
+	    pic->picture_structure > V4L2_MPEG2_PIC_FRAME) {
+		why = "invalid picture structure";
+		goto reject;
+	}
+
+	/* The first field has to hold the buffer the pair shares. */
+	if (pic->picture_structure != V4L2_MPEG2_PIC_FRAME &&
+	    !(src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF) && !dst->is_held) {
+		why = "a field picture must hold the capture buffer for its pair";
 		goto reject;
 	}
 
@@ -1459,7 +1468,9 @@ reject:
 	return -EINVAL;
 }
 
-static int nvdec_snapshot_mpeg2_request(struct nvdec_v4l2_ctx *ctx)
+static int nvdec_snapshot_mpeg2_request(struct nvdec_v4l2_ctx *ctx,
+					const struct vb2_v4l2_buffer *src,
+					const struct vb2_v4l2_buffer *dst)
 {
 	const struct v4l2_pix_format_mplane *pix = &ctx->capture_fmt.fmt.pix_mp;
 	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
@@ -1468,7 +1479,7 @@ static int nvdec_snapshot_mpeg2_request(struct nvdec_v4l2_ctx *ctx)
 	const struct v4l2_ctrl_mpeg2_picture *pic;
 	unsigned int i;
 
-	if (nvdec_validate_mpeg2_request(ctx))
+	if (nvdec_validate_mpeg2_request(ctx, src, dst))
 		return -EINVAL;
 
 	pic = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_MPEG2_PICTURE);
@@ -1486,7 +1497,11 @@ static int nvdec_snapshot_mpeg2_request(struct nvdec_v4l2_ctx *ctx)
 	request->dst_stride = pix->plane_fmt[0].bytesperline;
 	request->dst_chroma_offset = request->dst_stride * pix->height;
 	request->picture_coding_type = pic->picture_coding_type;
+	request->picture_structure = pic->picture_structure;
 	request->intra_dc_precision = pic->intra_dc_precision;
+	/* A capture buffer held across the last request continues it. */
+	if (pic->picture_structure != V4L2_MPEG2_PIC_FRAME && dst->is_held)
+		request->flags |= NVDEC_MPEG2_REQ_SECOND_FIELD;
 	memcpy(request->f_code, pic->f_code, sizeof(request->f_code));
 	if (pic->flags & V4L2_MPEG2_PIC_FLAG_FRAME_PRED_DCT)
 		request->flags |= NVDEC_MPEG2_REQ_FRAME_PRED_DCT;
@@ -1777,7 +1792,7 @@ static void nvdec_device_run(void *priv)
 		err = nvdec_snapshot_vp9_request(ctx);
 	} else if (ctx->codec == NVDEC_CODEC_MPEG2) {
 		first = true;
-		err = nvdec_snapshot_mpeg2_request(ctx);
+		err = nvdec_snapshot_mpeg2_request(ctx, src, dst);
 	} else {
 		/* A picture starts at macroblock zero; m2m's new_frame is unreliable. */
 		slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
@@ -1793,7 +1808,9 @@ static void nvdec_device_run(void *priv)
 	controls_set_up = false;
 	v4l2_m2m_buf_copy_metadata(src, dst);
 
-	if (src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF) {
+	/* Another slice for H.264, the other field of a pair for MPEG-2. */
+	if ((src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF) &&
+	    ctx->codec != NVDEC_CODEC_MPEG2) {
 		v4l2_m2m_buf_done_and_job_finish(ctx->nvdec->m2m_dev,
 						 ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_DONE);

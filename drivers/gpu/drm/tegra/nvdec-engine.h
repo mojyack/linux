@@ -309,6 +309,7 @@ struct nvdec_mpeg2_request {
 	u32 output_payload_size;
 	u32 slice_count;
 	u8 picture_coding_type;
+	u8 picture_structure;
 	u8 intra_dc_precision;
 	u8 flags;
 	u8 f_code[4];
@@ -323,6 +324,7 @@ struct nvdec_mpeg2_request {
 #define NVDEC_MPEG2_REQ_ALT_SCAN	BIT(3)
 #define NVDEC_MPEG2_REQ_Q_SCALE_TYPE	BIT(4)
 #define NVDEC_MPEG2_REQ_TOP_FIELD_FIRST	BIT(5)
+#define NVDEC_MPEG2_REQ_SECOND_FIELD	BIT(6)
 
 enum nvdec_codec {
 	NVDEC_CODEC_H264,

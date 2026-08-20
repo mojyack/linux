@@ -4601,10 +4601,11 @@ static int nvdec_mpeg2_validate_request(struct device *dev,
 	unsigned int i;
 
 	dev_dbg(dev,
-		"mpeg2 request: coded=%ux%u crop=%ux%u+%u+%u type=%u dc=%u flags=0x%x stride=%u coff=%u payload=%u slices=%u\n",
+		"mpeg2 request: coded=%ux%u crop=%ux%u+%u+%u type=%u struct=%u dc=%u flags=0x%x stride=%u coff=%u payload=%u slices=%u\n",
 		request->coded_width, request->coded_height,
 		request->crop_width, request->crop_height, request->crop_left,
 		request->crop_top, request->picture_coding_type,
+		request->picture_structure,
 		request->intra_dc_precision, request->flags,
 		request->luma_stride, request->chroma_offset,
 		request->output_payload_size, request->slice_count);
@@ -4617,6 +4618,7 @@ static int nvdec_mpeg2_validate_request(struct device *dev,
 	    request->slice_count > (u32)(request->coded_width / 16) *
 				   (request->coded_height / 16) ||
 	    request->intra_dc_precision > 3 ||
+	    !request->picture_structure || request->picture_structure > 3 ||
 	    !IS_ALIGNED(request->luma_stride, 16)) {
 		dev_dbg(dev, "mpeg2 reject: syntax\n");
 		return -EINVAL;
@@ -4672,8 +4674,9 @@ static void nvdec_mpeg2_fill_setup(struct nvdec_decode_job *hjob)
 	setup->slice_count = cpu_to_le32(r->slice_count);
 	setup->frame_width = cpu_to_le16(r->coded_width);
 	setup->frame_height = cpu_to_le16(r->coded_height);
-	/* Frame pictures only; field pictures are refused before submission. */
-	setup->picture_structure = 3;
+	setup->picture_structure = r->picture_structure;
+	setup->secondfield =
+		cpu_to_le16(!!(r->flags & NVDEC_MPEG2_REQ_SECOND_FIELD));
 	setup->picture_coding_type = r->picture_coding_type;
 	setup->intra_dc_precision = r->intra_dc_precision;
 	setup->frame_pred_frame_dct =
