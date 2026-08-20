@@ -79,6 +79,10 @@ struct nvdec_v4l2_ctx {
 	struct nvdec_vp9_request vp9;
 	struct nvdec_mpeg2_request mpeg2;
 	u32 last_first_mb;
+	/* Capture buffer a first field is waiting to be paired in; see below. */
+	struct vb2_buffer *first_field;
+	bool first_field_bottom;
+	bool second_field;
 	/* VP9 owns its probability model. */
 	struct v4l2_vp9_frame_context vp9_frame_context[4];
 	struct v4l2_vp9_frame_context vp9_probs;
@@ -417,6 +421,7 @@ static void nvdec_stop_streaming(struct vb2_queue *vq)
 		nvdec_reset_vp9_contexts(ctx);
 	} else {
 		nvdec_engine_discard_slices(ctx->decode);
+		ctx->first_field = NULL;
 	}
 }
 
@@ -488,13 +493,12 @@ static int nvdec_validate_ref(struct nvdec_v4l2_ctx *ctx,
 	if (!(entry->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE) ||
 	    (entry->flags & ~(V4L2_H264_DPB_ENTRY_FLAG_VALID |
 			      V4L2_H264_DPB_ENTRY_FLAG_ACTIVE |
-			      V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM)) ||
+			      V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM |
+			      V4L2_H264_DPB_ENTRY_FLAG_FIELD)) ||
 	    entry->reserved[0] || entry->reserved[1] || entry->reserved[2] ||
 	    entry->reserved[3] || entry->reserved[4])
 		return -EINVAL;
-	if (entry->flags & V4L2_H264_DPB_ENTRY_FLAG_FIELD)
-		return -EINVAL;
-	if (entry->fields != V4L2_H264_FRAME_REF)
+	if (entry->fields > V4L2_H264_FRAME_REF)
 		return -EINVAL;
 	return vb2_find_buffer(cap_q, entry->reference_ts) ? 0 : -EINVAL;
 }
@@ -509,7 +513,7 @@ static int nvdec_validate_reflist(const struct v4l2_h264_reference *refs,
 		/* A list position no picture can fill is left unset. */
 		if (!refs[i].fields)
 			continue;
-		if (refs[i].fields != V4L2_H264_FRAME_REF ||
+		if (refs[i].fields > V4L2_H264_FRAME_REF ||
 		    refs[i].index >= V4L2_H264_NUM_DPB_ENTRIES ||
 		    !(dec->dpb[refs[i].index].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
 			return -EINVAL;
@@ -582,8 +586,12 @@ static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	}
 	if (dec->reserved ||
 	    (dec->flags & ~(V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC |
+			    V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC |
+			    V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD |
 			    V4L2_H264_DECODE_PARAM_FLAG_PFRAME |
 			    V4L2_H264_DECODE_PARAM_FLAG_BFRAME)) ||
+	    (!(dec->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC) &&
+	     (dec->flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD)) ||
 	    (slice->slice_type != V4L2_H264_SLICE_TYPE_I &&
 	     (dec->flags & V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC))) {
 		why = "decode params";
@@ -600,10 +608,11 @@ static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 		why = "slice order";
 		goto reject;
 	}
-	/* It counts macroblock pairs, not macroblocks, when MbaffFrameFlag is set. */
+	/* Half the frame for a field, and MBAFF counts macroblock pairs. */
 	mbs = (u32)(sps->pic_width_in_mbs_minus1 + 1) *
 	      nvdec_h264_frame_height_in_mbs(sps);
-	if (nvdec_h264_mbaff(sps, dec))
+	if ((dec->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC) ||
+	    nvdec_h264_mbaff(sps, dec))
 		mbs /= 2;
 	if (slice->first_mb_in_slice >= mbs) {
 		why = "first_mb_in_slice out of range";
@@ -680,6 +689,7 @@ static void nvdec_release_surfaces(struct nvdec_v4l2_ctx *ctx)
 {
 	struct nvdec_v4l2_surface *surface, *tmp;
 
+	ctx->first_field = NULL;
 	list_for_each_entry_safe(surface, tmp, &ctx->surfaces, list)
 		nvdec_release_surface(ctx, surface->vb);
 }
@@ -753,7 +763,29 @@ static int nvdec_set_codec(struct nvdec_v4l2_ctx *ctx, enum nvdec_codec codec)
 	return 0;
 }
 
-static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
+/* The capture buffer is the frame's identity, so it names the pair. */
+static void nvdec_h264_pair_field(struct nvdec_v4l2_ctx *ctx,
+				  const struct v4l2_ctrl_h264_decode_params *dec,
+				  struct vb2_buffer *vb)
+{
+	bool bottom = dec->flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD;
+
+	ctx->second_field = false;
+	if (!(dec->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC)) {
+		ctx->first_field = NULL;
+		return;
+	}
+	if (ctx->first_field == vb && ctx->first_field_bottom != bottom) {
+		ctx->second_field = true;
+		ctx->first_field = NULL;
+		return;
+	}
+	ctx->first_field = vb;
+	ctx->first_field_bottom = bottom;
+}
+
+static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx,
+				       struct vb2_v4l2_buffer *dst, bool first)
 {
 	struct nvdec_h264_request *request = &ctx->picture;
 	const struct v4l2_ctrl_h264_sps *sps;
@@ -771,6 +803,8 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 	dec = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_DECODE_PARAMS);
 	slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
 	scaling = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SCALING_MATRIX);
+	if (first)
+		nvdec_h264_pair_field(ctx, dec, &dst->vb2_buf);
 	memset(request, 0, sizeof(*request));
 	request->profile_idc = sps->profile_idc;
 	request->level_idc = sps->level_idc;
@@ -809,6 +843,12 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 		request->flags |= NVDEC_H264_REQ_FRAME_MBS_ONLY;
 	if (nvdec_h264_mbaff(sps, dec))
 		request->flags |= NVDEC_H264_REQ_MBAFF;
+	if (dec->flags & V4L2_H264_DECODE_PARAM_FLAG_FIELD_PIC)
+		request->flags |= NVDEC_H264_REQ_FIELD;
+	if (dec->flags & V4L2_H264_DECODE_PARAM_FLAG_BOTTOM_FIELD)
+		request->flags |= NVDEC_H264_REQ_BOTTOM_FIELD;
+	if (ctx->second_field)
+		request->flags |= NVDEC_H264_REQ_SECOND_FIELD;
 	if (sps->flags & V4L2_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO)
 		request->flags |= NVDEC_H264_REQ_DELTA_POC_ZERO;
 	if (sps->flags & V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE)
@@ -848,6 +888,8 @@ static int nvdec_snapshot_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 		request->dpb[i].long_term =
 			!!(dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM);
 		request->dpb[i].fields = dpb->fields;
+		request->dpb[i].field_picture =
+			!!(dpb->flags & V4L2_H264_DPB_ENTRY_FLAG_FIELD);
 		request->dpb[i].frame_num = dpb->frame_num;
 		request->dpb[i].top_field_order_cnt = dpb->top_field_order_cnt;
 		request->dpb[i].bottom_field_order_cnt = dpb->bottom_field_order_cnt;
@@ -1816,7 +1858,7 @@ static void nvdec_device_run(void *priv)
 		/* A picture starts at macroblock zero; m2m's new_frame is unreliable. */
 		slice = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_H264_SLICE_PARAMS);
 		first = !slice || !slice->first_mb_in_slice;
-		err = nvdec_snapshot_h264_request(ctx, first);
+		err = nvdec_snapshot_h264_request(ctx, dst, first);
 	}
 	if (err)
 		goto fail;

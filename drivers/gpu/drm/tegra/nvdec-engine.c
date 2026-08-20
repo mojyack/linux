@@ -1972,11 +1972,13 @@ static int nvdec_h264_validate_request(struct device *dev,
 	    request->pic_order_cnt_type > 2 ||
 	    request->log2_max_pic_order_cnt_lsb_minus4 > 12 ||
 	    request->max_num_ref_frames > NVDEC_H264_DPB_ENTRIES ||
-	    (request->flags & (NVDEC_H264_REQ_SEPARATE_COLOUR |
-			       NVDEC_H264_REQ_FIELD |
-			       NVDEC_H264_REQ_BOTTOM_FIELD)) ||
+	    (request->flags & NVDEC_H264_REQ_SEPARATE_COLOUR) ||
 	    ((request->flags & NVDEC_H264_REQ_MBAFF) &&
-	     (request->flags & NVDEC_H264_REQ_FRAME_MBS_ONLY)) ||
+	     (request->flags & (NVDEC_H264_REQ_FRAME_MBS_ONLY |
+				NVDEC_H264_REQ_FIELD))) ||
+	    (!(request->flags & NVDEC_H264_REQ_FIELD) &&
+	     (request->flags & (NVDEC_H264_REQ_BOTTOM_FIELD |
+				NVDEC_H264_REQ_SECOND_FIELD))) ||
 	    !request->pic_width_in_mbs || !request->frame_height_in_mbs ||
 	    request->pic_width_in_mbs > 256 || request->frame_height_in_mbs > 256 ||
 	    request->num_slice_groups_minus1 ||
@@ -2042,7 +2044,7 @@ static int nvdec_h264_validate_request(struct device *dev,
 			}
 			continue;
 		}
-		if (request->dpb[i].fields != 3 ||
+		if (!request->dpb[i].fields || request->dpb[i].fields > 3 ||
 		    !nvdec_map_is_valid(dpb[i], DMA_TO_DEVICE, capture_size)) {
 			dev_dbg(dev, "h264 reject: dpb %u\n", i);
 			return -EINVAL;
@@ -2142,9 +2144,12 @@ static u32 nvdec_h264_dpb_flags(const struct nvdec_h264_request *request,
 {
 	const typeof(request->dpb[0]) *dpb = &request->dpb[slot];
 	u32 marking = dpb->long_term ? 2 : 1;
+	u32 top = (dpb->fields & NVDEC_H264_REF_TOP) ? marking : 0;
+	u32 bottom = (dpb->fields & NVDEC_H264_REF_BOTTOM) ? marking : 0;
 
-	return picture_index | (picture_index << 7) | (3 << 12) |
-		(dpb->long_term << 14) | (marking << 17) | (marking << 21);
+	return picture_index | (picture_index << 7) | (dpb->fields << 12) |
+		(dpb->long_term << 14) | (dpb->field_picture << 16) |
+		(top << 17) | (bottom << 21);
 }
 
 static void nvdec_h264_setup_dpb(struct nvdec_h264_setup *setup,
@@ -2212,6 +2217,9 @@ static void nvdec_h264_fill_setup(struct nvdec_decode_job *hjob, u8 current_inde
 	picture_flags |= !!(request->pps_flags & NVDEC_H264_PPS_WEIGHTED_PRED) << 2;
 	picture_flags |= !!(request->pps_flags & NVDEC_H264_PPS_CONSTRAINED_INTRA) << 3;
 	picture_flags |= !!request->nal_ref_idc << 4;
+	picture_flags |= !!(request->flags & NVDEC_H264_REQ_FIELD) << 5;
+	picture_flags |= !!(request->flags & NVDEC_H264_REQ_BOTTOM_FIELD) << 6;
+	picture_flags |= !!(request->flags & NVDEC_H264_REQ_SECOND_FIELD) << 7;
 	picture_flags |= request->log2_max_frame_num_minus4 << 8;
 	picture_flags |= request->chroma_format_idc << 12;
 	picture_flags |= request->pic_order_cnt_type << 14;

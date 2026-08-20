@@ -42,7 +42,7 @@ struct nvdec_h264_request {
 	u8 num_ref_idx_l1_active_minus1;
 	u8 slice_type;
 	u8 nal_ref_idc;
-	u8 flags;
+	u16 flags;
 	u16 frame_num;
 	u16 pic_width_in_mbs;
 	u16 frame_height_in_mbs;
@@ -72,8 +72,9 @@ struct nvdec_h264_request {
 	struct {
 		u8 valid;
 		u8 long_term;
+		/* Which parities are marked as references; see NVDEC_H264_REF_*. */
 		u8 fields;
-		u8 reserved;
+		u8 field_picture;
 		u16 frame_num;
 		s32 top_field_order_cnt;
 		s32 bottom_field_order_cnt;
@@ -88,6 +89,10 @@ struct nvdec_h264_request {
 #define NVDEC_H264_REQ_IDR		BIT(5)
 #define NVDEC_H264_REQ_FIELD		BIT(6)
 #define NVDEC_H264_REQ_BOTTOM_FIELD	BIT(7)
+#define NVDEC_H264_REQ_SECOND_FIELD	BIT(8)
+
+#define NVDEC_H264_REF_TOP	BIT(0)
+#define NVDEC_H264_REF_BOTTOM	BIT(1)
 
 #define NVDEC_H264_PPS_ENTROPY_CODING	BIT(0)
 #define NVDEC_H264_PPS_PIC_ORDER_PRESENT	BIT(1)
