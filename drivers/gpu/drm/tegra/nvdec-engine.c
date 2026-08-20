@@ -1694,7 +1694,7 @@ static int nvdec_h264_validate_request(struct device *dev,
 		request->frame_height_in_mbs, request->slice_count);
 
 	if ((request->profile_idc != 66 && request->profile_idc != 77 &&
-	     request->profile_idc != 100) ||
+	     request->profile_idc != 88 && request->profile_idc != 100) ||
 	    request->level_idc < 10 || request->level_idc > 51 ||
 	    request->chroma_format_idc != 1 || request->bit_depth_luma_minus8 ||
 	    request->bit_depth_chroma_minus8 ||
