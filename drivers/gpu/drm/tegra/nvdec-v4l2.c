@@ -562,8 +562,9 @@ static int nvdec_validate_h264_request(struct nvdec_v4l2_ctx *ctx, bool first)
 		why = "control handler lookup failed";
 		goto reject;
 	}
+	/* Everything Extended adds to Main is refused below or absent. */
 	if (sps->profile_idc != 66 && sps->profile_idc != 77 &&
-	    sps->profile_idc != 100) {
+	    sps->profile_idc != 88 && sps->profile_idc != 100) {
 		why = "profile";
 		goto reject;
 	}
