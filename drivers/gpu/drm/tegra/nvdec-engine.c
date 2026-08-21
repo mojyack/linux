@@ -1597,28 +1597,6 @@ static bool nvdec_map_is_valid(const struct nvdec_engine_map *map,
 	return map->direction == direction || map->direction == DMA_BIDIRECTIONAL;
 }
 
-static int nvdec_copy_output(struct nvdec_buffer *input, u32 offset,
-			     const struct nvdec_engine_map *output,
-				 size_t payload_size)
-{
-	struct iosys_map vmap = { };
-	int err;
-
-	err = dma_buf_begin_cpu_access(output->dmabuf, DMA_TO_DEVICE);
-	if (err)
-		return err;
-
-	err = dma_buf_vmap(output->dmabuf, &vmap);
-	if (!err) {
-		iosys_map_memcpy_from(input->cpu + offset, &vmap, output->offset,
-				      payload_size);
-		dma_buf_vunmap(output->dmabuf, &vmap);
-	}
-
-	dma_buf_end_cpu_access(output->dmabuf, DMA_TO_DEVICE);
-	return err;
-}
-
 static const char *nvdec_fence_get_driver_name(struct dma_fence *fence)
 {
 	return "tegra-nvdec";
@@ -1797,15 +1775,14 @@ static int nvdec_mpeg2_scan_slices(struct nvdec_decode_context *ctx)
 
 /* Only HEVC needs a lead zero byte, so its scan sees 00 00 00 01. */
 static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
-			     struct nvdec_engine_map *output, u32 payload_size)
+			     const void *bitstream, u32 payload_size)
 {
 	bool hevc = ctx->codec == NVDEC_CODEC_HEVC;
 	u32 lead = hevc ? 1 : 0;
 	u32 staged = payload_size + lead;
 	int err;
 
-	if (staged < payload_size || staged > U32_MAX - 16 - SZ_256 ||
-	    !nvdec_map_is_valid(output, DMA_TO_DEVICE, payload_size))
+	if (staged < payload_size || staged > U32_MAX - 16 - SZ_256)
 		return -EINVAL;
 
 	err = nvdec_prepare_input(ctx, staged);
@@ -1814,9 +1791,7 @@ static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
 
 	if (lead)
 		*(u8 *)ctx->input->cpu = 0;
-	err = nvdec_copy_output(ctx->input, lead, output, payload_size);
-	if (err)
-		return err;
+	memcpy(ctx->input->cpu + lead, bitstream, payload_size);
 
 	if (hevc && memcmp(ctx->input->cpu + 1, "\x00\x00\x01", 3))
 		return -EINVAL;
@@ -1840,19 +1815,18 @@ static int nvdec_frame_stage(struct nvdec_decode_context *ctx,
 
 /* Slices are staged back to back and described by slice_count + 1 offsets. */
 int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
-			     struct nvdec_engine_map *output,
-				  u32 payload_size, bool first,
-				  unsigned int max_slices)
+			     const void *bitstream, u32 payload_size,
+			     bool first, unsigned int max_slices)
 {
 	u32 staged;
 	int err;
 
-	if (!ctx || !output || payload_size < 3 || !max_slices)
+	if (!ctx || !bitstream || payload_size < 3 || !max_slices)
 		return -EINVAL;
 
 	if (ctx->codec != NVDEC_CODEC_H264) {
 		mutex_lock(&ctx->lock);
-		err = nvdec_frame_stage(ctx, output, payload_size);
+		err = nvdec_frame_stage(ctx, bitstream, payload_size);
 		mutex_unlock(&ctx->lock);
 		return err;
 	}
@@ -1866,8 +1840,7 @@ int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
 
 	if (ctx->slice_count >= max_slices ||
 	    check_add_overflow(staged, payload_size, &staged) ||
-	    staged > U32_MAX - 16 - SZ_256 ||
-	    !nvdec_map_is_valid(output, DMA_TO_DEVICE, payload_size)) {
+	    staged > U32_MAX - 16 - SZ_256) {
 		err = -EINVAL;
 		goto unlock;
 	}
@@ -1882,10 +1855,7 @@ int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
 	if (err)
 		goto unlock;
 
-	err = nvdec_copy_output(ctx->input, staged - payload_size, output,
-				payload_size);
-	if (err)
-		goto unlock;
+	memcpy(ctx->input->cpu + staged - payload_size, bitstream, payload_size);
 
 	if (first && memcmp(ctx->input->cpu, "\x00\x00\x01", 3) &&
 	    memcmp(ctx->input->cpu, "\x00\x00\x00\x01", 4)) {

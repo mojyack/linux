@@ -393,9 +393,8 @@ void nvdec_engine_context_destroy(struct nvdec_decode_context *ctx);
 void nvdec_engine_context_release_surface(struct nvdec_decode_context *ctx,
 					  struct nvdec_engine_map *surface);
 int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
-			     struct nvdec_engine_map *output,
-				  u32 payload_size, bool first,
-				  unsigned int max_slices);
+			     const void *bitstream, u32 payload_size,
+			     bool first, unsigned int max_slices);
 void nvdec_engine_discard_slices(struct nvdec_decode_context *ctx);
 void nvdec_engine_context_reset(struct nvdec_decode_context *ctx);
 int nvdec_engine_h264_submit(struct nvdec_decode_context *ctx,
