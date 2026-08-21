@@ -101,6 +101,9 @@ struct nvdec_v4l2_surface {
 	struct list_head list;
 	struct vb2_buffer *vb;
 	struct nvdec_engine_map *map;
+	/* The capture buffer's own mapping, kept for as long as it is queued. */
+	struct nvdec_engine_map *capture;
+	struct dma_buf *dbuf;
 	/* Coded size of the picture last decoded into it; VP9 scales from it. */
 	u16 width;
 	u16 height;
@@ -689,6 +692,7 @@ static void nvdec_release_surface(struct nvdec_v4l2_ctx *ctx,
 		return;
 	nvdec_engine_context_release_surface(ctx->decode, surface->map);
 	list_del(&surface->list);
+	nvdec_engine_map_put(surface->capture);
 	nvdec_engine_map_put(surface->map);
 	kfree(surface);
 }
@@ -731,25 +735,37 @@ static int nvdec_capture_surface(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
-static int nvdec_map_buffer(struct nvdec_v4l2_ctx *ctx, struct vb2_buffer *vb,
-			    enum dma_data_direction direction,
-			    unsigned long offset,
-			    struct nvdec_engine_map **result)
+/* Mapped once and kept on the surface; an import may bring a new dma-buf. */
+static int nvdec_capture_map(struct nvdec_v4l2_ctx *ctx,
+			     struct nvdec_v4l2_surface *surface,
+			     struct vb2_buffer *vb,
+			     struct nvdec_engine_map **result)
 {
 	struct dma_buf *dmabuf;
-	struct nvdec_engine_map *map;
 
-	if (offset >= vb2_plane_size(vb, 0))
-		return -EINVAL;
-	dmabuf = nvdec_plane_dmabuf(vb);
-	if (!dmabuf)
-		return -ENOMEM;
-	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf, offset,
-				      vb2_plane_size(vb, 0) - offset, direction);
-	dma_buf_put(dmabuf);
-	if (IS_ERR(map))
-		return PTR_ERR(map);
-	*result = map;
+	if (surface->capture && surface->dbuf != vb->planes[0].dbuf) {
+		nvdec_engine_map_put(surface->capture);
+		surface->capture = NULL;
+	}
+	if (!surface->capture) {
+		dmabuf = nvdec_plane_dmabuf(vb);
+		if (!dmabuf)
+			return -ENOMEM;
+		surface->capture = nvdec_engine_map_create(ctx->nvdec->engine,
+							   dmabuf, 0,
+							   vb2_plane_size(vb, 0),
+							   DMA_FROM_DEVICE);
+		dma_buf_put(dmabuf);
+		if (IS_ERR(surface->capture)) {
+			int err = PTR_ERR(surface->capture);
+
+			surface->capture = NULL;
+			return err;
+		}
+		surface->dbuf = vb->planes[0].dbuf;
+	}
+
+	*result = nvdec_engine_map_get(surface->capture);
 	return 0;
 }
 
@@ -1906,8 +1922,7 @@ static void nvdec_device_run(void *priv)
 	err = nvdec_capture_surface(ctx, &dst->vb2_buf, &job->surface);
 	if (err)
 		goto free_job;
-	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, 0,
-			       &job->capture);
+	err = nvdec_capture_map(ctx, job->surface, &dst->vb2_buf, &job->capture);
 	if (err)
 		goto free_job;
 	err = nvdec_resolve_dpb(ctx, job);
