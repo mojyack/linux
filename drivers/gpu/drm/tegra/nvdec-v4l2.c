@@ -668,19 +668,16 @@ static int nvdec_capture_surface(struct nvdec_v4l2_ctx *ctx,
 
 static int nvdec_map_buffer(struct nvdec_v4l2_ctx *ctx, struct vb2_buffer *vb,
 			    enum dma_data_direction direction,
-			    unsigned long offset,
 			    struct nvdec_engine_map **result)
 {
 	struct dma_buf *dmabuf;
 	struct nvdec_engine_map *map;
 
-	if (offset >= vb2_plane_size(vb, 0))
-		return -EINVAL;
 	dmabuf = nvdec_plane_dmabuf(vb);
 	if (!dmabuf)
 		return -ENOMEM;
-	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf, offset,
-				      vb2_plane_size(vb, 0) - offset, direction);
+	map = nvdec_engine_map_create(ctx->nvdec->engine, dmabuf,
+				      vb2_plane_size(vb, 0), direction);
 	dma_buf_put(dmabuf);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
@@ -1599,9 +1596,8 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 		ctx->request.h264.pic_width_in_mbs *
 		ctx->request.h264.frame_height_in_mbs;
 	u32 payload = vb2_get_plane_payload(&src->vb2_buf, 0);
-	struct nvdec_engine_map *output;
 	unsigned long offset = 0;
-	int err;
+	void *bitstream;
 
 	/* VP8 and VP9 reach the firmware with their frame headers removed. */
 	if (ctx->codec == NVDEC_CODEC_VP8) {
@@ -1619,15 +1615,13 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 		payload -= offset;
 	}
 
-	err = nvdec_map_buffer(ctx, &src->vb2_buf, DMA_TO_DEVICE, offset, &output);
-	if (err)
-		return err;
-	err = nvdec_engine_map_wait(output, false);
-	if (!err)
-		err = nvdec_engine_stage_slice(ctx->decode, output, payload,
-					       first, max_slices);
-	nvdec_engine_map_put(output);
-	return err;
+	/* The engine copies it out, so a CPU mapping is all this buffer needs. */
+	bitstream = vb2_plane_vaddr(&src->vb2_buf, 0);
+	if (!bitstream)
+		return -ENOMEM;
+
+	return nvdec_engine_stage_slice(ctx->decode, bitstream + offset, payload,
+					first, max_slices);
 }
 
 /* Each DPB entry names a capture buffer, and through it a pool surface. */
@@ -1913,7 +1907,7 @@ static void nvdec_device_run(void *priv)
 	err = nvdec_capture_surface(ctx, &dst->vb2_buf, &job->surface);
 	if (err)
 		goto free_job;
-	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE, 0,
+	err = nvdec_map_buffer(ctx, &dst->vb2_buf, DMA_FROM_DEVICE,
 			       &job->capture);
 	if (err)
 		goto free_job;

@@ -353,8 +353,7 @@ int nvdec_engine_submit_job(struct nvdec_engine *engine,
 
 struct nvdec_engine_map *
 nvdec_engine_map_create(struct nvdec_engine *engine, struct dma_buf *dmabuf,
-			unsigned long offset, size_t size,
-			enum dma_data_direction direction);
+			size_t size, enum dma_data_direction direction);
 struct nvdec_engine_map *
 nvdec_engine_surface_create(struct nvdec_engine *engine, size_t size);
 struct nvdec_engine_map *nvdec_engine_map_get(struct nvdec_engine_map *map);
@@ -369,9 +368,8 @@ void nvdec_engine_context_destroy(struct nvdec_decode_context *ctx);
 void nvdec_engine_context_release_surface(struct nvdec_decode_context *ctx,
 					  struct nvdec_engine_map *surface);
 int nvdec_engine_stage_slice(struct nvdec_decode_context *ctx,
-			     struct nvdec_engine_map *output,
-			     u32 payload_size, bool first,
-			     unsigned int max_slices);
+			     const void *bitstream, u32 payload_size,
+			     bool first, unsigned int max_slices);
 void nvdec_engine_discard_slices(struct nvdec_decode_context *ctx);
 void nvdec_engine_context_reset(struct nvdec_decode_context *ctx);
 int nvdec_engine_submit(struct nvdec_decode_context *ctx,
