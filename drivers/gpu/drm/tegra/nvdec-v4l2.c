@@ -90,6 +90,8 @@ struct nvdec_v4l2_ctx {
 	struct v4l2_vp9_frame_symbol_counts vp9_counts;
 	u32 vp9_cur_flags;
 	u32 vp9_last_flags;
+	u16 vp9_cur_width;
+	u16 vp9_cur_height;
 	u8 vp9_frame_context_idx;
 	bool vp9_cur_valid;
 	bool vp9_last_valid;
@@ -99,6 +101,9 @@ struct nvdec_v4l2_surface {
 	struct list_head list;
 	struct vb2_buffer *vb;
 	struct nvdec_engine_map *map;
+	/* Coded size of the picture last decoded into it; VP9 scales from it. */
+	u16 width;
+	u16 height;
 };
 
 struct nvdec_v4l2_job {
@@ -224,6 +229,8 @@ static void nvdec_reset_vp9_contexts(struct nvdec_v4l2_ctx *ctx)
 	ctx->vp9_last_valid = false;
 	ctx->vp9_cur_flags = 0;
 	ctx->vp9_last_flags = 0;
+	ctx->vp9_cur_width = 0;
+	ctx->vp9_cur_height = 0;
 }
 
 static void nvdec_reset_coded_fmt(struct nvdec_v4l2_ctx *ctx)
@@ -1320,9 +1327,9 @@ static int nvdec_validate_vp9_request(struct nvdec_v4l2_ctx *ctx)
 
 	width = frame->frame_width_minus_1 + 1;
 	height = frame->frame_height_minus_1 + 1;
-	if (ALIGN(width, NVDEC_VP9_SB_SIZE) != coded->width ||
-	    ALIGN(height, NVDEC_VP9_SB_SIZE) != coded->height) {
-		why = "frame dimensions do not match the negotiated coded format";
+	if (ALIGN(width, NVDEC_VP9_SB_SIZE) > coded->width ||
+	    ALIGN(height, NVDEC_VP9_SB_SIZE) > coded->height) {
+		why = "frame dimensions exceed the negotiated coded format";
 		goto reject;
 	}
 
@@ -1451,7 +1458,10 @@ static int nvdec_snapshot_vp9_request(struct nvdec_v4l2_ctx *ctx)
 	if (ctx->vp9_cur_valid) {
 		if (ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_KEY_FRAME)
 			request->flags |= NVDEC_VP9_REQ_PREV_KEY_FRAME;
-		if (ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_SHOW_FRAME)
+		/* No previous-size field; a resize reads as unshown. */
+		if ((ctx->vp9_cur_flags & V4L2_VP9_FRAME_FLAG_SHOW_FRAME) &&
+		    ctx->vp9_cur_width == request->width &&
+		    ctx->vp9_cur_height == request->height)
 			request->flags |= NVDEC_VP9_REQ_PREV_SHOW_FRAME;
 	}
 
@@ -1459,6 +1469,8 @@ static int nvdec_snapshot_vp9_request(struct nvdec_v4l2_ctx *ctx)
 	ctx->vp9_last_flags = ctx->vp9_cur_flags;
 	ctx->vp9_last_valid = ctx->vp9_cur_valid;
 	ctx->vp9_cur_flags = frame->flags;
+	ctx->vp9_cur_width = request->width;
+	ctx->vp9_cur_height = request->height;
 	ctx->vp9_cur_valid = true;
 	return 0;
 }
@@ -1726,36 +1738,34 @@ static int nvdec_stage_slice(struct nvdec_v4l2_ctx *ctx,
 }
 
 /* Each DPB entry names a capture buffer, and through it a pool surface. */
-static int nvdec_pin_reference(struct nvdec_v4l2_ctx *ctx,
-			       struct nvdec_v4l2_job *job, unsigned int slot,
-			       u64 timestamp)
+static struct nvdec_v4l2_surface *
+nvdec_pin_reference(struct nvdec_v4l2_ctx *ctx, struct nvdec_v4l2_job *job,
+		    unsigned int slot, u64 timestamp)
 {
 	struct vb2_queue *cap_q = v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx);
 	struct nvdec_v4l2_surface *surface;
 
 	surface = nvdec_find_surface(ctx, vb2_find_buffer(cap_q, timestamp));
 	if (!surface)
-		return -EINVAL;
+		return NULL;
 
 	job->dpb[slot] = nvdec_engine_map_get(surface->map);
-	return 0;
+	return surface;
 }
 
 static int nvdec_resolve_dpb(struct nvdec_v4l2_ctx *ctx,
 			     struct nvdec_v4l2_job *job)
 {
 	unsigned int i;
-	int err;
 
 	if (ctx->codec == NVDEC_CODEC_HEVC) {
 		const struct v4l2_ctrl_hevc_decode_params *dec =
 			nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_HEVC_DECODE_PARAMS);
 
 		for (i = 0; i < ctx->hevc.num_active_dpb_entries; i++) {
-			err = nvdec_pin_reference(ctx, job, i,
-						  dec->dpb[i].timestamp);
-			if (err)
-				return err;
+			if (!nvdec_pin_reference(ctx, job, i,
+						 dec->dpb[i].timestamp))
+				return -EINVAL;
 		}
 
 		return 0;
@@ -1770,8 +1780,17 @@ static int nvdec_resolve_dpb(struct nvdec_v4l2_ctx *ctx,
 			frame->alt_frame_ts,
 		};
 
-		for (i = 0; i < NVDEC_VP9_REFS; i++)
-			nvdec_pin_reference(ctx, job, i, timestamps[i]);
+		job->surface->width = ctx->vp9.width;
+		job->surface->height = ctx->vp9.height;
+		for (i = 0; i < NVDEC_VP9_REFS; i++) {
+			struct nvdec_v4l2_surface *ref =
+				nvdec_pin_reference(ctx, job, i, timestamps[i]);
+
+			if (!ref)
+				ref = job->surface;
+			ctx->vp9.ref_width[i] = ref->width;
+			ctx->vp9.ref_height[i] = ref->height;
+		}
 
 		return 0;
 	}
@@ -1813,10 +1832,9 @@ static int nvdec_resolve_dpb(struct nvdec_v4l2_ctx *ctx,
 		for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
 			if (!ctx->picture.dpb[i].valid)
 				continue;
-			err = nvdec_pin_reference(ctx, job, i,
-						  dec->dpb[i].reference_ts);
-			if (err)
-				return err;
+			if (!nvdec_pin_reference(ctx, job, i,
+						 dec->dpb[i].reference_ts))
+				return -EINVAL;
 		}
 	}
 

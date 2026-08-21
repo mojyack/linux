@@ -275,6 +275,9 @@ struct nvdec_vp9_request {
 	u8 reference_mode;
 	u8 interpolation_filter;
 	u8 sign_bias[NVDEC_VP9_REFS];
+	/* A reference may be coded at a size the firmware scales from. */
+	u16 ref_width[NVDEC_VP9_REFS];
+	u16 ref_height[NVDEC_VP9_REFS];
 	u8 seg_feature_enabled[8];
 	s16 seg_feature_data[8][4];
 	u8 seg_tree_probs[7];
