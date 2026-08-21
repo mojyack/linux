@@ -3248,13 +3248,12 @@ static void nvdec_vp9_fill_setup(struct nvdec_decode_job *hjob)
 	memset(setup, 0, sizeof(*setup));
 	setup->stream_len = cpu_to_le32(r->frame.output_payload_size);
 	setup->bsd_control_offset =
-		cpu_to_le32(ALIGN(r->frame.coded_height, NVDEC_VP9_SB_SIZE) *
+		cpu_to_le32(ALIGN(r->height, NVDEC_VP9_SB_SIZE) *
 			    NVDEC_VP9_BSD_PER_ROW / SZ_256);
 
-	/* The surface pool is per context, so no reference can be scaled. */
 	for (i = 0; i < NVDEC_VP9_REFS; i++) {
-		setup->ref[i].width = cpu_to_le16(r->width);
-		setup->ref[i].height = cpu_to_le16(r->height);
+		setup->ref[i].width = cpu_to_le16(r->ref_width[i]);
+		setup->ref[i].height = cpu_to_le16(r->ref_height[i]);
 		setup->ref[i].stride[0] = cpu_to_le16(r->frame.luma_stride);
 		setup->ref[i].stride[1] = cpu_to_le16(r->frame.luma_stride);
 	}
@@ -3381,7 +3380,7 @@ static int nvdec_vp9_prepare_scratch(struct nvdec_decode_context *ctx,
 static int nvdec_vp9_validate_request(struct device *dev,
 				      const struct nvdec_vp9_request *request)
 {
-	unsigned int tiles;
+	unsigned int i, tiles;
 
 	dev_dbg(dev,
 		"vp9 request: %ux%u flags=0x%x q=%u tx=%u refmode=%u filter=%u tiles=%u/%u\n",
@@ -3405,6 +3404,15 @@ static int nvdec_vp9_validate_request(struct device *dev,
 	    tiles * 2 * sizeof(__le16) > NVDEC_VP9_TILES_MAGIC * sizeof(__le16)) {
 		dev_dbg(dev, "vp9 reject: tiles\n");
 		return -EINVAL;
+	}
+
+	for (i = 0; i < NVDEC_VP9_REFS; i++) {
+		if (!request->ref_width[i] || !request->ref_height[i] ||
+		    request->ref_width[i] > request->frame.coded_width ||
+		    request->ref_height[i] > request->frame.coded_height) {
+			dev_dbg(dev, "vp9 reject: reference %u geometry\n", i);
+			return -EINVAL;
+		}
 	}
 
 	return 0;
