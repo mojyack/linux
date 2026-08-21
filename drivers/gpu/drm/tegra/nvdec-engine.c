@@ -644,7 +644,7 @@ struct nvdec_decode_context {
 	u16 height_in_mbs;
 	u16 coded_width;
 	u16 coded_height;
-	u32 coloc_size;
+	u8 picture_slots;
 	u32 mbhist_offset;
 	u32 mbhist_size;
 	u32 history_offset;
@@ -1658,10 +1658,12 @@ static int nvdec_h264_prepare_scratch(struct nvdec_decode_context *ctx,
 	struct nvdec_engine_map *scratch;
 	u32 coloc_per_picture, coloc_size, mbhist_size, history_size;
 	u32 mbhist_offset, history_offset, size;
+	u8 slots = max_t(u8, request->max_num_ref_frames, 1) + 1;
 
 	if (ctx->scratch) {
 		if (ctx->width_in_mbs != request->pic_width_in_mbs ||
-		    ctx->height_in_mbs != request->frame_height_in_mbs)
+		    ctx->height_in_mbs != request->frame_height_in_mbs ||
+		    slots > ctx->picture_slots)
 			return -EBUSY;
 		return 0;
 	}
@@ -1671,7 +1673,7 @@ static int nvdec_h264_prepare_scratch(struct nvdec_decode_context *ctx,
 	    coloc_per_picture < 63)
 		return -EOVERFLOW;
 	coloc_per_picture = ALIGN(coloc_per_picture - 63, 0x100);
-	if (check_mul_overflow(coloc_per_picture, NVDEC_H264_MAX_PICTURES,
+	if (check_mul_overflow(coloc_per_picture, (u32)slots,
 			       &coloc_size) ||
 	    check_mul_overflow((u32)request->pic_width_in_mbs, 104U, &mbhist_size) ||
 	    check_mul_overflow((u32)request->pic_width_in_mbs, 0x200U, &history_size))
@@ -1700,7 +1702,7 @@ static int nvdec_h264_prepare_scratch(struct nvdec_decode_context *ctx,
 	ctx->scratch = scratch;
 	ctx->width_in_mbs = request->pic_width_in_mbs;
 	ctx->height_in_mbs = request->frame_height_in_mbs;
-	ctx->coloc_size = coloc_size;
+	ctx->picture_slots = slots;
 	ctx->mbhist_offset = mbhist_offset;
 	ctx->mbhist_size = mbhist_size;
 	ctx->history_offset = history_offset;
@@ -1881,7 +1883,7 @@ void nvdec_engine_discard_slices(struct nvdec_decode_context *ctx)
 	mutex_unlock(&ctx->lock);
 }
 
-/* The scratch is sized from the coded resolution, so a new size needs a new one. */
+/* The scratch is sized from the stream, so a new stream needs a new one. */
 void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 {
 	if (!ctx)
@@ -1902,6 +1904,7 @@ void nvdec_engine_context_reset(struct nvdec_decode_context *ctx)
 	}
 	ctx->width_in_mbs = 0;
 	ctx->height_in_mbs = 0;
+	ctx->picture_slots = 0;
 	ctx->coded_width = 0;
 	ctx->coded_height = 0;
 	mutex_unlock(&ctx->lock);
@@ -2605,14 +2608,14 @@ int nvdec_engine_h264_submit(struct nvdec_decode_context *ctx,
 
 	nvdec_recycle_indices(ctx, surface, dpb, NVDEC_H264_DPB_ENTRIES);
 	err = nvdec_surface_index(ctx, surface, &current_index,
-				  NVDEC_H264_MAX_PICTURES);
+				  ctx->picture_slots);
 	if (err)
 		goto free_hjob;
 	for (i = 0; i < NVDEC_H264_DPB_ENTRIES; i++) {
 		if (!hjob->request.dpb[i].valid)
 			continue;
 		err = nvdec_surface_index(ctx, dpb[i], &picture_indices[i],
-					  NVDEC_H264_MAX_PICTURES);
+					  ctx->picture_slots);
 		if (!err)
 			err = nvdec_h264_dpb_slot(ctx, dpb[i], &dpb_slots[i]);
 		if (err)
