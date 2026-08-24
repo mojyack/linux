@@ -91,7 +91,11 @@ nvkm_falcon_fw_boot(struct nvkm_falcon_fw *fw, struct nvkm_subdev *user,
 
 
 	FLCNFW_DBG(fw, "resetting");
-	fw->func->reset(fw);
+	ret = fw->func->reset(fw);
+	if (ret) {
+		FLCNFW_ERR(fw, "reset failed: %d", ret);
+		goto done;
+	}
 
 	FLCNFW_DBG(fw, "loading");
 	if (fw->func->setup) {
