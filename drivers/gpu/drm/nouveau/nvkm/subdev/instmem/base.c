@@ -126,12 +126,13 @@ nvkm_instobj_new(struct nvkm_instmem *imem, u32 size, u32 align, bool zero, bool
 		   zero, nvkm_memory_addr(memory), nvkm_memory_size(memory));
 
 	if (!imem->func->zero && zero) {
+		u32 zsize = nvkm_memory_size(memory);
 		void __iomem *map = nvkm_kmap(memory);
 		if (unlikely(!map)) {
-			for (offset = 0; offset < size; offset += 4)
+			for (offset = 0; offset < zsize; offset += 4)
 				nvkm_wo32(memory, offset, 0x00000000);
 		} else {
-			memset_io(map, 0x00, size);
+			memset_io(map, 0x00, zsize);
 		}
 		nvkm_done(memory);
 	}
