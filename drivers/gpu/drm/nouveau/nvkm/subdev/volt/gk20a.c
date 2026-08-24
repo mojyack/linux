@@ -118,6 +118,24 @@ gk20a_volt_vid_set(struct nvkm_volt *base, u8 vid)
 }
 
 static int
+gk20a_volt_preinit(struct nvkm_volt *base)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+	int uv = regulator_get_voltage(volt->vdd);
+
+	if (uv >= 0 && uv >= base->vid[0].uv)
+		return 0;
+
+	if (uv < 0)
+		nvkm_warn(&base->subdev, "cannot read the rail: %d\n", uv);
+	else
+		nvkm_info(&base->subdev, "raising the rail from %d uV to %d uV\n",
+			  uv, base->vid[0].uv);
+
+	return gk20a_volt_vid_set(base, base->vid[0].vid);
+}
+
+static int
 gk20a_volt_set_id(struct nvkm_volt *base, u8 id, int condition)
 {
 	struct gk20a_volt *volt = gk20a_volt(base);
@@ -141,6 +159,7 @@ gk20a_volt_set_id(struct nvkm_volt *base, u8 id, int condition)
 
 static const struct nvkm_volt_func
 gk20a_volt = {
+	.preinit = gk20a_volt_preinit,
 	.vid_get = gk20a_volt_vid_get,
 	.vid_set = gk20a_volt_vid_set,
 	.set_id = gk20a_volt_set_id,
