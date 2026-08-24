@@ -114,6 +114,22 @@ gk20a_volt_vid_set(struct nvkm_volt *base, u8 vid)
 	return regulator_set_voltage(volt->vdd, volt->base.vid[vid].uv, 1200000);
 }
 
+/* Nothing else brings the rail up to the lowest operating point, and the
+ * subdevs that need it there run before clk does.
+ */
+static int
+gk20a_volt_preinit(struct nvkm_volt *base)
+{
+	struct gk20a_volt *volt = gk20a_volt(base);
+	int uv = regulator_get_voltage(volt->vdd);
+
+	if (uv >= base->vid[0].uv)
+		return 0;
+
+	nvkm_debug(&base->subdev, "raising %duv to %duv\n", uv, base->vid[0].uv);
+	return gk20a_volt_vid_set(base, base->vid[0].vid);
+}
+
 static int
 gk20a_volt_set_id(struct nvkm_volt *base, u8 id, int condition)
 {
@@ -138,6 +154,7 @@ gk20a_volt_set_id(struct nvkm_volt *base, u8 id, int condition)
 
 static const struct nvkm_volt_func
 gk20a_volt = {
+	.preinit = gk20a_volt_preinit,
 	.vid_get = gk20a_volt_vid_get,
 	.vid_set = gk20a_volt_vid_set,
 	.set_id = gk20a_volt_set_id,

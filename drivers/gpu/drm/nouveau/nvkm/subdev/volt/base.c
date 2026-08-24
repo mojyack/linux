@@ -238,6 +238,17 @@ nvkm_volt_speedo_read(struct nvkm_volt *volt)
 }
 
 static int
+nvkm_volt_preinit(struct nvkm_subdev *subdev)
+{
+	struct nvkm_volt *volt = nvkm_volt(subdev);
+
+	if (volt->func->preinit)
+		return volt->func->preinit(volt);
+
+	return 0;
+}
+
+static int
 nvkm_volt_init(struct nvkm_subdev *subdev)
 {
 	struct nvkm_volt *volt = nvkm_volt(subdev);
@@ -275,6 +286,7 @@ nvkm_volt_dtor(struct nvkm_subdev *subdev)
 static const struct nvkm_subdev_func
 nvkm_volt = {
 	.dtor = nvkm_volt_dtor,
+	.preinit = nvkm_volt_preinit,
 	.init = nvkm_volt_init,
 	.oneinit = nvkm_volt_oneinit,
 };
