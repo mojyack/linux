@@ -47,6 +47,10 @@ static const struct resource rtc_resources[] = {
 	DEFINE_RES_IRQ(MAX77620_IRQ_TOP_RTC),
 };
 
+static const struct resource onkey_resources[] = {
+	DEFINE_RES_IRQ(MAX77620_IRQ_TOP_ONOFF),
+};
+
 static const struct resource thermal_resources[] = {
 	DEFINE_RES_IRQ(MAX77620_IRQ_LBT_TJALRM1),
 	DEFINE_RES_IRQ(MAX77620_IRQ_LBT_TJALRM2),
@@ -87,6 +91,14 @@ static const struct mfd_cell max77620_children[] = {
 		.resources = thermal_resources,
 		.num_resources = ARRAY_SIZE(thermal_resources),
 	},
+};
+
+/* Whether EN0 is a power button is a board property, so wait for DT. */
+static const struct mfd_cell max77620_onkey_child = {
+	.name = "max77620-onkey",
+	.of_compatible = "maxim,max77620-onkey",
+	.resources = onkey_resources,
+	.num_resources = ARRAY_SIZE(onkey_resources),
 };
 
 static const struct mfd_cell max20024_children[] = {
@@ -504,6 +516,7 @@ static int max77620_probe(struct i2c_client *client)
 	struct max77620_chip *chip;
 	struct regmap_irq_chip *chip_desc;
 	const struct mfd_cell *mfd_cells;
+	struct device_node *onkey_np;
 	int n_mfd_cells;
 	int ret;
 
@@ -574,6 +587,24 @@ static int max77620_probe(struct i2c_client *client)
 	if (ret < 0) {
 		dev_err(chip->dev, "Failed to add MFD children: %d\n", ret);
 		return ret;
+	}
+
+	onkey_np = of_get_compatible_child(chip->dev->of_node,
+					   max77620_onkey_child.of_compatible);
+	if (onkey_np) {
+		bool avail = of_device_is_available(onkey_np);
+
+		of_node_put(onkey_np);
+
+		if (avail) {
+			ret = devm_mfd_add_devices(chip->dev, PLATFORM_DEVID_NONE,
+						   &max77620_onkey_child, 1, NULL, 0,
+						   regmap_irq_get_domain(chip->top_irq_data));
+			if (ret < 0) {
+				dev_err(chip->dev, "Failed to add ON/OFF key: %d\n", ret);
+				return ret;
+			}
+		}
 	}
 
 	if (of_device_is_system_power_controller(client->dev.of_node)) {
