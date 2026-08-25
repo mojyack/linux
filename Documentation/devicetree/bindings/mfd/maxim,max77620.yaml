@@ -159,6 +159,22 @@ properties:
               goes LOW.
             enum: [0, 1]
 
+  onkey:
+    type: object
+    additionalProperties: false
+    description:
+      The PMIC's EN0 input drives the ON/OFF controller. Boards differ in what
+      they connect it to - a power button, an enable held asserted, or nothing
+      at all - so the key is only reported as an input device when this node is
+      present.
+
+    properties:
+      compatible:
+        const: maxim,max77620-onkey
+
+    required:
+      - compatible
+
   pinmux:
     $ref: /schemas/pinctrl/maxim,max77620-pinctrl.yaml
 
@@ -243,6 +259,10 @@ examples:
             #thermal-sensor-cells = <0>;
 
             system-power-controller;
+
+            onkey {
+                compatible = "maxim,max77620-onkey";
+            };
 
             pinctrl-names = "default";
             pinctrl-0 = <&max77620_default>;
