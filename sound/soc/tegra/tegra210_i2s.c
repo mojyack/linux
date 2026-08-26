@@ -26,12 +26,17 @@ static const struct reg_default tegra210_i2s_reg_defaults[] = {
 	{ TEGRA210_I2S_ENABLE, 0x0 },
 	{ TEGRA210_I2S_CG, 0x1 },
 	{ TEGRA210_I2S_TIMING, 0x0000001f },
-	/*
-	 * Below update does not have any effect on Tegra186 and Tegra194.
-	 * On Tegra210, I2S4 has "i2s4a" and "i2s4b" pins and below update
-	 * is required to select i2s4b for it to be functional for I2S
-	 * operation.
-	 */
+};
+
+/* CYA kept as a default: no effect on Tegra186/194, unknown on Tegra234 */
+static const struct reg_default tegra186_i2s_reg_defaults[] = {
+	{ TEGRA210_I2S_RX_INT_MASK, 0x00000003 },
+	{ TEGRA210_I2S_RX_CIF_CTRL, 0x00007700 },
+	{ TEGRA210_I2S_TX_INT_MASK, 0x00000003 },
+	{ TEGRA210_I2S_TX_CIF_CTRL, 0x00007700 },
+	{ TEGRA210_I2S_ENABLE, 0x0 },
+	{ TEGRA210_I2S_CG, 0x1 },
+	{ TEGRA210_I2S_TIMING, 0x0000001f },
 	{ TEGRA210_I2S_CYA, 0x1 },
 };
 
@@ -1029,6 +1034,20 @@ static const struct regmap_config tegra210_regmap_conf = {
 	.cache_type		= REGCACHE_FLAT,
 };
 
+static const struct regmap_config tegra186_regmap_conf = {
+	.reg_bits		= 32,
+	.reg_stride		= 4,
+	.val_bits		= 32,
+	.max_register		= TEGRA210_I2S_CYA,
+	.writeable_reg		= tegra210_i2s_wr_reg,
+	.readable_reg		= tegra210_i2s_rd_reg,
+	.volatile_reg		= tegra210_i2s_volatile_reg,
+	.reg_defaults		= tegra186_i2s_reg_defaults,
+	.num_reg_defaults	= ARRAY_SIZE(tegra186_i2s_reg_defaults),
+	.reg_default_cb		= regmap_default_zero_cb,
+	.cache_type		= REGCACHE_FLAT,
+};
+
 /*
  * The AHUB HW modules are interconnected with CIF which are capable of
  * supporting Channel and Sample bit format conversion. This needs different
@@ -1125,6 +1144,13 @@ static int tegra210_i2s_probe(struct platform_device *pdev)
 
 	regcache_cache_only(i2s->regmap, true);
 
+	/* Selects the I2S4B/I2S5B pads */
+	if (i2s->soc_data->regmap_conf == &tegra210_regmap_conf) {
+		err = regmap_write(i2s->regmap, TEGRA210_I2S_CYA, 0x1);
+		if (err)
+			return dev_err_probe(dev, err, "can't write CYA\n");
+	}
+
 	/* Update the dais max channel as per soc */
 	for (id = 0; id < ARRAY_SIZE(tegra210_i2s_dais); id++) {
 		tegra210_i2s_dais[id].playback.channels_max = i2s->soc_data->max_ch;
@@ -1166,6 +1192,18 @@ static const struct tegra_i2s_soc_data soc_data_tegra210 = {
 	.slot_mask		= DEFAULT_I2S_SLOT_MASK,
 };
 
+static const struct tegra_i2s_soc_data soc_data_tegra186 = {
+	.regmap_conf		= &tegra186_regmap_conf,
+	.i2s_cmpnt		= &tegra210_i2s_cmpnt,
+	.max_ch			= TEGRA210_I2S_MAX_CHANNEL,
+	.enable_reg		= TEGRA210_I2S_ENABLE,
+	.tx_offset		= TEGRA210_I2S_TX_OFFSET,
+	.i2s_ctrl_offset	= TEGRA210_I2S_CTRL_OFFSET,
+	.fsync_width_mask	= I2S_CTRL_FSYNC_WIDTH_MASK,
+	.fsync_width_shift	= I2S_FSYNC_WIDTH_SHIFT,
+	.slot_mask		= DEFAULT_I2S_SLOT_MASK,
+};
+
 static const struct tegra_i2s_soc_data soc_data_tegra264 = {
 	.regmap_conf		= &tegra264_regmap_conf,
 	.i2s_cmpnt		= &tegra264_i2s_cmpnt,
@@ -1179,6 +1217,9 @@ static const struct tegra_i2s_soc_data soc_data_tegra264 = {
 };
 
 static const struct of_device_id tegra210_i2s_of_match[] = {
+	{ .compatible = "nvidia,tegra186-i2s", .data = &soc_data_tegra186 },
+	{ .compatible = "nvidia,tegra194-i2s", .data = &soc_data_tegra186 },
+	{ .compatible = "nvidia,tegra234-i2s", .data = &soc_data_tegra186 },
 	{ .compatible = "nvidia,tegra210-i2s", .data = &soc_data_tegra210 },
 	{ .compatible = "nvidia,tegra264-i2s", .data = &soc_data_tegra264 },
 	{},
