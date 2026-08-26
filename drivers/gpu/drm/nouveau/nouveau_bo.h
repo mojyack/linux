@@ -17,6 +17,10 @@ struct nouveau_bo {
 	u32 valid_domains;
 	struct ttm_place placements[3];
 	bool force_coherent;
+	bool cpu_dirty;
+	bool cpu_mapped;
+	bool cpu_mapped_dmabuf;
+	unsigned int cpu_vmapped; /* drm_gem_vmap()s, under the reservation */
 	struct ttm_bo_kmap_obj kmap;
 	struct list_head head;
 	struct list_head io_reserve_lru;

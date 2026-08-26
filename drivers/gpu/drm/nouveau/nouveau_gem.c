@@ -54,6 +54,14 @@ static vm_fault_t nouveau_ttm_fault(struct vm_fault *vmf)
 	if (ret)
 		goto error_unlock;
 
+	/* Writes through this mapping are invisible to us from here on. */
+	if (vma->vm_flags & VM_MAYWRITE) {
+		/* A dma-buf mmap is out of ttm_bo_unmap_virtual()'s reach. */
+		if (vma->vm_file->f_mapping != bo->bdev->dev_mapping)
+			nouveau_bo(bo)->cpu_mapped_dmabuf = true;
+		nouveau_bo(bo)->cpu_mapped = true;
+	}
+
 	nouveau_bo_del_io_reserve_lru(bo);
 	prot = vma_get_page_prot(vma);
 	ret = ttm_bo_vm_fault_reserved(vmf, prot, TTM_BO_VM_NUM_PREFAULT);
@@ -66,11 +74,26 @@ error_unlock:
 	return ret;
 }
 
+/* ptrace and /proc/pid/mem write through a kmap, not through a fault. */
+static int nouveau_ttm_vm_access(struct vm_area_struct *vma, unsigned long addr,
+				 void *buf, int len, int write)
+{
+	struct ttm_buffer_object *bo = vma->vm_private_data;
+	int ret = ttm_bo_vm_access(vma, addr, buf, len, write);
+
+	if (write && ret > 0) {
+		dma_resv_lock(bo->base.resv, NULL);
+		nouveau_bo(bo)->cpu_dirty = true;
+		dma_resv_unlock(bo->base.resv);
+	}
+	return ret;
+}
+
 static const struct vm_operations_struct nouveau_ttm_vm_ops = {
 	.fault = nouveau_ttm_fault,
 	.open = ttm_bo_vm_open,
 	.close = ttm_bo_vm_close,
-	.access = ttm_bo_vm_access
+	.access = nouveau_ttm_vm_access
 };
 
 void
@@ -214,6 +237,25 @@ nouveau_gem_object_close(struct drm_gem_object *gem, struct drm_file *file_priv)
 	ttm_bo_unreserve(&nvbo->bo);
 }
 
+/* A kernel mapping is written without any fault: write back while it lasts. */
+static int
+nouveau_gem_vmap(struct drm_gem_object *gem, struct iosys_map *map)
+{
+	int ret = drm_gem_ttm_vmap(gem, map);
+
+	if (!ret)
+		nouveau_gem_object(gem)->cpu_vmapped++;
+	return ret;
+}
+
+static void
+nouveau_gem_vunmap(struct drm_gem_object *gem, struct iosys_map *map)
+{
+	drm_gem_ttm_vunmap(gem, map);
+	nouveau_gem_object(gem)->cpu_vmapped--;
+	nouveau_gem_object(gem)->cpu_dirty = true;
+}
+
 const struct drm_gem_object_funcs nouveau_gem_object_funcs = {
 	.free = nouveau_gem_object_del,
 	.open = nouveau_gem_object_open,
@@ -222,8 +264,8 @@ const struct drm_gem_object_funcs nouveau_gem_object_funcs = {
 	.pin = nouveau_gem_prime_pin,
 	.unpin = nouveau_gem_prime_unpin,
 	.get_sg_table = nouveau_gem_prime_get_sg_table,
-	.vmap = drm_gem_ttm_vmap,
-	.vunmap = drm_gem_ttm_vunmap,
+	.vmap = nouveau_gem_vmap,
+	.vunmap = nouveau_gem_vunmap,
 	.mmap = drm_gem_ttm_mmap,
 	.vm_ops = &nouveau_ttm_vm_ops,
 };
@@ -1014,7 +1056,14 @@ nouveau_gem_ioctl_cpu_prep(struct drm_device *dev, void *data,
 	else
 		ret = lret;
 
-	nouveau_bo_sync_for_cpu(nvbo);
+	/* The tracking state is the reservation's, as in validate. */
+	lret = ttm_bo_reserve(&nvbo->bo, true, false, NULL);
+	if (!lret) {
+		nouveau_bo_sync_for_cpu(nvbo);
+		ttm_bo_unreserve(&nvbo->bo);
+	} else if (!ret) {
+		ret = lret;
+	}
 	drm_gem_object_put(gem);
 
 	return ret;
@@ -1027,15 +1076,20 @@ nouveau_gem_ioctl_cpu_fini(struct drm_device *dev, void *data,
 	struct drm_nouveau_gem_cpu_fini *req = data;
 	struct drm_gem_object *gem;
 	struct nouveau_bo *nvbo;
+	int ret;
 
 	gem = drm_gem_object_lookup(file_priv, req->handle);
 	if (!gem)
 		return -ENOENT;
 	nvbo = nouveau_gem_object(gem);
 
-	nouveau_bo_sync_for_device(nvbo);
+	ret = ttm_bo_reserve(&nvbo->bo, true, false, NULL);
+	if (!ret) {
+		nouveau_bo_sync_for_device(nvbo);
+		ttm_bo_unreserve(&nvbo->bo);
+	}
 	drm_gem_object_put(gem);
-	return 0;
+	return ret;
 }
 
 int
