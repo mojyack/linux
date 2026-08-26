@@ -678,6 +678,8 @@ nouveau_bo_map(struct nouveau_bo *nvbo)
 		return ret;
 
 	ret = ttm_bo_kmap(&nvbo->bo, 0, PFN_UP(nvbo->bo.base.size), &nvbo->kmap);
+	if (!ret)
+		nvbo->cpu_dirty = true;
 
 	ttm_bo_unreserve(&nvbo->bo);
 	return ret;
@@ -698,6 +700,8 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
 	int i, j;
+
+	nvbo->cpu_dirty = false;
 
 	if (!ttm_dma || !ttm_dma->dma_address)
 		return;
@@ -734,6 +738,8 @@ nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
 	int i, j;
+
+	nvbo->cpu_dirty = true;
 
 	if (!ttm_dma || !ttm_dma->dma_address)
 		return;
@@ -795,7 +801,21 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 	if (ret)
 		return ret;
 
-	nouveau_bo_sync_for_device(nvbo);
+	/* A writable userspace mapping can be written without telling us. */
+	if (nvbo->cpu_dirty || nvbo->cpu_mapped) {
+		struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
+		struct ttm_tt *ttm_dma = nvbo->bo.ttm;
+
+		/* Unmap before the writeback, so a racing write refaults. */
+		if (nvbo->cpu_mapped && !nvbo->cpu_mapped_dmabuf &&
+		    !nvbo->force_coherent && ttm_dma && ttm_dma->dma_address &&
+		    dma_dev_need_sync(drm->dev->dev)) {
+			nvbo->cpu_mapped = false;
+			ttm_bo_unmap_virtual(&nvbo->bo);
+		}
+
+		nouveau_bo_sync_for_device(nvbo);
+	}
 
 	return 0;
 }
@@ -1156,6 +1176,8 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
 	struct ttm_resource *old_reg = bo->resource;
 	struct nouveau_drm_tile *new_tile = NULL;
 	int ret = 0;
+
+	nvbo->cpu_dirty = true;
 
 	if (new_reg->mem_type == TTM_PL_TT) {
 		ret = nouveau_ttm_tt_bind(bo->bdev, bo->ttm, new_reg);
