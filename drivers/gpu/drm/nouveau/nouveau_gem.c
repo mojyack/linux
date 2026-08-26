@@ -54,6 +54,10 @@ static vm_fault_t nouveau_ttm_fault(struct vm_fault *vmf)
 	if (ret)
 		goto error_unlock;
 
+	/* Writes through this mapping are invisible to us from here on. */
+	if (vma->vm_flags & VM_WRITE)
+		nouveau_bo(bo)->cpu_mapped = true;
+
 	nouveau_bo_del_io_reserve_lru(bo);
 	prot = vma_get_page_prot(vma);
 	ret = ttm_bo_vm_fault_reserved(vmf, prot, TTM_BO_VM_NUM_PREFAULT);
