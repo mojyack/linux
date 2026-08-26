@@ -153,6 +153,8 @@ struct tegra_i2s_soc_data {
 	unsigned int enable_reg;
 	unsigned int tx_offset;
 	unsigned int i2s_ctrl_offset;
+	const struct reg_sequence *init_regs;
+	unsigned int num_init_regs;
 	unsigned int fsync_width_mask;
 	unsigned int fsync_width_shift;
 	unsigned int slot_mask;
