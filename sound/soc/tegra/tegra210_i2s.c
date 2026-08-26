@@ -26,13 +26,6 @@ static const struct reg_default tegra210_i2s_reg_defaults[] = {
 	{ TEGRA210_I2S_ENABLE, 0x0 },
 	{ TEGRA210_I2S_CG, 0x1 },
 	{ TEGRA210_I2S_TIMING, 0x0000001f },
-	/*
-	 * Below update does not have any effect on Tegra186 and Tegra194.
-	 * On Tegra210, I2S4 has "i2s4a" and "i2s4b" pins and below update
-	 * is required to select i2s4b for it to be functional for I2S
-	 * operation.
-	 */
-	{ TEGRA210_I2S_CYA, 0x1 },
 };
 
 static const struct reg_default tegra264_i2s_reg_defaults[] = {
@@ -1124,6 +1117,13 @@ static int tegra210_i2s_probe(struct platform_device *pdev)
 	tegra210_parse_client_convert(dev);
 
 	regcache_cache_only(i2s->regmap, true);
+
+	/* Selects the I2S4B/I2S5B pads on Tegra210, no effect on T186/T194 */
+	if (i2s->soc_data->regmap_conf == &tegra210_regmap_conf) {
+		err = regmap_write(i2s->regmap, TEGRA210_I2S_CYA, 0x1);
+		if (err)
+			return dev_err_probe(dev, err, "can't write CYA\n");
+	}
 
 	/* Update the dais max channel as per soc */
 	for (id = 0; id < ARRAY_SIZE(tegra210_i2s_dais); id++) {
