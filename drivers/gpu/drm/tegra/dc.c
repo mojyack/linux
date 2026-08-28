@@ -2890,8 +2890,10 @@ static int tegra_dc_runtime_suspend(struct host1x_client *client)
 		return err;
 	}
 
-	if (dc->soc->has_powergate)
+	if (dc->soc->has_powergate) {
+		dc->powergate_parent = clk_get_parent(dc->clk);
 		tegra_pmc_powergate_power_off(dc->pmc, dc->powergate);
+	}
 
 	clk_disable_unprepare(dc->clk);
 	pm_runtime_put_sync(dev);
@@ -2912,9 +2914,17 @@ static int tegra_dc_runtime_resume(struct host1x_client *client)
 	}
 
 	if (dc->soc->has_powergate) {
+		/* the clock mux only leaves that parent at power-up, and only if it runs */
+		err = clk_prepare_enable(dc->powergate_parent);
+		if (err < 0) {
+			dev_err(dev, "failed to enable clock parent: %d\n", err);
+			goto put_rpm;
+		}
+
 		err = tegra_pmc_powergate_sequence_power_up(dc->pmc,
 							    dc->powergate,
 							    dc->clk, dc->rst);
+		clk_disable_unprepare(dc->powergate_parent);
 		if (err < 0) {
 			dev_err(dev, "failed to power partition: %d\n", err);
 			goto put_rpm;
@@ -3353,6 +3363,7 @@ static int tegra_dc_probe(struct platform_device *pdev)
 		else
 			dc->powergate = TEGRA_POWERGATE_DISB;
 
+		dc->powergate_parent = clk_get_parent(dc->clk);
 		tegra_pmc_powergate_power_off(dc->pmc, dc->powergate);
 	}
 
