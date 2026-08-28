@@ -89,6 +89,8 @@ struct tegra_dc {
 	int pipe;
 
 	struct clk *clk;
+	/* parent of clk when the partition was last powered off */
+	struct clk *powergate_parent;
 	struct reset_control *rst;
 	void __iomem *regs;
 	int irq;
