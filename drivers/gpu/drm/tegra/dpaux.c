@@ -219,8 +219,10 @@ static ssize_t tegra_dpaux_transfer(struct drm_dp_aux *aux,
 
 	if ((value & DPAUX_DP_AUXSTAT_RX_ERROR) ||
 	    (value & DPAUX_DP_AUXSTAT_SINKSTAT_ERROR) ||
-	    (value & DPAUX_DP_AUXSTAT_NO_STOP_ERROR))
+	    (value & DPAUX_DP_AUXSTAT_NO_STOP_ERROR)) {
+		dev_dbg(dpaux->dev, "AUX error: AUXSTAT %08x\n", value);
 		return -EIO;
+	}
 
 	switch ((value & DPAUX_DP_AUXSTAT_REPLY_TYPE_MASK) >> 16) {
 	case 0x00:
