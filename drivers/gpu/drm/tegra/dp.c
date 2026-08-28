@@ -544,9 +544,9 @@ static int drm_dp_link_recover_clock(struct drm_dp_link *link)
 		return err;
 	}
 
-	if (!drm_dp_clock_recovery_ok(status, link->lanes))
-		drm_dp_link_get_adjustments(link, status);
-	else
+	drm_dp_link_get_adjustments(link, status);
+
+	if (drm_dp_clock_recovery_ok(status, link->lanes))
 		link->train.clock_recovered = true;
 
 	return 0;
@@ -567,10 +567,10 @@ static int drm_dp_link_clock_recovery(struct drm_dp_link *link)
 			return err;
 		}
 
+		drm_dp_link_train_adjust(&link->train);
+
 		if (link->train.clock_recovered)
 			break;
-
-		drm_dp_link_train_adjust(&link->train);
 	}
 
 	return 0;
@@ -594,15 +594,15 @@ static int drm_dp_link_equalize_channel(struct drm_dp_link *link)
 		return err;
 	}
 
+	drm_dp_link_get_adjustments(link, status);
+
 	if (!drm_dp_clock_recovery_ok(status, link->lanes)) {
 		DRM_ERROR("clock recovery lost while equalizing channel\n");
 		link->train.clock_recovered = false;
 		return 0;
 	}
 
-	if (!drm_dp_channel_eq_ok(status, link->lanes))
-		drm_dp_link_get_adjustments(link, status);
-	else
+	if (drm_dp_channel_eq_ok(status, link->lanes))
 		link->train.channel_equalized = true;
 
 	return 0;
