@@ -57,6 +57,9 @@ struct tegra_dpaux {
 	u32 padctl;
 	u32 spare;
 
+	struct mutex lock; /* protects enable_count */
+	unsigned int enable_count;
+
 	struct completion complete;
 	struct work_struct work;
 	struct list_head list;
@@ -463,6 +466,7 @@ static int tegra_dpaux_probe(struct platform_device *pdev)
 	INIT_WORK(&dpaux->work, tegra_dpaux_hotplug);
 	init_completion(&dpaux->complete);
 	INIT_LIST_HEAD(&dpaux->list);
+	mutex_init(&dpaux->lock);
 	dpaux->dev = &pdev->dev;
 
 	dpaux->regs = devm_platform_ioremap_resource(pdev, 0);
@@ -849,15 +853,28 @@ enum drm_connector_status drm_dp_aux_detect(struct drm_dp_aux *aux)
 int drm_dp_aux_enable(struct drm_dp_aux *aux)
 {
 	struct tegra_dpaux *dpaux = to_dpaux(aux);
+	int err = 0;
 
-	return tegra_dpaux_pad_config(dpaux, DPAUX_PADCTL_FUNC_AUX);
+	mutex_lock(&dpaux->lock);
+
+	if (dpaux->enable_count++ == 0)
+		err = tegra_dpaux_pad_config(dpaux, DPAUX_PADCTL_FUNC_AUX);
+
+	mutex_unlock(&dpaux->lock);
+
+	return err;
 }
 
 int drm_dp_aux_disable(struct drm_dp_aux *aux)
 {
 	struct tegra_dpaux *dpaux = to_dpaux(aux);
 
-	tegra_dpaux_pad_power_down(dpaux);
+	mutex_lock(&dpaux->lock);
+
+	if (!WARN_ON(dpaux->enable_count == 0) && --dpaux->enable_count == 0)
+		tegra_dpaux_pad_power_down(dpaux);
+
+	mutex_unlock(&dpaux->lock);
 
 	return 0;
 }
