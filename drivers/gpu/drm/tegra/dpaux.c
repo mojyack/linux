@@ -244,7 +244,9 @@ static ssize_t tegra_dpaux_transfer(struct drm_dp_aux *aux,
 		break;
 	}
 
-	if ((msg->size > 0) && (msg->reply == DP_AUX_NATIVE_REPLY_ACK)) {
+	msg->reply = reply;
+
+	if (msg->size > 0 && reply == DP_AUX_NATIVE_REPLY_ACK) {
 		if (msg->request & DP_AUX_I2C_READ) {
 			size_t count = value & DPAUX_DP_AUXSTAT_REPLY_MASK;
 
@@ -262,8 +264,6 @@ static ssize_t tegra_dpaux_transfer(struct drm_dp_aux *aux,
 			ret = count;
 		}
 	}
-
-	msg->reply = reply;
 
 out:
 	return ret;
