@@ -442,6 +442,18 @@ static int drm_helper_probe_get_modes(struct drm_connector *connector)
 	return count;
 }
 
+static bool drm_helper_has_mode_within(struct drm_connector *connector,
+				       int width, int height)
+{
+	struct drm_display_mode *mode;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (mode->hdisplay <= width && mode->vdisplay <= height)
+			return true;
+	}
+	return false;
+}
+
 static int __drm_helper_update_and_validate(struct drm_connector *connector,
 					    uint32_t maxX, uint32_t maxY,
 					    struct drm_modeset_acquire_ctx *ctx)
@@ -687,12 +699,12 @@ retry:
 	/*
 	 * Displayport spec section 5.2.1.2 ("Video Timing Format") says that
 	 * all detachable sinks shall support 640x480 @60Hz as a fail safe
-	 * mode. If all modes were pruned, perhaps because they need more
-	 * lanes or a higher pixel clock than available, at least try to add
-	 * in 640x480.
+	 * mode. If no mode that small survived, perhaps because the others
+	 * need more lanes or a higher pixel clock than available or the sink
+	 * lists only larger ones, at least try to add in 640x480.
 	 */
-	if (list_empty(&connector->modes) &&
-	    connector->connector_type == DRM_MODE_CONNECTOR_DisplayPort) {
+	if (connector->connector_type == DRM_MODE_CONNECTOR_DisplayPort &&
+	    !drm_helper_has_mode_within(connector, 640, 480)) {
 		count = drm_add_modes_noedid(connector, 640, 480);
 		ret = __drm_helper_update_and_validate(connector, maxX, maxY, &ctx);
 		if (ret == -EDEADLK) {
