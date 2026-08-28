@@ -165,7 +165,7 @@ int drm_dp_link_probe(struct drm_dp_aux *aux, struct drm_dp_link *link);
 int drm_dp_link_configure(struct drm_dp_aux *aux, struct drm_dp_link *link);
 int drm_dp_link_choose(struct drm_dp_link *link,
 		       const struct drm_display_mode *mode,
-		       const struct drm_display_info *info);
+		       unsigned int bpc);
 
 void drm_dp_link_train_init(struct drm_dp_link_train *train);
 int drm_dp_link_train(struct drm_dp_link *link);
