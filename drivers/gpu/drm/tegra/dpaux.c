@@ -53,8 +53,10 @@ struct tegra_dpaux {
 
 	struct regulator *vdd;
 
-	struct mutex lock; /* protects enable_count */
+	struct mutex lock; /* protects the pad state below */
 	unsigned int enable_count;
+	unsigned int function;
+	bool suspended;
 
 	struct completion complete;
 	struct work_struct work;
@@ -292,7 +294,7 @@ static irqreturn_t tegra_dpaux_irq(int irq, void *data)
 	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_AUX);
 
 	if (value & (DPAUX_INTR_PLUG_EVENT | DPAUX_INTR_UNPLUG_EVENT))
-		schedule_work(&dpaux->work);
+		queue_work(system_freezable_wq, &dpaux->work);
 
 	if (value & DPAUX_INTR_IRQ_EVENT) {
 		/* TODO: handle this */
@@ -362,6 +364,18 @@ static int tegra_dpaux_pad_config(struct tegra_dpaux *dpaux, unsigned function)
 	tegra_dpaux_pad_power_up(dpaux);
 
 	return 0;
+}
+
+/* a function requested while suspended is applied on resume */
+static int tegra_dpaux_set_function(struct tegra_dpaux *dpaux,
+				    unsigned int function)
+{
+	dpaux->function = function;
+
+	if (dpaux->suspended)
+		return 0;
+
+	return tegra_dpaux_pad_config(dpaux, function);
 }
 
 #ifdef CONFIG_GENERIC_PINCONF
@@ -437,8 +451,13 @@ static int tegra_dpaux_set_mux(struct pinctrl_dev *pinctrl,
 			       unsigned int function, unsigned int group)
 {
 	struct tegra_dpaux *dpaux = pinctrl_dev_get_drvdata(pinctrl);
+	int err;
 
-	return tegra_dpaux_pad_config(dpaux, function);
+	mutex_lock(&dpaux->lock);
+	err = tegra_dpaux_set_function(dpaux, function);
+	mutex_unlock(&dpaux->lock);
+
+	return err;
 }
 
 static const struct pinmux_ops tegra_dpaux_pinmux_ops = {
@@ -452,7 +471,6 @@ static const struct pinmux_ops tegra_dpaux_pinmux_ops = {
 static int tegra_dpaux_probe(struct platform_device *pdev)
 {
 	struct tegra_dpaux *dpaux;
-	u32 value;
 	int err;
 
 	dpaux = devm_kzalloc(&pdev->dev, sizeof(*dpaux), GFP_KERNEL);
@@ -541,7 +559,7 @@ static int tegra_dpaux_probe(struct platform_device *pdev)
 	 * is no possibility to perform the I2C mode configuration in the
 	 * HDMI path.
 	 */
-	err = tegra_dpaux_pad_config(dpaux, DPAUX_PADCTL_FUNC_I2C);
+	err = tegra_dpaux_set_function(dpaux, DPAUX_PADCTL_FUNC_I2C);
 	if (err < 0)
 		goto err_pm_disable;
 
@@ -552,6 +570,7 @@ static int tegra_dpaux_probe(struct platform_device *pdev)
 	dpaux->desc.pctlops = &tegra_dpaux_pinctrl_ops;
 	dpaux->desc.pmxops = &tegra_dpaux_pinmux_ops;
 	dpaux->desc.owner = THIS_MODULE;
+	dpaux->desc.link_consumers = true;
 
 	dpaux->pinctrl = devm_pinctrl_register(&pdev->dev, &dpaux->desc, dpaux);
 	if (IS_ERR(dpaux->pinctrl)) {
@@ -561,10 +580,8 @@ static int tegra_dpaux_probe(struct platform_device *pdev)
 	}
 #endif
 	/* enable and clear all interrupts */
-	value = DPAUX_INTR_AUX_DONE | DPAUX_INTR_IRQ_EVENT |
-		DPAUX_INTR_UNPLUG_EVENT | DPAUX_INTR_PLUG_EVENT;
-	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_EN_AUX);
-	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_EN_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_AUX);
 
 	mutex_lock(&dpaux_lock);
 	list_add_tail(&dpaux->list, &dpaux_list);
@@ -660,8 +677,39 @@ disable_clk:
 	return err;
 }
 
+static int tegra_dpaux_system_suspend(struct device *dev)
+{
+	struct tegra_dpaux *dpaux = dev_get_drvdata(dev);
+
+	disable_irq(dpaux->irq);
+
+	mutex_lock(&dpaux->lock);
+	dpaux->suspended = true;
+	mutex_unlock(&dpaux->lock);
+
+	return 0;
+}
+
+static int tegra_dpaux_system_resume(struct device *dev)
+{
+	struct tegra_dpaux *dpaux = dev_get_drvdata(dev);
+
+	mutex_lock(&dpaux->lock);
+	dpaux->suspended = false;
+	tegra_dpaux_set_function(dpaux, dpaux->function);
+	mutex_unlock(&dpaux->lock);
+
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_EN_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_AUX);
+	enable_irq(dpaux->irq);
+
+	return 0;
+}
+
 static const struct dev_pm_ops tegra_dpaux_pm_ops = {
 	RUNTIME_PM_OPS(tegra_dpaux_suspend, tegra_dpaux_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(tegra_dpaux_system_suspend,
+			    tegra_dpaux_system_resume)
 };
 
 static const struct tegra_dpaux_soc tegra124_dpaux_soc = {
@@ -728,6 +776,13 @@ int drm_dp_aux_attach(struct drm_dp_aux *aux, struct tegra_output *output)
 	err = drm_dp_aux_register(aux);
 	if (err < 0)
 		return err;
+
+	/* the DRM device suspends before DPAUX and resumes after it */
+	if (!device_link_add(aux->drm_dev->dev, dpaux->dev,
+			     DL_FLAG_AUTOREMOVE_CONSUMER)) {
+		drm_dp_aux_unregister(aux);
+		return -EINVAL;
+	}
 
 	output->connector.polled = DRM_CONNECTOR_POLL_HPD;
 	dpaux->output = output;
@@ -819,7 +874,7 @@ int drm_dp_aux_enable(struct drm_dp_aux *aux)
 	mutex_lock(&dpaux->lock);
 
 	if (dpaux->enable_count++ == 0)
-		err = tegra_dpaux_pad_config(dpaux, DPAUX_PADCTL_FUNC_AUX);
+		err = tegra_dpaux_set_function(dpaux, DPAUX_PADCTL_FUNC_AUX);
 
 	mutex_unlock(&dpaux->lock);
 
@@ -833,7 +888,7 @@ int drm_dp_aux_disable(struct drm_dp_aux *aux)
 	mutex_lock(&dpaux->lock);
 
 	if (!WARN_ON(dpaux->enable_count == 0) && --dpaux->enable_count == 0)
-		tegra_dpaux_pad_power_down(dpaux);
+		tegra_dpaux_set_function(dpaux, DPAUX_PADCTL_FUNC_OFF);
 
 	mutex_unlock(&dpaux->lock);
 
