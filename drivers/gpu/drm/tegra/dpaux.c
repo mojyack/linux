@@ -46,12 +46,16 @@ struct tegra_dpaux {
 	int irq;
 
 	struct tegra_output *output;
+	struct device_link *link;
 
 	struct reset_control *rst;
 	struct clk *clk_parent;
 	struct clk *clk;
 
 	struct regulator *vdd;
+
+	u32 padctl;
+	u32 spare;
 
 	struct completion complete;
 	struct work_struct work;
@@ -447,7 +451,6 @@ static const struct pinmux_ops tegra_dpaux_pinmux_ops = {
 static int tegra_dpaux_probe(struct platform_device *pdev)
 {
 	struct tegra_dpaux *dpaux;
-	u32 value;
 	int err;
 
 	dpaux = devm_kzalloc(&pdev->dev, sizeof(*dpaux), GFP_KERNEL);
@@ -555,10 +558,8 @@ static int tegra_dpaux_probe(struct platform_device *pdev)
 	}
 #endif
 	/* enable and clear all interrupts */
-	value = DPAUX_INTR_AUX_DONE | DPAUX_INTR_IRQ_EVENT |
-		DPAUX_INTR_UNPLUG_EVENT | DPAUX_INTR_PLUG_EVENT;
-	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_EN_AUX);
-	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_EN_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_AUX);
 
 	mutex_lock(&dpaux_lock);
 	list_add_tail(&dpaux->list, &dpaux_list);
@@ -654,8 +655,37 @@ disable_clk:
 	return err;
 }
 
+static int tegra_dpaux_system_suspend(struct device *dev)
+{
+	struct tegra_dpaux *dpaux = dev_get_drvdata(dev);
+
+	dpaux->padctl = tegra_dpaux_readl(dpaux, DPAUX_HYBRID_PADCTL);
+	dpaux->spare = tegra_dpaux_readl(dpaux, DPAUX_HYBRID_SPARE);
+
+	return pm_runtime_force_suspend(dev);
+}
+
+static int tegra_dpaux_system_resume(struct device *dev)
+{
+	struct tegra_dpaux *dpaux = dev_get_drvdata(dev);
+	int err;
+
+	err = pm_runtime_force_resume(dev);
+	if (err < 0)
+		return err;
+
+	tegra_dpaux_writel(dpaux, dpaux->padctl, DPAUX_HYBRID_PADCTL);
+	tegra_dpaux_writel(dpaux, dpaux->spare, DPAUX_HYBRID_SPARE);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_EN_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_AUX);
+
+	return 0;
+}
+
 static const struct dev_pm_ops tegra_dpaux_pm_ops = {
 	RUNTIME_PM_OPS(tegra_dpaux_suspend, tegra_dpaux_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(tegra_dpaux_system_suspend,
+			    tegra_dpaux_system_resume)
 };
 
 static const struct tegra_dpaux_soc tegra124_dpaux_soc = {
@@ -723,6 +753,14 @@ int drm_dp_aux_attach(struct drm_dp_aux *aux, struct tegra_output *output)
 	if (err < 0)
 		return err;
 
+	/* suspend the DRM device before DPAUX, and resume it after */
+	dpaux->link = device_link_add(aux->drm_dev->dev, dpaux->dev,
+				      DL_FLAG_STATELESS);
+	if (!dpaux->link) {
+		drm_dp_aux_unregister(aux);
+		return -EINVAL;
+	}
+
 	output->connector.polled = DRM_CONNECTOR_POLL_HPD;
 	dpaux->output = output;
 
@@ -762,6 +800,7 @@ int drm_dp_aux_detach(struct drm_dp_aux *aux)
 
 	drm_dp_aux_unregister(aux);
 	disable_irq(dpaux->irq);
+	device_link_del(dpaux->link);
 
 	if (dpaux->output->panel) {
 		enum drm_connector_status status;
