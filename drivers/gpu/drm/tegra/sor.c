@@ -2903,10 +2903,12 @@ static void tegra_sor_dp_enable(struct drm_encoder *encoder)
 		dev_err(sor->dev, "failed to power up DP link: %d\n", err);
 
 	err = drm_dp_link_train(&sor->link);
-	if (err < 0)
+	if (err < 0) {
 		dev_err(sor->dev, "link training failed: %d\n", err);
-	else
-		dev_dbg(sor->dev, "link training succeeded\n");
+		return;
+	}
+
+	dev_dbg(sor->dev, "link training succeeded\n");
 
 	/* compute configuration */
 	memset(&config, 0, sizeof(config));
