@@ -163,10 +163,17 @@ drm_connector_preferred_mode(struct drm_connector *connector, int width, int hei
 }
 
 static const struct drm_display_mode *
-drm_connector_first_mode(struct drm_connector *connector)
+drm_connector_first_mode(struct drm_connector *connector, int width, int height)
 {
-	return list_first_entry_or_null(&connector->modes,
-					struct drm_display_mode, head);
+	const struct drm_display_mode *mode;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (mode->hdisplay > width ||
+		    mode->vdisplay > height)
+			continue;
+		return mode;
+	}
+	return NULL;
 }
 
 static const struct drm_display_mode *
@@ -483,7 +490,7 @@ retry:
 		if (!modes[i]) {
 			mode_type = "first";
 			mode_replace(dev, &modes[i],
-				     drm_connector_first_mode(connector));
+				     drm_connector_first_mode(connector, width, height));
 		}
 
 		/*
@@ -732,7 +739,7 @@ retry:
 		if (!modes[i]) {
 			mode_type = "first";
 			mode_replace(dev, &modes[i],
-				     drm_connector_first_mode(connector));
+				     drm_connector_first_mode(connector, width, height));
 		}
 
 		/* last resort: use current mode */
@@ -866,7 +873,9 @@ int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, 
 
 	mutex_lock(&dev->mode_config.mutex);
 	for (i = 0; i < connector_count; i++)
-		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i], width, height);
+		total_modes_count += connectors[i]->funcs->fill_modes(connectors[i],
+								      dev->mode_config.max_width,
+								      dev->mode_config.max_height);
 	if (!total_modes_count)
 		drm_dbg_kms(dev, "No connectors reported connected with modes\n");
 	drm_client_connectors_enabled(connectors, connector_count, enabled);
