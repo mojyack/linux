@@ -447,7 +447,6 @@ static const struct pinmux_ops tegra_dpaux_pinmux_ops = {
 static int tegra_dpaux_probe(struct platform_device *pdev)
 {
 	struct tegra_dpaux *dpaux;
-	u32 value;
 	int err;
 
 	dpaux = devm_kzalloc(&pdev->dev, sizeof(*dpaux), GFP_KERNEL);
@@ -555,10 +554,8 @@ static int tegra_dpaux_probe(struct platform_device *pdev)
 	}
 #endif
 	/* enable and clear all interrupts */
-	value = DPAUX_INTR_AUX_DONE | DPAUX_INTR_IRQ_EVENT |
-		DPAUX_INTR_UNPLUG_EVENT | DPAUX_INTR_PLUG_EVENT;
-	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_EN_AUX);
-	tegra_dpaux_writel(dpaux, value, DPAUX_INTR_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_EN_AUX);
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_AUX);
 
 	mutex_lock(&dpaux_lock);
 	list_add_tail(&dpaux->list, &dpaux_list);
@@ -808,6 +805,9 @@ enum drm_connector_status drm_dp_aux_detect(struct drm_dp_aux *aux)
 int drm_dp_aux_enable(struct drm_dp_aux *aux)
 {
 	struct tegra_dpaux *dpaux = to_dpaux(aux);
+
+	/* SC7 clears these, and the pad is likewise reconfigured on every enable */
+	tegra_dpaux_writel(dpaux, DPAUX_INTR_ALL, DPAUX_INTR_EN_AUX);
 
 	return tegra_dpaux_pad_config(dpaux, DPAUX_PADCTL_FUNC_AUX);
 }
