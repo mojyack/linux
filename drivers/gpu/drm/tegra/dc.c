@@ -2271,14 +2271,14 @@ static void tegra_crtc_atomic_enable(struct drm_crtc *crtc,
 	u32 value;
 	int err;
 
-	/* apply PLL changes */
-	tegra_dc_set_clock_rate(dc, crtc_state);
-
 	err = host1x_client_resume(&dc->client);
 	if (err < 0) {
 		dev_err(dc->dev, "failed to resume: %d\n", err);
 		return;
 	}
+
+	/* apply PLL changes */
+	tegra_dc_set_clock_rate(dc, crtc_state);
 
 	/* initialize display controller */
 	if (dc->syncpt) {
