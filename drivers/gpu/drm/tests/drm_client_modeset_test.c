@@ -112,10 +112,34 @@ static void drm_test_pick_cmdline_res_1920_1080_60(struct kunit *test)
 	mutex_unlock(&drm->mode_config.mutex);
 	KUNIT_ASSERT_GT(test, ret, 0);
 
-	mode = drm_connector_pick_cmdline_mode(connector);
+	mode = drm_connector_pick_cmdline_mode(connector, 1920, 1080);
 	KUNIT_ASSERT_NOT_NULL(test, mode);
 
 	KUNIT_EXPECT_TRUE(test, drm_mode_equal(expected_mode, mode));
+}
+
+static void drm_test_pick_cmdline_too_large(struct kunit *test)
+{
+	struct drm_client_modeset_test_priv *priv = test->priv;
+	struct drm_device *drm = priv->drm;
+	struct drm_connector *connector = &priv->connector;
+	struct drm_cmdline_mode *cmdline_mode = &connector->cmdline_mode;
+	const struct drm_display_mode *mode;
+	const char *cmdline = "1920x1080@60";
+	int ret;
+
+	KUNIT_ASSERT_TRUE(test,
+			  drm_mode_parse_command_line_for_connector(cmdline,
+								    connector,
+								    cmdline_mode));
+
+	mutex_lock(&drm->mode_config.mutex);
+	ret = drm_helper_probe_single_connector_modes(connector, 4096, 4096);
+	mutex_unlock(&drm->mode_config.mutex);
+	KUNIT_ASSERT_GT(test, ret, 0);
+
+	mode = drm_connector_pick_cmdline_mode(connector, 1280, 720);
+	KUNIT_EXPECT_NULL(test, mode);
 }
 
 struct drm_connector_pick_cmdline_mode_test {
@@ -151,7 +175,7 @@ static void drm_test_pick_cmdline_named(struct kunit *test)
 	mutex_unlock(&drm->mode_config.mutex);
 	KUNIT_ASSERT_GT(test, ret, 0);
 
-	mode = drm_connector_pick_cmdline_mode(connector);
+	mode = drm_connector_pick_cmdline_mode(connector, 1920, 1080);
 	KUNIT_ASSERT_NOT_NULL(test, mode);
 
 	expected_mode = params->func(drm);
@@ -184,6 +208,7 @@ KUNIT_ARRAY_PARAM(drm_connector_pick_cmdline_mode,
 
 static struct kunit_case drm_test_pick_cmdline_tests[] = {
 	KUNIT_CASE(drm_test_pick_cmdline_res_1920_1080_60),
+	KUNIT_CASE(drm_test_pick_cmdline_too_large),
 	KUNIT_CASE_PARAM(drm_test_pick_cmdline_named,
 			 drm_connector_pick_cmdline_mode_gen_params),
 	{}
