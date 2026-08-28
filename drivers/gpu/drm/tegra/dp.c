@@ -310,7 +310,7 @@ int drm_dp_link_configure(struct drm_dp_aux *aux, struct drm_dp_link *link)
  * drm_dp_link_choose() - choose the lowest possible configuration for a mode
  * @link: DRM DP link object
  * @mode: DRM display mode
- * @info: DRM display information
+ * @bpc: bits per color the output will actually be driven at
  *
  * According to the eDP specification, a source should select a configuration
  * with the lowest number of lanes and the lowest possible link rate that can
@@ -321,7 +321,7 @@ int drm_dp_link_configure(struct drm_dp_aux *aux, struct drm_dp_link *link)
  */
 int drm_dp_link_choose(struct drm_dp_link *link,
 		       const struct drm_display_mode *mode,
-		       const struct drm_display_info *info)
+		       unsigned int bpc)
 {
 	/* available link symbol clock rates */
 	static const unsigned int rates[3] = { 162000, 270000, 540000 };
@@ -332,7 +332,7 @@ int drm_dp_link_choose(struct drm_dp_link *link,
 	unsigned int i, j;
 
 	/* bandwidth requirement */
-	requirement = mode->clock * info->bpc * 3;
+	requirement = mode->clock * bpc * 3;
 
 	for (i = 0; i < ARRAY_SIZE(lanes) && lanes[i] <= link->max_lanes; i++) {
 		for (j = 0; j < ARRAY_SIZE(rates) && rates[j] <= rate; j++) {

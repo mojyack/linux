@@ -2739,14 +2739,12 @@ static void tegra_sor_dp_enable(struct drm_encoder *encoder)
 	struct tegra_sor_config config;
 	struct tegra_sor_state *state;
 	struct drm_display_mode *mode;
-	struct drm_display_info *info;
 	unsigned int i;
 	u32 value;
 	int err;
 
 	state = to_sor_state(output->connector.state);
 	mode = &encoder->crtc->state->adjusted_mode;
-	info = &output->connector.display_info;
 
 	err = host1x_client_resume(&sor->client);
 	if (err < 0) {
@@ -2778,7 +2776,7 @@ static void tegra_sor_dp_enable(struct drm_encoder *encoder)
 
 	tegra_sor_filter_rates(sor);
 
-	err = drm_dp_link_choose(&sor->link, mode, info);
+	err = drm_dp_link_choose(&sor->link, mode, state->bpc);
 	if (err < 0) {
 		dev_err(sor->dev, "failed to choose link: %d\n", err);
 		return;
