@@ -318,6 +318,7 @@ struct tegra_xusb {
 	} fw;
 
 	bool suspended;
+	bool padctl_irq_masked;
 	struct tegra_xusb_context context;
 	u8 lp0_utmi_pad_mask;
 	int num_wakes;
@@ -1279,6 +1280,8 @@ static irqreturn_t tegra_xusb_padctl_irq(int irq, void *data)
 	mutex_lock(&tegra->lock);
 
 	if (tegra->suspended) {
+		disable_irq_nosync(irq);
+		tegra->padctl_irq_masked = true;
 		mutex_unlock(&tegra->lock);
 		return IRQ_HANDLED;
 	}
@@ -2465,6 +2468,12 @@ static __maybe_unused int tegra_xusb_resume(struct device *dev)
 			disable_irq_wake(tegra->wake_irqs[i]);
 	}
 	tegra->suspended = false;
+
+	if (tegra->padctl_irq_masked) {
+		tegra->padctl_irq_masked = false;
+		enable_irq(tegra->padctl_irq);
+	}
+
 	mutex_unlock(&tegra->lock);
 
 	pm_runtime_set_active(dev);
