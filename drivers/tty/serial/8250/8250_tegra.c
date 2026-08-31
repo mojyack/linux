@@ -14,6 +14,7 @@
 #include <linux/of.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/syscore_ops.h>
 
 #include "8250.h"
 
@@ -21,6 +22,10 @@ struct tegra_uart {
 	struct clk *clk;
 	struct reset_control *rst;
 	int line;
+	struct syscore syscore;
+	u32 dl;
+	u8 lcr;
+	u8 mcr;
 };
 
 static void tegra_uart_handle_break(struct uart_port *p)
@@ -39,6 +44,33 @@ static void tegra_uart_handle_break(struct uart_port *p)
 		udelay(1);
 	}
 }
+
+static bool tegra_uart_keeps_printing(struct uart_port *port)
+{
+	return uart_console(port) && !console_suspend_enabled;
+}
+
+/* Enough of a restore for output; runs before any device resume. */
+static void tegra_uart_syscore_resume(void *data)
+{
+	struct tegra_uart *uart = data;
+	struct uart_8250_port *port8250 = serial8250_get_port(uart->line);
+	struct uart_port *port = &port8250->port;
+
+	if (!tegra_uart_keeps_printing(port))
+		return;
+
+	serial_out(port8250, UART_IER, 0);
+	serial_out(port8250, UART_LCR, uart->lcr | UART_LCR_DLAB);
+	serial_dl_write(port8250, uart->dl);
+	serial_out(port8250, UART_LCR, uart->lcr);
+	serial_out(port8250, UART_FCR, port8250->fcr);
+	serial_out(port8250, UART_MCR, uart->mcr);
+}
+
+static const struct syscore_ops tegra_uart_syscore_ops = {
+	.resume = tegra_uart_syscore_resume,
+};
 
 static int tegra_uart_probe(struct platform_device *pdev)
 {
@@ -110,6 +142,10 @@ static int tegra_uart_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, uart);
 	uart->line = ret;
 
+	uart->syscore.ops = &tegra_uart_syscore_ops;
+	uart->syscore.data = uart;
+	register_syscore(&uart->syscore);
+
 	return 0;
 
 err_ctrl_assert:
@@ -124,6 +160,7 @@ static void tegra_uart_remove(struct platform_device *pdev)
 {
 	struct tegra_uart *uart = platform_get_drvdata(pdev);
 
+	unregister_syscore(&uart->syscore);
 	serial8250_unregister_port(uart->line);
 	reset_control_assert(uart->rst);
 	clk_disable_unprepare(uart->clk);
@@ -136,9 +173,17 @@ static int tegra_uart_suspend(struct device *dev)
 	struct uart_8250_port *port8250 = serial8250_get_port(uart->line);
 	struct uart_port *port = &port8250->port;
 
+	if (tegra_uart_keeps_printing(port)) {
+		uart->lcr = serial_in(port8250, UART_LCR);
+		uart->mcr = serial_in(port8250, UART_MCR);
+		serial_out(port8250, UART_LCR, uart->lcr | UART_LCR_DLAB);
+		uart->dl = serial_dl_read(port8250);
+		serial_out(port8250, UART_LCR, uart->lcr);
+	}
+
 	serial8250_suspend_port(uart->line);
 
-	if (!uart_console(port) || console_suspend_enabled)
+	if (!tegra_uart_keeps_printing(port))
 		clk_disable_unprepare(uart->clk);
 
 	return 0;
@@ -150,7 +195,7 @@ static int tegra_uart_resume(struct device *dev)
 	struct uart_8250_port *port8250 = serial8250_get_port(uart->line);
 	struct uart_port *port = &port8250->port;
 
-	if (!uart_console(port) || console_suspend_enabled)
+	if (!tegra_uart_keeps_printing(port))
 		clk_prepare_enable(uart->clk);
 
 	serial8250_resume_port(uart->line);
