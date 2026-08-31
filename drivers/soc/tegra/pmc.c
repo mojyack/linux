@@ -2375,6 +2375,16 @@ static const struct irq_domain_ops tegra_pmc_irq_domain_ops = {
 	.alloc = tegra_pmc_irq_alloc,
 };
 
+/* the wake status registers are write-1-to-clear */
+static void tegra210_pmc_clear_wake_status(struct tegra_pmc *pmc,
+					   unsigned long offset)
+{
+	u32 value = tegra_pmc_readl(pmc, offset);
+
+	if (value)
+		tegra_pmc_writel(pmc, value, offset);
+}
+
 static int tegra210_pmc_irq_set_wake(struct irq_data *data, unsigned int on)
 {
 	struct tegra_pmc *pmc = irq_data_get_irq_chip_data(data);
@@ -2384,12 +2394,14 @@ static int tegra210_pmc_irq_set_wake(struct irq_data *data, unsigned int on)
 	offset = data->hwirq / 32;
 	bit = data->hwirq % 32;
 
-	/* clear wake status */
-	tegra_pmc_writel(pmc, 0, PMC_SW_WAKE_STATUS);
-	tegra_pmc_writel(pmc, 0, PMC_SW_WAKE2_STATUS);
+	/* clear stale wake status, while arming only */
+	if (on) {
+		tegra210_pmc_clear_wake_status(pmc, PMC_SW_WAKE_STATUS);
+		tegra210_pmc_clear_wake_status(pmc, PMC_SW_WAKE2_STATUS);
 
-	tegra_pmc_writel(pmc, 0, PMC_WAKE_STATUS);
-	tegra_pmc_writel(pmc, 0, PMC_WAKE2_STATUS);
+		tegra210_pmc_clear_wake_status(pmc, PMC_WAKE_STATUS);
+		tegra210_pmc_clear_wake_status(pmc, PMC_WAKE2_STATUS);
+	}
 
 	/* enable PMC wake */
 	if (data->hwirq >= 32)
