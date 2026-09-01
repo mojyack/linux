@@ -77,11 +77,12 @@ struct tegra_gpio_bank {
 	u32 cnf[4];
 	u32 out[4];
 	u32 oe[4];
-	u32 int_enb[4];
 	u32 int_lvl[4];
 	u32 wake_enb[4];
 	u32 dbc_enb[4];
 #endif
+	/* shadow of GPIO_INT_ENB, owned by the irqchip mask/unmask */
+	u32 irq_enb[4];
 	u32 dbc_cnt[4];
 };
 
@@ -266,6 +267,21 @@ static void tegra_gpio_irq_ack(struct irq_data *d)
 	tegra_gpio_writel(tgi, 1 << GPIO_BIT(gpio), GPIO_INT_CLR(tgi, gpio));
 }
 
+static void tegra_gpio_shadow_int_enb(struct tegra_gpio_info *tgi,
+				      unsigned int gpio, bool enable)
+{
+	struct tegra_gpio_bank *bank = &tgi->bank_info[GPIO_BANK(gpio)];
+	unsigned int port = GPIO_PORT(gpio);
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&bank->lvl_lock[port], flags);
+	if (enable)
+		bank->irq_enb[port] |= BIT(GPIO_BIT(gpio));
+	else
+		bank->irq_enb[port] &= ~BIT(GPIO_BIT(gpio));
+	raw_spin_unlock_irqrestore(&bank->lvl_lock[port], flags);
+}
+
 static void tegra_gpio_irq_mask(struct irq_data *d)
 {
 	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
@@ -273,6 +289,7 @@ static void tegra_gpio_irq_mask(struct irq_data *d)
 	unsigned int gpio = d->hwirq;
 
 	tegra_gpio_mask_write(tgi, GPIO_MSK_INT_ENB(tgi, gpio), gpio, 0);
+	tegra_gpio_shadow_int_enb(tgi, gpio, false);
 	gpiochip_disable_irq(chip, gpio);
 }
 
@@ -284,6 +301,7 @@ static void tegra_gpio_irq_unmask(struct irq_data *d)
 
 	gpiochip_enable_irq(chip, gpio);
 	tegra_gpio_mask_write(tgi, GPIO_MSK_INT_ENB(tgi, gpio), gpio, 1);
+	tegra_gpio_shadow_int_enb(tgi, gpio, true);
 }
 
 static int tegra_gpio_irq_set_type(struct irq_data *d, unsigned int type)
@@ -449,6 +467,7 @@ static int tegra_gpio_populate_parent_fwspec(struct gpio_chip *chip,
 #ifdef CONFIG_PM_SLEEP
 static void tegra_gpio_restore(struct tegra_gpio_info *tgi)
 {
+	unsigned long flags;
 	unsigned int b, p;
 
 	for (b = 0; b < tgi->bank_count; b++) {
@@ -473,8 +492,11 @@ static void tegra_gpio_restore(struct tegra_gpio_info *tgi)
 					  GPIO_OE(tgi, gpio));
 			tegra_gpio_writel(tgi, bank->int_lvl[p],
 					  GPIO_INT_LVL(tgi, gpio));
-			tegra_gpio_writel(tgi, bank->int_enb[p],
+
+			raw_spin_lock_irqsave(&bank->lvl_lock[p], flags);
+			tegra_gpio_writel(tgi, bank->irq_enb[p],
 					  GPIO_INT_ENB(tgi, gpio));
+			raw_spin_unlock_irqrestore(&bank->lvl_lock[p], flags);
 		}
 	}
 }
@@ -525,8 +547,6 @@ static int tegra_gpio_suspend(struct device *dev)
 							bank->dbc_enb[p];
 			}
 
-			bank->int_enb[p] = tegra_gpio_readl(tgi,
-						GPIO_INT_ENB(tgi, gpio));
 			bank->int_lvl[p] = tegra_gpio_readl(tgi,
 						GPIO_INT_LVL(tgi, gpio));
 
