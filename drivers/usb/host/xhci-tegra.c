@@ -319,6 +319,7 @@ struct tegra_xusb {
 
 	bool suspended;
 	bool padctl_irq_masked;
+	bool id_work_deferred;
 	struct tegra_xusb_context context;
 	u8 lp0_utmi_pad_mask;
 	int num_wakes;
@@ -1369,6 +1370,15 @@ static void tegra_xhci_id_work(struct work_struct *work)
 	int ret;
 
 	dev_dbg(tegra->dev, "host mode %s\n", str_on_off(host_mode));
+
+	mutex_lock(&tegra->lock);
+	if (tegra->suspended) {
+		dev_dbg(tegra->dev, "suspended, deferring role work to resume\n");
+		tegra->id_work_deferred = true;
+		mutex_unlock(&tegra->lock);
+		return;
+	}
+	mutex_unlock(&tegra->lock);
 
 	if (host_mode)
 		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_HOST);
@@ -2472,6 +2482,11 @@ static __maybe_unused int tegra_xusb_resume(struct device *dev)
 	if (tegra->padctl_irq_masked) {
 		tegra->padctl_irq_masked = false;
 		enable_irq(tegra->padctl_irq);
+	}
+
+	if (tegra->id_work_deferred) {
+		tegra->id_work_deferred = false;
+		schedule_work(&tegra->id_work);
 	}
 
 	mutex_unlock(&tegra->lock);
