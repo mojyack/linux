@@ -24,6 +24,7 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/reset.h>
 #include <linux/seq_file.h>
 #include <linux/clk/tegra.h>
 
@@ -347,6 +348,7 @@ static const struct cec_adap_ops tegra_cec_ops = {
 static int tegra_cec_probe(struct platform_device *pdev)
 {
 	struct device *hdmi_dev;
+	struct reset_control *rst;
 	struct tegra_cec *cec;
 	struct resource *res;
 	int ret = 0;
@@ -400,6 +402,14 @@ static int tegra_cec_probe(struct platform_device *pdev)
 	if (ret) {
 		dev_err(&pdev->dev, "Unable to prepare clock for CEC\n");
 		return ret;
+	}
+
+	rst = devm_reset_control_get_optional_exclusive_deasserted(&pdev->dev,
+								   "cec");
+	if (IS_ERR(rst)) {
+		ret = dev_err_probe(&pdev->dev, PTR_ERR(rst),
+				    "Unable to deassert CEC reset\n");
+		goto err_clk;
 	}
 
 	/* set context info. */
