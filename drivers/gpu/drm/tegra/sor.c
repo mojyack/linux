@@ -2767,6 +2767,10 @@ static void tegra_sor_dp_enable(struct drm_encoder *encoder)
 	if (err < 0)
 		dev_err(sor->dev, "failed to enable DPAUX: %d\n", err);
 
+	/* mirrors tegra_sor_dp_disable(): AUX would only time out */
+	if (output->connector.status == connector_status_disconnected)
+		return;
+
 	/* on failure the link is reset, leaving nothing valid to program */
 	err = drm_dp_link_probe(sor->aux, &sor->link);
 	if (err < 0) {
