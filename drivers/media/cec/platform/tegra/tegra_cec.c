@@ -462,10 +462,10 @@ static void tegra_cec_remove(struct platform_device *pdev)
 {
 	struct tegra_cec *cec = platform_get_drvdata(pdev);
 
-	clk_disable_unprepare(cec->clk);
-
 	cec_notifier_cec_adap_unregister(cec->notifier, cec->adap);
 	cec_unregister_adapter(cec->adap);
+
+	clk_disable_unprepare(cec->clk);
 }
 
 #ifdef CONFIG_PM
