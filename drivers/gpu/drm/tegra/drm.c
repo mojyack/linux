@@ -23,6 +23,7 @@
 #include <drm/drm_ioctl.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_print.h>
+#include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
 #if IS_ENABLED(CONFIG_ARM_DMA_USE_IOMMU)
@@ -1348,6 +1349,9 @@ static int host1x_drm_suspend(struct device *dev)
 static int host1x_drm_resume(struct device *dev)
 {
 	struct drm_device *drm = dev_get_drvdata(dev);
+
+	/* HPD may have changed while suspended, with no interrupt to show it */
+	drm_helper_hpd_irq_event(drm);
 
 	return drm_mode_config_helper_resume(drm);
 }
