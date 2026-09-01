@@ -318,6 +318,7 @@ struct tegra_xusb {
 	} fw;
 
 	bool suspended;
+	bool id_work_deferred;
 	struct tegra_xusb_context context;
 	u8 lp0_utmi_pad_mask;
 	int num_wakes;
@@ -1363,9 +1364,20 @@ static void tegra_xhci_id_work(struct work_struct *work)
 						    tegra->otg_usb2_port);
 	bool host_mode = tegra->host_mode;
 	u32 status;
-	int ret;
+	int ret, err;
 
 	dev_dbg(tegra->dev, "host mode %s\n", str_on_off(host_mode));
+
+	/* Fails with -EACCES once system suspend has disabled runtime PM. */
+	err = pm_runtime_resume_and_get(tegra->dev);
+
+	mutex_lock(&tegra->lock);
+
+	if (err < 0 || tegra->suspended) {
+		dev_dbg(tegra->dev, "suspended, deferring role work to resume\n");
+		tegra->id_work_deferred = true;
+		goto unlock;
+	}
 
 	if (host_mode)
 		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_HOST);
@@ -1375,7 +1387,6 @@ static void tegra_xhci_id_work(struct work_struct *work)
 	tegra->otg_usb3_port = tegra_xusb_padctl_get_usb3_companion(tegra->padctl,
 								    tegra->otg_usb2_port);
 
-	pm_runtime_get_sync(tegra->dev);
 	if (tegra->soc->otg_set_port_power) {
 		if (host_mode) {
 			/* switch to host mode */
@@ -1414,7 +1425,12 @@ static void tegra_xhci_id_work(struct work_struct *work)
 			tegra_xhci_set_port_power(tegra, true, false);
 		}
 	}
-	pm_runtime_put_autosuspend(tegra->dev);
+
+unlock:
+	mutex_unlock(&tegra->lock);
+
+	if (err >= 0)
+		pm_runtime_put_autosuspend(tegra->dev);
 }
 
 #if IS_ENABLED(CONFIG_PM) || IS_ENABLED(CONFIG_PM_SLEEP)
@@ -2466,6 +2482,13 @@ static __maybe_unused int tegra_xusb_resume(struct device *dev)
 
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
+
+	mutex_lock(&tegra->lock);
+	if (tegra->id_work_deferred) {
+		tegra->id_work_deferred = false;
+		schedule_work(&tegra->id_work);
+	}
+	mutex_unlock(&tegra->lock);
 
 	return 0;
 }
