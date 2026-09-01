@@ -1371,6 +1371,12 @@ static void tegra_xhci_id_work(struct work_struct *work)
 
 	dev_dbg(tegra->dev, "host mode %s\n", str_on_off(host_mode));
 
+	ret = pm_runtime_resume_and_get(tegra->dev);
+	if (ret < 0) {
+		dev_err(tegra->dev, "failed to resume for role change: %d\n", ret);
+		return;
+	}
+
 	if (host_mode)
 		phy_set_mode_ext(phy, PHY_MODE_USB_OTG, USB_ROLE_HOST);
 	else
@@ -1379,7 +1385,6 @@ static void tegra_xhci_id_work(struct work_struct *work)
 	tegra->otg_usb3_port = tegra_xusb_padctl_get_usb3_companion(tegra->padctl,
 								    tegra->otg_usb2_port);
 
-	pm_runtime_get_sync(tegra->dev);
 	if (tegra->soc->otg_set_port_power) {
 		if (host_mode) {
 			/* switch to host mode */
@@ -1500,7 +1505,7 @@ static int tegra_xhci_id_notify(struct notifier_block *nb,
 
 	tegra->host_mode = usbphy->last_event == USB_EVENT_ID;
 
-	schedule_work(&tegra->id_work);
+	queue_work(system_freezable_wq, &tegra->id_work);
 
 	return NOTIFY_OK;
 }
@@ -1931,12 +1936,6 @@ static int tegra_xusb_probe(struct platform_device *pdev)
 		goto remove_usb3;
 	}
 
-	err = tegra_xusb_init_usb_phy(tegra);
-	if (err < 0) {
-		dev_err(&pdev->dev, "failed to init USB PHY: %d\n", err);
-		goto remove_usb3;
-	}
-
 	/* Enable wake for both USB 2.0 and USB 3.0 roothubs */
 	device_init_wakeup(&tegra->hcd->self.root_hub->dev, true);
 	device_init_wakeup(&xhci->shared_hcd->self.root_hub->dev, true);
@@ -1946,13 +1945,29 @@ static int tegra_xusb_probe(struct platform_device *pdev)
 	pm_runtime_mark_last_busy(tegra->dev);
 	pm_runtime_set_active(tegra->dev);
 
-	if (tegra->padctl_irq) {
+	if (tegra->padctl_irq)
 		device_init_wakeup(tegra->dev, true);
-		pm_runtime_enable(tegra->dev);
+
+	/* Runtime suspend uses the USB PHY state; hold it off until that is set up. */
+	pm_runtime_get_noresume(tegra->dev);
+	pm_runtime_enable(tegra->dev);
+
+	err = tegra_xusb_init_usb_phy(tegra);
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to init USB PHY: %d\n", err);
+		goto disable_rpm;
 	}
+
+	/* Without the padctl interrupt nothing wakes the controller from ELPG. */
+	if (tegra->padctl_irq)
+		pm_runtime_put_autosuspend(tegra->dev);
 
 	return 0;
 
+disable_rpm:
+	pm_runtime_disable(tegra->dev);
+	pm_runtime_put_noidle(tegra->dev);
+	device_init_wakeup(tegra->dev, false);
 remove_usb3:
 	usb_remove_hcd(xhci->shared_hcd);
 put_usb3:
@@ -2006,8 +2021,9 @@ static void tegra_xusb_remove(struct platform_device *pdev)
 	dma_free_coherent(&pdev->dev, tegra->fw.size, tegra->fw.virt,
 			  tegra->fw.phys);
 
-	if (tegra->padctl_irq)
-		pm_runtime_disable(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
+	if (!tegra->padctl_irq)
+		pm_runtime_put_noidle(&pdev->dev);
 
 	pm_runtime_put(&pdev->dev);
 
