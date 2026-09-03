@@ -11,7 +11,9 @@ maintainers:
   - Jon Hunter <jonathanh@nvidia.com>
 
 description: On Tegra210, firmware passes a binary representation of the
-  EMC frequency table via a reserved memory region.
+  EMC frequency table via a reserved memory region. The table ends at the
+  first entry with a zero revision, or at the end of the region if the
+  entries fill it.
 
 allOf:
   - $ref: reserved-memory.yaml

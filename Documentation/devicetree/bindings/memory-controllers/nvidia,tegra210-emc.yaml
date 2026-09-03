@@ -37,10 +37,20 @@ properties:
     const: 0
 
   memory-region:
-    maxItems: 1
-    description:
-      phandle to a reserved memory region describing the table of EMC
-      frequencies trained by the firmware
+    minItems: 1
+    items:
+      - description:
+          phandle to a reserved memory region describing the table of EMC
+          frequencies trained by the firmware
+      - description:
+          phandle to a second such table, with timings derated for high DRAM
+          temperature
+
+  memory-region-names:
+    minItems: 1
+    items:
+      - const: nominal
+      - const: derated
 
   nvidia,memory-controller:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -61,6 +71,9 @@ required:
   - clocks
   - clock-names
   - nvidia,memory-controller
+
+dependentRequired:
+  memory-region: [ memory-region-names ]
 
 unevaluatedProperties: false
 
@@ -89,6 +102,7 @@ examples:
         clock-names = "emc";
         interrupts = <GIC_SPI 78 IRQ_TYPE_LEVEL_HIGH>;
         memory-region = <&emc_table>;
+        memory-region-names = "nominal";
         nvidia,memory-controller = <&mc>;
         operating-points-v2 = <&dvfs_opp_table>;
 
