@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/rohm,bm92t36.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: ROHM BM92T36 USB Type-C and Power Delivery controller
+
+maintainers:
+  - mojyack <mojyack@gmail.com>
+
+description: |
+  The BM92T36 is a dual-role USB Type-C port controller with an integrated
+  USB Power Delivery 2.0 engine. It detects attach and orientation and
+  negotiates an initial contract by itself; contract requests, data role
+  swaps, VDMs and DisplayPort alternate mode entry are commands from the
+  host. Once DisplayPort is configured the controller drives the SuperSpeed
+  and SBU paths and the hot plug signal itself. Its alert line is level
+  triggered and active low.
+
+  The port's roles, its source capabilities and the sink capabilities it
+  advertises are provisioned in the part and cannot be changed by the
+  host. The connector describes what the board can take, which the host
+  uses for its own contract requests and for the charger's input limit.
+
+properties:
+  compatible:
+    const: rohm,bm92t36
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  connector:
+    type: object
+    $ref: /schemas/connector/usb-connector.yaml#
+    unevaluatedProperties: false
+    description:
+      The Type-C connector, a dual-role power and data port without a
+      preferred role. sink-pdos lists the fixed and variable supplies the
+      board can take, fixed 5 V first. The controller negotiates within the
+      sink capabilities provisioned in it before the host runs, so sink-pdos
+      must cover each of them at no less current, a fixed one by a fixed
+      supply at its voltage or a variable supply spanning it and a variable
+      one by a variable supply spanning its range. op-sink-microwatt is
+      the power the board needs to operate, and a source that cannot offer it
+      gets a request with Capability Mismatch set. vbus-supply sources VBUS
+      in the source role, at the source capabilities provisioned in the
+      controller. The DisplayPort alternate mode under altmodes, a DFP_D,
+      gives the pin assignments the board is wired for. port@0 leads to the
+      USB role switch of the high-speed path; the SuperSpeed and SBU paths
+      are switched by the controller and have no host-controlled endpoint.
+
+    properties:
+      compatible:
+        const: usb-c-connector
+
+      power-role:
+        const: dual
+
+      data-role:
+        const: dual
+
+      try-power-role: false
+
+      source-pdos: false
+
+    required:
+      - power-role
+      - data-role
+      - sink-pdos
+      - op-sink-microwatt
+      - ports
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - connector
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/usb/pd.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        typec@18 {
+            compatible = "rohm,bm92t36";
+            reg = <0x18>;
+            interrupt-parent = <&gpio>;
+            interrupts = <84 IRQ_TYPE_LEVEL_LOW>;
+
+            connector {
+                compatible = "usb-c-connector";
+                label = "USB-C";
+                power-role = "dual";
+                data-role = "dual";
+                vbus-supply = <&usb_otg_vbus>;
+                sink-pdos = <PDO_FIXED(5000, 2000, PDO_FIXED_USB_COMM)
+                             PDO_FIXED(9000, 2000, 0)
+                             PDO_FIXED(12000, 1500, 0)
+                             PDO_FIXED(15000, 1200, 0)
+                             PDO_VAR(5000, 15000, 1200)>;
+                op-sink-microwatt = <10000000>;
+
+                altmodes {
+                    displayport {
+                        svid = /bits/ 16 <0xff01>;
+                        /* DFP_D, receptacle, pin assignment D */
+                        vdo = <0x00000846>;
+                    };
+                };
+
+                ports {
+                    #address-cells = <1>;
+                    #size-cells = <0>;
+
+                    port@0 {
+                        reg = <0>;
+
+                        endpoint {
+                            remote-endpoint = <&usb2_0_ep>;
+                        };
+                    };
+                };
+            };
+        };
+    };
+...
