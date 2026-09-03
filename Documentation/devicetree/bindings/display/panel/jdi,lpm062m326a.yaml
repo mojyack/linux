@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/panel/jdi,lpm062m326a.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: JDI LPM062M326A 720x1280 6.2" DSI video mode panel
+
+maintainers:
+  - mojyack <mojyack@gmail.com>
+
+description:
+  The 6.2" panel of the Nintendo Switch (Erista). It is a four-lane DSI video
+  mode panel. Units ship with panels from several vendors that share this
+  compatible and are told apart at runtime by the DCS display ID.
+
+allOf:
+  - $ref: panel-common.yaml#
+
+properties:
+  compatible:
+    const: jdi,lpm062m326a
+
+  reg:
+    maxItems: 1
+
+  vdd1-supply:
+    description: Positive panel supply (AVDD).
+
+  vdd2-supply:
+    description: Negative panel supply (AVEE).
+
+  reset-gpios: true
+  backlight: true
+
+required:
+  - compatible
+  - reg
+  - vdd1-supply
+  - vdd2-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    dsi {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        panel@0 {
+            compatible = "jdi,lpm062m326a";
+            reg = <0>;
+
+            reset-gpios = <&gpio 170 GPIO_ACTIVE_HIGH>;
+            vdd1-supply = <&pavdd>;
+            vdd2-supply = <&navdd>;
+            backlight = <&backlight>;
+        };
+    };
+...
