@@ -44,6 +44,22 @@ properties:
     description: Reset GPIO (active-low)
     maxItems: 1
 
+  st,interrupt-enable-reg:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description:
+      Firmware register write issued right after the system reset, for firmware
+      that comes up with its interrupt output masked.
+    items:
+      - description: register address
+      - description: value to write
+
+  nintendo,switch-data-format:
+    type: boolean
+    description:
+      The firmware reports touch events in the layout used by the FTM4CD60D of
+      the Nintendo Switch, which packs the coordinates differently from the
+      layout every other known firmware uses.
+
 required:
   - compatible
   - reg
