@@ -27,6 +27,13 @@ properties:
       supported threshold warning temperature for MAX77621 are 120 degC and 140
       degC.
 
+  "#thermal-sensor-cells":
+    const: 0
+    description: |
+      The MAX77621 reports whether its junction is above the warning threshold,
+      so it can act as a thermal sensor. It has no readable temperature: the
+      zone reads the threshold itself once the alarm is raised.
+
   maxim,dvs-gpio:
     maxItems: 1
     description: |
