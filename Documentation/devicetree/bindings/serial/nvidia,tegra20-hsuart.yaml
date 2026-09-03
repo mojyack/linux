@@ -55,6 +55,30 @@ properties:
     description: Enable modem interrupts. Should be enable only if all 8 lines of UART controller
       are pinmuxed.
 
+  nvidia,invert-rxd:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description:
+      Indicate that the hardware attached to the controller inverts
+      the signal received on RXD, and that the controller should invert its input.
+
+  nvidia,invert-txd:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description:
+      Indicate that the hardware attached to the controller inverts
+      the signal transmitted on TXD, and that the controller should invert its output.
+
+  nvidia,invert-cts:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description:
+      Indicate that the hardware attached to the controller inverts
+      the CTS signal, and that the controller should invert its input.
+
+  nvidia,invert-rts:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description:
+      Indicate that the hardware attached to the controller inverts
+      the RTS signal, and that the controller should invert its output.
+
   nvidia,adjust-baud-rates:
     $ref: /schemas/types.yaml#/definitions/uint32-matrix
     description: |
@@ -103,6 +127,22 @@ required:
 
 allOf:
   - $ref: serial.yaml
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - nvidia,tegra20-hsuart
+              - nvidia,tegra30-hsuart
+          not:
+            contains:
+              const: nvidia,tegra124-hsuart
+    then:
+      properties:
+        nvidia,invert-rxd: false
+        nvidia,invert-txd: false
+        nvidia,invert-cts: false
+        nvidia,invert-rts: false
 
 unevaluatedProperties: false
 
