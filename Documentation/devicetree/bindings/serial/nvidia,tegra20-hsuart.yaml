@@ -55,6 +55,22 @@ properties:
     description: Enable modem interrupts. Should be enable only if all 8 lines of UART controller
       are pinmuxed.
 
+  nvidia,invert-rxd:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Invert the polarity of the received data line.
+
+  nvidia,invert-txd:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Invert the polarity of the transmitted data line.
+
+  nvidia,invert-cts:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Invert the polarity of the CTS line.
+
+  nvidia,invert-rts:
+    $ref: /schemas/types.yaml#/definitions/flag
+    description: Invert the polarity of the RTS line.
+
   nvidia,adjust-baud-rates:
     $ref: /schemas/types.yaml#/definitions/uint32-matrix
     description: |
