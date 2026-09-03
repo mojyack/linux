@@ -11,6 +11,13 @@ maintainers:
 
 allOf:
   - $ref: regulator.yaml#
+  - if:
+      properties:
+        compatible:
+          const: maxim,max8973
+    then:
+      properties:
+        "#thermal-sensor-cells": false
 
 properties:
   compatible:
@@ -26,6 +33,14 @@ properties:
       Please note that thermal functionality is only supported on MAX77621. The
       supported threshold warning temperature for MAX77621 are 120 degC and 140
       degC.
+
+  "#thermal-sensor-cells":
+    const: 0
+    description: |
+      The MAX77621 has no continuous temperature readout. It reports whether
+      its junction is above the warning threshold selected by
+      junction-warn-millicelsius, as a status bit and through its interrupt.
+      The device is a single sensor, so no cells are needed to identify it.
 
   maxim,dvs-gpio:
     maxItems: 1
@@ -124,6 +139,7 @@ examples:
             compatible = "maxim,max77621";
             reg = <0x1b>;
             interrupts = <1 IRQ_TYPE_LEVEL_LOW>;
+            #thermal-sensor-cells = <0>;
 
             regulator-always-on;
             regulator-boot-on;
