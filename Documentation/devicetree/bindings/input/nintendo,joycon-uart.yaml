@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/input/nintendo,joycon-uart.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Nintendo Joy-Con rail
+
+maintainers:
+  - mojyack <mojyack@gmail.com>
+
+description:
+  A side rail of the Nintendo Switch console. A Joy-Con attached to the rail
+  speaks the same reports it sends over USB and Bluetooth across an inverted
+  1 Mbaud UART, so the rail is described as a serial device attached to the
+  host UART it is wired to. Which half is present is discovered at runtime and
+  either half can be attached to either rail.
+
+properties:
+  compatible:
+    const: nintendo,joycon-uart
+
+  charge-gpios:
+    maxItems: 1
+    description:
+      Closes the charge switch of this rail.
+
+  charge-supply:
+    description:
+      The 5V rail the charge switch feeds from, shared with the other rail
+      and with the fan.
+
+required:
+  - compatible
+  - charge-gpios
+  - charge-supply
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/gpio/gpio.h>
+
+    serial {
+        game-controller {
+            compatible = "nintendo,joycon-uart";
+            charge-gpios = <&gpio 83 GPIO_ACTIVE_HIGH>;
+            charge-supply = <&vdd_5v0>;
+        };
+    };
+...
