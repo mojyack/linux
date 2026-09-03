@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/rohm,bm92t.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: ROHM BM92T USB Type-C and Power Delivery controller
+
+maintainers:
+  - mojyack <mojyack@gmail.com>
+
+description:
+  The BM92T family negotiates USB Power Delivery contracts on its own and
+  reports the result over I2C. It also carries DisplayPort alternate mode and,
+  on the Nintendo Switch, the vendor sequence that drives the dock.
+
+properties:
+  compatible:
+    const: rohm,bm92t
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  pd_bat_chg-supply:
+    description:
+      Charger input current regulator. It is set to the current the negotiated
+      contract allows.
+
+  vbus-supply:
+    description: VBUS regulator of the port, enabled while sourcing.
+
+  vbus-source-supply:
+    description:
+      Regulator feeding VBUS when the port sources power, if it is separate
+      from vbus-supply.
+
+  rohm,vconn-en-gpios:
+    maxItems: 1
+    description: Enables VCONN on the port.
+
+  rohm,dp-disable:
+    type: boolean
+    description:
+      The SBU pins do not carry DisplayPort on this board. Leave alternate mode
+      alone.
+
+  rohm,dp-alerts-enable:
+    type: boolean
+    description:
+      Let the controller raise an alert on every DisplayPort status change,
+      instead of only reading the status when the port is configured.
+
+  rohm,dp-lanes:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Number of SuperSpeed lanes wired to the DisplayPort source, which selects
+      the alternate mode pin assignment.
+    enum: [2, 4]
+    default: 2
+
+  rohm,dp-signal-toggle-on-resume:
+    type: boolean
+    description:
+      Toggle the dock's DisplayPort signal off and on when resuming, for docks
+      whose retimer does not come back on its own.
+
+  rohm,led-static-on-suspend:
+    type: boolean
+    description:
+      Hold the dock LED at a static dim level while suspended rather than
+      letting it breathe.
+
+  rohm,dock-power-limit-disable:
+    type: boolean
+    description:
+      Accept the advertised contract as-is instead of applying the Nintendo
+      dock power limits when the source identifies itself as a dock.
+
+  rohm,pd-5v-current-limit-ma:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Charge current limit for a 5V contract, in mA.
+    default: 2000
+
+  rohm,pd-9v-current-limit-ma:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Charge current limit for a 9V contract, in mA.
+    default: 2000
+
+  rohm,pd-12v-current-limit-ma:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Charge current limit for a 12V contract, in mA.
+    default: 1500
+
+  rohm,pd-15v-current-limit-ma:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Charge current limit for a 15V contract, in mA.
+    default: 1200
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description:
+      Connection to the USB role switch of the controller that owns the port.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - port
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        usb-pd@18 {
+            compatible = "rohm,bm92t";
+            reg = <0x18>;
+            interrupt-parent = <&gpio>;
+            interrupts = <84 IRQ_TYPE_LEVEL_LOW>;
+
+            pd_bat_chg-supply = <&charge_current>;
+            vbus-supply = <&usb_otg_vbus>;
+
+            rohm,dp-lanes = <2>;
+            rohm,pd-15v-current-limit-ma = <1200>;
+
+            port {
+                endpoint {
+                    remote-endpoint = <&usb2_0_ep>;
+                };
+            };
+        };
+    };
+...
