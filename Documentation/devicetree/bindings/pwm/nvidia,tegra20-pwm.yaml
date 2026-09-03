@@ -51,7 +51,10 @@ properties:
       - const: pwm
 
   "#pwm-cells":
-    const: 2
+    description:
+      Three cells for a board that wires a channel active-low, whose inverted
+      polarity the driver emulates; two otherwise.
+    enum: [2, 3]
 
   pinctrl-names:
     items:
