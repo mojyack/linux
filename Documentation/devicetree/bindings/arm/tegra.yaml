@@ -228,6 +228,10 @@ properties:
           - const: nvidia,p2894-0050-a08
           - const: nvidia,darcy
           - const: nvidia,tegra210
+      - description: Nintendo Switch (Erista)
+        items:
+          - const: nintendo,switch
+          - const: nvidia,tegra210
       - description: Google Pixel C
         items:
           - const: google,smaug-rev8
