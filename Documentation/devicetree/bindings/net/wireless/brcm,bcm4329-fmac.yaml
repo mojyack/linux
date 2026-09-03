@@ -50,6 +50,7 @@ properties:
       - enum:
           - brcm,bcm4329-fmac
           - pci14e4,43dc  # BCM4355
+          - pci14e4,43ec  # BCM4356
           - pci14e4,4464  # BCM4364
           - pci14e4,4488  # BCM4377
           - pci14e4,4425  # BCM4378
