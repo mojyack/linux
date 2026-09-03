@@ -37,10 +37,22 @@ properties:
     const: 0
 
   memory-region:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description:
+          phandle to a reserved memory region describing the table of EMC
+          frequencies trained by the firmware
+      - description:
+          phandle to a second such table, derated for a hot device
+
+  memory-region-names:
     description:
-      phandle to a reserved memory region describing the table of EMC
-      frequencies trained by the firmware
+      The driver looks the regions up by name, so a device tree that describes
+      one has to name it.
+    minItems: 1
+    items:
+      - const: nominal
+      - const: derated
 
   nvidia,memory-controller:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -89,6 +101,7 @@ examples:
         clock-names = "emc";
         interrupts = <GIC_SPI 78 IRQ_TYPE_LEVEL_HIGH>;
         memory-region = <&emc_table>;
+        memory-region-names = "nominal";
         nvidia,memory-controller = <&mc>;
         operating-points-v2 = <&dvfs_opp_table>;
 
