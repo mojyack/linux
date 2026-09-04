@@ -2265,8 +2265,8 @@ static void __input_unregister_device(struct input_dev *dev)
 		input_wakeup_procfs_readers();
 	}
 
-	if (dev->ff && dev->ff->stop)
-		dev->ff->stop(dev->ff);
+	/* The driver that provided the methods may go away once this returns. */
+	input_ff_destroy(dev);
 
 	device_del(&dev->dev);
 }
