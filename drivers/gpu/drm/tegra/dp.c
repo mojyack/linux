@@ -428,7 +428,7 @@ static int drm_dp_link_apply_training(struct drm_dp_link *link)
 	}
 
 	/* write currently selected post-cursor level (if supported) */
-	if (link->revision >= 0x12 && link->rate == 540000) {
+	if (link->caps.tps3_supported && link->rate == 540000) {
 		values[0] = values[1] = 0;
 
 		for (i = 0; i < lanes; i++)
