@@ -121,7 +121,7 @@ int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
 
 	brcmf_dbg(INFO, "%s LPO clock\n", clk ? "enable" : "no");
 
-	if (!np || !of_device_is_compatible(np, "brcm,bcm4329-fmac"))
+	if (!np)
 		return 0;
 
 	err = brcmf_of_get_country_codes(dev, settings);
@@ -132,7 +132,8 @@ int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
 	if (err == -EPROBE_DEFER)
 		return err;
 
-	if (bus_type != BRCMF_BUSTYPE_SDIO)
+	if (bus_type != BRCMF_BUSTYPE_SDIO ||
+	    !of_device_is_compatible(np, "brcm,bcm4329-fmac"))
 		return 0;
 
 	if (of_property_read_u32(np, "brcm,drive-strength", &val) == 0)
