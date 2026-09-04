@@ -1320,11 +1320,9 @@ static int tegra_pcie_phys_get_legacy(struct tegra_pcie *pcie)
 	int err;
 
 	pcie->phy = devm_phy_optional_get(dev, "pcie");
-	if (IS_ERR(pcie->phy)) {
-		err = PTR_ERR(pcie->phy);
-		dev_err(dev, "failed to get PHY: %d\n", err);
-		return err;
-	}
+	if (IS_ERR(pcie->phy))
+		return dev_err_probe(dev, PTR_ERR(pcie->phy),
+				     "failed to get PHY\n");
 
 	err = phy_init(pcie->phy);
 	if (err < 0) {
@@ -1368,10 +1366,10 @@ static int tegra_pcie_port_get_phys(struct tegra_pcie_port *port)
 
 	for (i = 0; i < port->lanes; i++) {
 		phy = devm_of_phy_optional_get_index(dev, port->np, "pcie", i);
-		if (IS_ERR(phy)) {
-			dev_err(dev, "failed to get PHY#%u: %pe\n", i, phy);
-			return PTR_ERR(phy);
-		}
+		if (IS_ERR(phy))
+			return dev_err_probe(dev, PTR_ERR(phy),
+					     "failed to get PHY#%u of %pOF\n",
+					     i, port->np);
 
 		err = phy_init(phy);
 		if (err < 0) {
@@ -1437,16 +1435,12 @@ static int tegra_pcie_get_resources(struct tegra_pcie *pcie)
 	int err;
 
 	err = tegra_pcie_clocks_get(pcie);
-	if (err) {
-		dev_err(dev, "failed to get clocks: %d\n", err);
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err, "failed to get clocks\n");
 
 	err = tegra_pcie_resets_get(pcie);
-	if (err) {
-		dev_err(dev, "failed to get resets: %d\n", err);
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err, "failed to get resets\n");
 
 	pcie->pmc = devm_tegra_pmc_get(dev);
 	if (IS_ERR(pcie->pmc))
@@ -1455,10 +1449,8 @@ static int tegra_pcie_get_resources(struct tegra_pcie *pcie)
 
 	if (soc->program_uphy) {
 		err = tegra_pcie_phys_get(pcie);
-		if (err < 0) {
-			dev_err(dev, "failed to get PHYs: %d\n", err);
+		if (err < 0)
 			return err;
-		}
 	}
 
 	pcie->pads = devm_platform_ioremap_resource_byname(pdev, "pads");
@@ -1476,7 +1468,8 @@ static int tegra_pcie_get_resources(struct tegra_pcie *pcie)
 	/* request configuration space, but remap later, on demand */
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cs");
 	if (!res) {
-		err = -EADDRNOTAVAIL;
+		err = dev_err_probe(dev, -EADDRNOTAVAIL,
+				    "failed to get configuration space\n");
 		goto phys_put;
 	}
 
@@ -2602,10 +2595,8 @@ static int tegra_pcie_probe(struct platform_device *pdev)
 		return err;
 
 	err = tegra_pcie_get_resources(pcie);
-	if (err < 0) {
-		dev_err(dev, "failed to request resources: %d\n", err);
+	if (err < 0)
 		return err;
-	}
 
 	err = tegra_pcie_msi_setup(pcie);
 	if (err < 0) {
