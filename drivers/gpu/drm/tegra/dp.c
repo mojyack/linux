@@ -428,7 +428,7 @@ static int drm_dp_link_apply_training(struct drm_dp_link *link)
 	}
 
 	/* write currently selected post-cursor level (if supported) */
-	if (link->revision >= 0x12 && link->rate == 540000) {
+	if (link->caps.tps3_supported && link->rate == 540000) {
 		values[0] = values[1] = 0;
 
 		for (i = 0; i < lanes; i++)
@@ -484,14 +484,16 @@ static void drm_dp_link_get_adjustments(struct drm_dp_link *link,
 {
 	struct drm_dp_link_train_set *adjust = &link->train.adjust;
 	unsigned int i;
-	u8 post_cursor;
+	u8 post_cursor = 0;
 	int err;
 
-	err = drm_dp_dpcd_read(link->aux, DP_ADJUST_REQUEST_POST_CURSOR2,
-			       &post_cursor, sizeof(post_cursor));
-	if (err < 0) {
-		DRM_ERROR("failed to read post_cursor2: %d\n", err);
-		post_cursor = 0;
+	if (link->caps.tps3_supported) {
+		err = drm_dp_dpcd_read(link->aux, DP_ADJUST_REQUEST_POST_CURSOR2,
+				       &post_cursor, sizeof(post_cursor));
+		if (err < 0) {
+			DRM_ERROR("failed to read post_cursor2: %d\n", err);
+			post_cursor = 0;
+		}
 	}
 
 	for (i = 0; i < link->lanes; i++) {
