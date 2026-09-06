@@ -48,6 +48,11 @@ static int nouveau_ttm_tt_bind(struct ttm_device *bdev, struct ttm_tt *ttm,
 			       struct ttm_resource *reg);
 static void nouveau_ttm_tt_unbind(struct ttm_device *bdev, struct ttm_tt *ttm);
 
+static unsigned int nouveau_wb_unmap_kb = 64;
+module_param_named(wb_unmap_kb, nouveau_wb_unmap_kb, uint, 0644);
+MODULE_PARM_DESC(wb_unmap_kb,
+		 "minimum bo size in KiB whose writeback also drops the CPU mapping (0 disables)");
+
 /*
  * NV10-NV40 tiling helpers
  */
@@ -801,8 +806,21 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 		return ret;
 
 	/* A writable userspace mapping can be written without telling us. */
-	if (nvbo->cpu_dirty || nvbo->cpu_mapped)
+	if (nvbo->cpu_dirty || nvbo->cpu_mapped) {
+		struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
+		struct ttm_tt *ttm_dma = nvbo->bo.ttm;
+
+		/* Unmap before the writeback, so a racing write refaults. */
+		if (nouveau_wb_unmap_kb && nvbo->cpu_mapped &&
+		    nvbo->bo.base.size >= ((size_t)nouveau_wb_unmap_kb << 10) &&
+		    !nvbo->force_coherent && ttm_dma && ttm_dma->dma_address &&
+		    dma_dev_need_sync(drm->dev->dev)) {
+			nvbo->cpu_mapped = false;
+			ttm_bo_unmap_virtual(&nvbo->bo);
+		}
+
 		nouveau_bo_sync_for_device(nvbo);
+	}
 
 	return 0;
 }
