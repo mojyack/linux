@@ -16,6 +16,7 @@
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <dt-bindings/sound/qcom,q6asm.h>
 #include <dt-bindings/sound/qcom,q6voice.h>
+#include <dt-bindings/usb/pd.h>
 
 #include "sdm845.dtsi"
 #include "sdm845-wcd9340.dtsi"
@@ -963,6 +964,42 @@
 	status = "okay";
 };
 
+&pmi8998_typec {
+	vdd-pdphy-supply = <&vreg_l24a_3p075>;
+
+	status = "okay";
+
+	connector {
+		compatible = "usb-c-connector";
+
+		power-role = "dual";
+		data-role = "dual";
+		self-powered;
+
+		source-pdos = <PDO_FIXED(5000, 1500, PDO_FIXED_DUAL_ROLE |
+					 PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>;
+		sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+					PDO_FIXED_USB_COMM | PDO_FIXED_DATA_SWAP)>;
+		op-sink-microwatt = <10000000>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/* USB3 and DP are unused on this device, so only the
+			 * high-speed data role is switched here.
+			 */
+			port@0 {
+				reg = <0>;
+
+				pmi8998_hs_in: endpoint {
+					remote-endpoint = <&usb_1_dwc3_hs>;
+				};
+			};
+		};
+	};
+};
+
 &q6afedai {
 	dai@22 {
 		reg = <QUATERNARY_MI2S_RX>;
@@ -1244,10 +1281,8 @@
 };
 
 &usb_1_dwc3 {
-	/*
-	 * We don't have the capability to switch modes yet.
-	 */
-	dr_mode = "peripheral";
+	dr_mode = "otg";
+	usb-role-switch;
 
 	/* fastest mode for USB 2 */
 	maximum-speed = "high-speed";
@@ -1255,6 +1290,10 @@
 	/* Remove USB3 phy as it's unused on this device. */
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
+};
+
+&usb_1_dwc3_hs {
+	remote-endpoint = <&pmi8998_hs_in>;
 };
 
 &usb_1_hsphy {
