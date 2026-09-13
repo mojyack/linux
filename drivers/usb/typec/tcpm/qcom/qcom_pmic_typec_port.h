@@ -69,6 +69,7 @@ struct pmic_typec_port {
 /* API */
 
 extern const struct pmic_typec_port_resources pm8150b_port_res;
+extern const struct pmic_typec_port_resources pmi8998_port_res;
 
 const char *qcom_pmic_typec_cc_to_name(enum typec_cc_status cc);
 
@@ -83,6 +84,12 @@ int qcom_pmic_typec_port_init(struct platform_device *pdev,
 			      struct pmic_typec_port *pmic_typec_port);
 
 int qcom_pmic_typec_port_pm8150b_probe(struct platform_device *pdev,
+				       struct pmic_typec *tcpm,
+				       const struct pmic_typec_port_resources *res,
+				       struct regmap *regmap,
+				       u32 base);
+
+int qcom_pmic_typec_port_pmi8998_probe(struct platform_device *pdev,
 				       struct pmic_typec *tcpm,
 				       const struct pmic_typec_port_resources *res,
 				       struct regmap *regmap,

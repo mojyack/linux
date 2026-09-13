@@ -4,5 +4,6 @@ obj-$(CONFIG_TYPEC_QCOM_PMIC)		+= qcom_pmic_tcpm.o
 qcom_pmic_tcpm-y			+= qcom_pmic_typec.o \
 					   qcom_pmic_typec_port.o \
 					   qcom_pmic_typec_port_pm8150b.o \
+					   qcom_pmic_typec_port_pmi8998.o \
 					   qcom_pmic_typec_pdphy.o \
 					   qcom_pmic_typec_pdphy_stub.o \
