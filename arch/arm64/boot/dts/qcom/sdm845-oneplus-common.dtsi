@@ -956,6 +956,13 @@
 	status = "okay";
 };
 
+&pmi8998_vbus {
+	regulator-min-microamp = <250000>;
+	regulator-max-microamp = <1500000>;
+
+	status = "okay";
+};
+
 &q6afedai {
 	dai@22 {
 		reg = <QUATERNARY_MI2S_RX>;
