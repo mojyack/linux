@@ -92,6 +92,23 @@ properties:
 
   ieee80211-freq-limit: true
 
+  local-mac-address: true
+
+  mac-address: true
+
+  nvmem-cells:
+    minItems: 1
+    maxItems: 3
+    description:
+      Reference to nvmem cells holding per-device data, see
+      nvmem-cell-names for the supported cells.
+
+  nvmem-cell-names:
+    minItems: 1
+    maxItems: 3
+    items:
+      enum: [ calibration, pre-calibration, mac-address ]
+
   qcom,calibration-data:
     $ref: /schemas/types.yaml#/definitions/uint8-array
     description:
