@@ -17,6 +17,7 @@ properties:
     oneOf:
       - enum:
           - qcom,pmi632-typec
+          - qcom,pmi8998-typec
           - qcom,pm8150b-typec
       - items:
           - enum:
@@ -39,44 +40,15 @@ properties:
     maxItems: 2
 
   interrupts:
+    description:
+      Type-C block interrupts followed by the PD PHY interrupts, if the PMIC
+      has a PD PHY. See interrupt-names for the per-compatible ordering.
     minItems: 8
-    items:
-      - description: Type-C CC attach notification, VBUS error, tCCDebounce done
-      - description: Type-C VCONN powered
-      - description: Type-C CC state change
-      - description: Type-C VCONN over-current
-      - description: Type-C VBUS state change
-      - description: Type-C Attach/detach notification
-      - description: Type-C Legacy cable detect
-      - description: Type-C Try.Src Try.Snk state change
-      - description: Power Domain Signal TX - HardReset or CableReset signal TX
-      - description: Power Domain Signal RX - HardReset or CableReset signal RX
-      - description: Power Domain TX complete
-      - description: Power Domain RX complete
-      - description: Power Domain TX fail
-      - description: Power Domain TX message discard
-      - description: Power Domain RX message discard
-      - description: Power Domain Fast Role Swap event
+    maxItems: 16
 
   interrupt-names:
     minItems: 8
-    items:
-      - const: or-rid-detect-change
-      - const: vpd-detect
-      - const: cc-state-change
-      - const: vconn-oc
-      - const: vbus-change
-      - const: attach-detach
-      - const: legacy-cable-detect
-      - const: try-snk-src-detect
-      - const: sig-tx
-      - const: sig-rx
-      - const: msg-tx
-      - const: msg-rx
-      - const: msg-tx-failed
-      - const: msg-tx-discarded
-      - const: msg-rx-discarded
-      - const: fr-swap
+    maxItems: 16
 
   vdd-vbus-supply:
     description: VBUS power supply.
@@ -101,8 +73,7 @@ allOf:
       properties:
         compatible:
           contains:
-            enum:
-              - qcom,pmi632-typec
+            const: qcom,pmi632-typec
     then:
       properties:
         reg:
@@ -110,16 +81,70 @@ allOf:
         interrupts:
           maxItems: 8
         interrupt-names:
-          maxItems: 8
+          items:
+            - const: or-rid-detect-change
+            - const: vpd-detect
+            - const: cc-state-change
+            - const: vconn-oc
+            - const: vbus-change
+            - const: attach-detach
+            - const: legacy-cable-detect
+            - const: try-snk-src-detect
         vdd-pdphy-supply: false
-    else:
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,pmi8998-typec
+    then:
+      properties:
+        reg:
+          maxItems: 2
+        interrupts:
+          maxItems: 8
+        interrupt-names:
+          items:
+            - const: type-c-change
+            - const: sig-tx
+            - const: sig-rx
+            - const: msg-tx
+            - const: msg-rx
+            - const: msg-tx-failed
+            - const: msg-tx-discarded
+            - const: msg-rx-discarded
+      required:
+        - vdd-pdphy-supply
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: qcom,pm8150b-typec
+    then:
       properties:
         reg:
           maxItems: 2
         interrupts:
           minItems: 16
         interrupt-names:
-          maxItems: 16
+          items:
+            - const: or-rid-detect-change
+            - const: vpd-detect
+            - const: cc-state-change
+            - const: vconn-oc
+            - const: vbus-change
+            - const: attach-detach
+            - const: legacy-cable-detect
+            - const: try-snk-src-detect
+            - const: sig-tx
+            - const: sig-rx
+            - const: msg-tx
+            - const: msg-rx
+            - const: msg-tx-failed
+            - const: msg-tx-discarded
+            - const: msg-rx-discarded
+            - const: fr-swap
       required:
         - vdd-pdphy-supply
 
