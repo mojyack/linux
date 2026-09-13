@@ -35,6 +35,15 @@ static const struct qcom_usb_vbus_data pm8150b_data = {
 	.n_current_limits = ARRAY_SIZE(pm8150b_curr_table),
 };
 
+static const unsigned int pmi8998_curr_table[] = {
+	250000, 500000, 750000, 1000000, 1250000, 1500000, 1750000, 2000000,
+};
+
+static const struct qcom_usb_vbus_data pmi8998_data = {
+	.curr_table = pmi8998_curr_table,
+	.n_current_limits = ARRAY_SIZE(pmi8998_curr_table),
+};
+
 static const struct regulator_ops qcom_usb_vbus_reg_ops = {
 	.enable = regulator_enable_regmap,
 	.disable = regulator_disable_regmap,
@@ -114,6 +123,7 @@ static int qcom_usb_vbus_regulator_probe(struct platform_device *pdev)
 
 static const struct of_device_id qcom_usb_vbus_regulator_match[] = {
 	{ .compatible = "qcom,pm8150b-vbus-reg", .data = &pm8150b_data },
+	{ .compatible = "qcom,pmi8998-vbus-reg", .data = &pmi8998_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, qcom_usb_vbus_regulator_match);
