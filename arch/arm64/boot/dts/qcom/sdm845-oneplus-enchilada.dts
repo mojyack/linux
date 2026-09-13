@@ -130,3 +130,10 @@
 	qcom,micbias3-microvolt = <1800000>;
 	qcom,micbias4-microvolt = <1800000>;
 };
+
+/* Per-unit address, not valid for any other device. The factory MAC lives in
+ * /persist/wlan_mac.bin, which this unit no longer has.
+ */
+&wifi {
+	local-mac-address = [96 2a 56 07 0b 9c];
+};
