@@ -809,8 +809,10 @@ static const struct smb_init_register smb5_init_seq[] = {
 /* Init sequence derived from vendor downstream driver */
 static const struct smb_init_register smb2_init_seq[] = {
 	/*
-	 * By default configure us as an upstream facing port
-	 * FIXME: This will be handled by the type-c driver
+	 * Leave the Type-C state machine as a DRP - the role bits are clear -
+	 * with VCONN under software control and switched off. The Type-C
+	 * driver programs the same bits when it is present, but a board may
+	 * have this charger and no Type-C node, so set them up here as well.
 	 */
 	{ .addr = TYPE_C_INTRPT_ENB_SOFTWARE_CTRL,
 	  .mask = TYPEC_POWER_ROLE_CMD_MASK | SMB2_VCONN_EN_SRC_BIT |
