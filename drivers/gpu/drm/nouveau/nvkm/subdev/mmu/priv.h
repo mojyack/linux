@@ -41,6 +41,7 @@ struct nvkm_mmu_func {
 
 	const u8 *(*kind)(struct nvkm_mmu *, int *count, u8 *invalid);
 	bool kind_sys;
+	bool comp_sys;
 
 	int (*promote_vmm)(struct nvkm_vmm *);
 };
