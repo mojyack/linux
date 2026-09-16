@@ -1412,14 +1412,16 @@ next:
 	return 0;
 }
 
-/* Without VRAM, the L2 may still hold dirty lines for pages being released. */
+/* Without VRAM, the L2 may still hold lines for pages being released. */
 static void
 nvkm_vmm_unmap_flush(struct nvkm_vmm *vmm)
 {
 	struct nvkm_device *device = vmm->mmu->subdev.device;
 
-	if (device->ltc && !device->fb->ram)
+	if (device->ltc && !device->fb->ram) {
 		nvkm_ltc_flush(device->ltc);
+		nvkm_ltc_invalidate(device->ltc);
+	}
 }
 
 void

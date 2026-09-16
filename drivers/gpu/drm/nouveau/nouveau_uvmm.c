@@ -151,6 +151,8 @@ nouveau_uvmm_vmm_map(struct nouveau_uvmm *uvmm,
 		args.gf100.version = 0;
 		if (mem->mem.type & NVIF_MEM_VRAM)
 			args.gf100.vol = 0;
+		else if (nouveau_mem_l2_cacheable(mem))
+			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;
 		args.gf100.ro = 0;

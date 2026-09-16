@@ -35,6 +35,7 @@ bool nouveau_mem_compatible(struct ttm_resource *res,
 int nouveau_mem_vram(struct ttm_resource *, bool contig, u8 page);
 int nouveau_mem_host(struct ttm_resource *, struct ttm_tt *);
 void nouveau_mem_fini(struct nouveau_mem *);
+bool nouveau_mem_l2_cacheable(struct nouveau_mem *);
 int nouveau_mem_map(struct nouveau_mem *, struct nvif_vmm *, struct nvif_vma *);
 int
 nouveau_mem_map_fixed(struct nouveau_mem *mem,

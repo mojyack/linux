@@ -863,6 +863,9 @@ revalidate:
 		}
 	}
 
+	if (drm->l2sysmem && (atomic_xchg(&drm->l2_dirty, 0) || do_reloc))
+		nvkm_ltc_invalidate(nvxx_device(drm)->ltc);
+
 	if (chan->user.oclass >= NV50_CHANNEL_GPFIFO) {
 		ret = nvif_chan_gpfifo_wait(&chan->chan, req->nr_push + 1, 16);
 		if (ret) {

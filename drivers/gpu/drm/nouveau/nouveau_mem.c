@@ -33,6 +33,21 @@
 #include <nvif/if900b.h>
 #include <nvif/if900d.h>
 
+int nouveau_l2sysmem = -1;
+module_param_named(l2sysmem, nouveau_l2sysmem, int, 0400);
+MODULE_PARM_DESC(l2sysmem,
+		 "let the GPU L2 cache system memory (-1 = auto, default)");
+
+bool
+nouveau_mem_l2_cacheable(struct nouveau_mem *mem)
+{
+	return mem->drm->l2sysmem && mem->base.bo &&
+	       !nouveau_bo(mem->base.bo)->force_coherent &&
+	       !mem->base.bo->base.dma_buf &&
+	       !mem->base.bo->base.import_attach &&
+	       !(mem->mem.type & (NVIF_MEM_COHERENT | NVIF_MEM_UNCACHED));
+}
+
 int
 nouveau_mem_map(struct nouveau_mem *mem,
 		struct nvif_vmm *vmm, struct nvif_vma *vma)
@@ -59,6 +74,8 @@ nouveau_mem_map(struct nouveau_mem *mem,
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
 		if (mem->mem.type & NVIF_MEM_VRAM)
+			args.gf100.vol = 0;
+		else if (nouveau_mem_l2_cacheable(mem))
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;

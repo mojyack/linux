@@ -27,6 +27,9 @@
 
 #include "nouveau_drv.h"
 #include "nouveau_gem.h"
+#include "nouveau_mem.h"
+#include "nouveau_uvmm.h"
+#include "nouveau_vmm.h"
 
 struct sg_table *nouveau_gem_prime_get_sg_table(struct drm_gem_object *obj)
 {
@@ -115,6 +118,7 @@ struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
 		.gfp_retry_mayfail = true,
 		.allow_res_evict = false,
 	};
+	struct nouveau_drm *drm = nouveau_drm(gobj->dev);
 	int ret;
 
 	if (nvbo->no_share)
@@ -123,6 +127,20 @@ struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
 	ret = ttm_bo_setup_export(&nvbo->bo, &ctx);
 	if (ret)
 		return ERR_PTR(ret);
+
+	/* An importer can't see the GPU L2, so redo mappings made before now. */
+	if (drm->l2sysmem && !ttm_bo_reserve(&nvbo->bo, false, false, NULL)) {
+		struct ttm_resource *res = nvbo->bo.resource;
+		struct nouveau_vma *vma;
+
+		if (res && res->mem_type != TTM_PL_SYSTEM) {
+			list_for_each_entry(vma, &nvbo->vma_list, head)
+				nouveau_vma_map(vma, nouveau_mem(res));
+			nouveau_uvmm_bo_map_all(nvbo, nouveau_mem(res));
+			nvkm_ltc_flush(nvxx_device(drm)->ltc);
+		}
+		ttm_bo_unreserve(&nvbo->bo);
+	}
 
 	return drm_gem_prime_export(gobj, flags);
 }

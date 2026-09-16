@@ -11,6 +11,9 @@
 #include "nouveau_uvmm.h"
 
 #include <nvif/class.h>
+#include <nvif/push906f.h>
+
+#include <nvhw/class/clc36f.h>
 
 /**
  * DOC: Overview
@@ -125,13 +128,45 @@ nouveau_exec_job_armed_submit(struct nouveau_job *job,
 	drm_gpuvm_exec_unlock(vme);
 }
 
+static int
+nouveau_exec_l2_invalidate(struct nouveau_channel *chan)
+{
+	struct nvif_push *push = &chan->chan.push;
+	u32 op = NVDEF(NVC36F, MEM_OP_D, OPERATION, L2_SYSMEM_INVALIDATE);
+	int ret;
+
+	ret = PUSH_WAIT(push, 5);
+	if (ret)
+		return ret;
+
+	/* Maxwell moved MEM_OP_A/B to C/D, Volta wants all four. */
+	if (chan->user.oclass >= VOLTA_CHANNEL_GPFIFO_A)
+		PUSH_NVSQ(push, NV906F, 0x0028, 0, 0x002c, 0, 0x0030, 0, 0x0034, op);
+	else if (chan->user.oclass >= MAXWELL_CHANNEL_GPFIFO_A)
+		PUSH_NVSQ(push, NV906F, 0x0030, 0, 0x0034, op);
+	else
+		PUSH_NVSQ(push, NV906F, 0x0028, 0, 0x002c, op);
+
+	PUSH_KICK(push);
+	return 0;
+}
+
 static struct dma_fence *
 nouveau_exec_job_run(struct nouveau_job *job)
 {
 	struct nouveau_exec_job *exec_job = to_nouveau_exec_job(job);
 	struct nouveau_channel *chan = exec_job->chan;
 	struct nouveau_fence *fence = exec_job->fence;
+	struct nouveau_drm *drm = job->cli->drm;
 	int i, ret;
+
+	if (drm->l2sysmem && exec_job->push.count) {
+		ret = nouveau_exec_l2_invalidate(chan);
+		if (ret) {
+			NV_PRINTK(err, job->cli, "l2 invalidate: %d\n", ret);
+			return ERR_PTR(ret);
+		}
+	}
 
 	ret = nvif_chan_gpfifo_wait(&chan->chan, exec_job->push.count + 1, 16);
 	if (ret) {

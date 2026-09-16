@@ -278,6 +278,10 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 	struct drm_device *dev = drm->dev;
 	int typei, ret;
 
+	/* An SoC has no VRAM, so this is where L2-bypassing sysmem costs most. */
+	drm->l2sysmem = nouveau_l2sysmem >= 0 ? !!nouveau_l2sysmem :
+		drm->client.device.info.platform == NV_DEVICE_INFO_V0_SOC;
+
 	ret = nouveau_ttm_init_host(drm, 0);
 	if (ret)
 		return ret;

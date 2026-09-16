@@ -710,6 +710,9 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 
 	nvbo->cpu_dirty = false;
 
+	if (drm->l2sysmem)
+		atomic_set(&drm->l2_dirty, 1);
+
 	if (!ttm_dma || !ttm_dma->dma_address)
 		return;
 	if (!ttm_dma->pages) {
@@ -747,6 +750,9 @@ nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 	int i, j;
 
 	nvbo->cpu_dirty = true;
+
+	if (drm->l2sysmem && !nvbo->force_coherent)
+		nvkm_ltc_flush(nvxx_device(drm)->ltc);
 
 	if (!ttm_dma || !ttm_dma->dma_address)
 		return;
@@ -812,10 +818,12 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 	if (nvbo->cpu_dirty || nvbo->cpu_mapped) {
 		struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 		struct ttm_tt *ttm_dma = nvbo->bo.ttm;
+		/* With l2sysmem this is also the only way cpu_mapped clears. */
+		size_t unmap_kb = drm->l2sysmem ? 1 : nouveau_wb_unmap_kb;
 
 		/* Unmap before the writeback, so a racing write refaults. */
-		if (nouveau_wb_unmap_kb && nvbo->cpu_mapped &&
-		    nvbo->bo.base.size >= ((size_t)nouveau_wb_unmap_kb << 10) &&
+		if (unmap_kb && nvbo->cpu_mapped &&
+		    nvbo->bo.base.size >= (unmap_kb << 10) &&
 		    !nvbo->force_coherent && ttm_dma && ttm_dma->dma_address &&
 		    dma_dev_need_sync(drm->dev->dev)) {
 			nvbo->cpu_mapped = false;

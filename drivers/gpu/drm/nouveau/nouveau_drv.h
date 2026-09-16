@@ -251,6 +251,10 @@ struct nouveau_drm {
 		struct list_head io_reserve_lru;
 	} ttm;
 
+	/* sysmem is mapped into the GPU L2, and something has dirtied it */
+	bool l2sysmem;
+	atomic_t l2_dirty;
+
 	/* GEM interface support */
 	struct {
 		u64 vram_available;
@@ -371,6 +375,7 @@ void nouveau_drm_device_remove(struct nouveau_drm *);
 #define NV_INFO_ONCE(drm,f,a...) NV_PRINTK_ONCE(info, &(drm)->client, f, ##a)
 
 extern int nouveau_modeset;
+extern int nouveau_l2sysmem;
 
 /*XXX: Don't use these in new code.
  *
@@ -390,6 +395,7 @@ extern int nouveau_modeset;
 #include <subdev/i2c.h>
 #include <subdev/timer.h>
 #include <subdev/therm.h>
+#include <subdev/ltc.h>
 
 static inline struct nvkm_device *
 nvxx_device(struct nouveau_drm *drm)
