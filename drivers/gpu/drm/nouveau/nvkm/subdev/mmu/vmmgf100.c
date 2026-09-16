@@ -302,6 +302,10 @@ gf100_vmm_valid(struct nvkm_vmm *vmm, void *argv, u32 argc,
 
 		if (!map->no_comp && map->tags->mn) {
 			u64 tags = map->tags->mn->offset + (map->offset >> 17);
+
+			/* Compression is an L2 function, so it cannot bypass. */
+			vol = 0;
+
 			if (page->shift == 17 || !gm20x) {
 				map->type |= tags << 44;
 				map->ctag |= 1ULL << 44;
