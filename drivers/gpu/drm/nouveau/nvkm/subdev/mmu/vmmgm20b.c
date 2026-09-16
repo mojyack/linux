@@ -58,6 +58,11 @@ gm20b_vmm_new(struct nvkm_mmu *mmu, bool managed, u64 addr, u64 size,
 	      void *argv, u32 argc, struct lock_class_key *key,
 	      const char *name, struct nvkm_vmm **pvmm)
 {
+	/* A PTE's comptagline covers 64KiB, so a 128KiB page cannot compress. */
+	if (!argc)
+		return nvkm_vmm_new_(&gm20b_vmm_16, mmu, 0, managed, addr, size,
+				     key, name, pvmm);
+
 	return gm200_vmm_new_(&gm20b_vmm_16, &gm20b_vmm_17, mmu, managed, addr,
 			      size, argv, argc, key, name, pvmm);
 }
