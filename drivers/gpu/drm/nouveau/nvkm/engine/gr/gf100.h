@@ -243,6 +243,7 @@ void gm200_gr_oneinit_tiles(struct gf100_gr *);
 int gm200_gr_oneinit_sm_id(struct gf100_gr *);
 int gm200_gr_rops(struct gf100_gr *);
 void gm200_gr_init_num_active_ltcs(struct gf100_gr *);
+void gm200_gr_init_rop_active_fbps(struct gf100_gr *);
 void gm200_gr_init_ds_hww_esr_2(struct gf100_gr *);
 
 void gp100_gr_init_rop_active_fbps(struct gf100_gr *);

@@ -124,7 +124,7 @@ gm200_gr_init_gpc_mmu(struct gf100_gr *gr)
 	nvkm_wr32(device, 0x4188b0, nvkm_rd32(device, 0x100cc4));
 }
 
-static void
+void
 gm200_gr_init_rop_active_fbps(struct gf100_gr *gr)
 {
 	struct nvkm_device *device = gr->base.engine.subdev.device;
