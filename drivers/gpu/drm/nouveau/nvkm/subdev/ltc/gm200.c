@@ -26,7 +26,7 @@
 #include <subdev/fb.h>
 #include <subdev/timer.h>
 
-static int
+int
 gm200_ltc_oneinit(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;

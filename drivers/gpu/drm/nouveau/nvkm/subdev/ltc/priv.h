@@ -44,6 +44,8 @@ void gm107_ltc_cbc_wait(struct nvkm_ltc *);
 void gm107_ltc_zbc_clear_color(struct nvkm_ltc *, int, const u32[4]);
 void gm107_ltc_zbc_clear_depth(struct nvkm_ltc *, int, const u32);
 
+int gm200_ltc_oneinit(struct nvkm_ltc *);
+
 int gp100_ltc_oneinit(struct nvkm_ltc *);
 void gp100_ltc_init(struct nvkm_ltc *);
 void gp100_ltc_intr(struct nvkm_ltc *);
