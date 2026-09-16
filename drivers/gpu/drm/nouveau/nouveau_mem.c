@@ -115,7 +115,8 @@ nouveau_mem_host(struct ttm_resource *reg, struct ttm_tt *tt)
 		args.dma = tt->dma_address;
 
 	mutex_lock(&drm->client_mutex);
-	ret = nvif_mem_ctor_type(mmu, "ttmHostMem", mmu->mem, type, PAGE_SHIFT,
+	ret = nvif_mem_ctor_type(mmu, "ttmHostMem", mmu->mem, type,
+				 mem->comp ? mem->page : PAGE_SHIFT,
 				 reg->size,
 				 &args, sizeof(args), &mem->mem);
 	mutex_unlock(&drm->client_mutex);
@@ -172,7 +173,7 @@ nouveau_mem_del(struct ttm_resource_manager *man, struct ttm_resource *reg)
 }
 
 int
-nouveau_mem_new(struct nouveau_drm *drm, u8 kind, u8 comp,
+nouveau_mem_new(struct nouveau_drm *drm, u8 kind, u8 comp, u8 page,
 		struct ttm_resource **res)
 {
 	struct nouveau_mem *mem;
@@ -183,6 +184,7 @@ nouveau_mem_new(struct nouveau_drm *drm, u8 kind, u8 comp,
 	mem->drm = drm;
 	mem->kind = kind;
 	mem->comp = comp;
+	mem->page = page;
 
 	*res = &mem->base;
 	return 0;

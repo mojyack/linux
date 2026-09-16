@@ -74,7 +74,7 @@ nouveau_vram_manager_new(struct ttm_resource_manager *man,
 	if (drm->client.device.info.ram_size == 0)
 		return -ENOMEM;
 
-	ret = nouveau_mem_new(drm, nvbo->kind, nvbo->comp, res);
+	ret = nouveau_mem_new(drm, nvbo->kind, nvbo->comp, nvbo->page, res);
 	if (ret)
 		return ret;
 
@@ -106,7 +106,7 @@ nouveau_gart_manager_new(struct ttm_resource_manager *man,
 	struct nouveau_drm *drm = nouveau_bdev(bo->bdev);
 	int ret;
 
-	ret = nouveau_mem_new(drm, nvbo->kind, nvbo->comp, res);
+	ret = nouveau_mem_new(drm, nvbo->kind, nvbo->comp, nvbo->page, res);
 	if (ret)
 		return ret;
 
@@ -133,7 +133,7 @@ nv04_gart_manager_new(struct ttm_resource_manager *man,
 	struct nouveau_mem *mem;
 	int ret;
 
-	ret = nouveau_mem_new(drm, nvbo->kind, nvbo->comp, res);
+	ret = nouveau_mem_new(drm, nvbo->kind, nvbo->comp, nvbo->page, res);
 	if (ret)
 		return ret;
 
@@ -175,6 +175,9 @@ nouveau_ttm_init_host(struct nouveau_drm *drm, u8 kind)
 		return -ENOSYS;
 
 	drm->ttm.type_ncoh[!!kind] = typei;
+
+	if (kind)
+		drm->ttm.host_comp = !!(mmu->type[typei].type & NVIF_MEM_COMP);
 	return 0;
 }
 
