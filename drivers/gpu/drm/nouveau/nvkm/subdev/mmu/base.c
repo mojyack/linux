@@ -21,6 +21,7 @@
  *
  * Authors: Ben Skeggs
  */
+#include "mem.h"
 #include "ummu.h"
 #include "vmm.h"
 
@@ -279,10 +280,12 @@ nvkm_mmu_host(struct nvkm_mmu *mmu)
 {
 	struct nvkm_device *device = mmu->subdev.device;
 	u8 type = NVKM_MEM_KIND * !!mmu->func->kind_sys;
+	/* A comptag needs a big page, which a host object only gets flattened. */
+	bool comp = mmu->func->comp_sys && nvkm_mem_iommu_usable(mmu);
 	int heap;
 
 	/* Non-mappable system memory. */
-	heap = nvkm_mmu_heap(mmu, NVKM_MEM_HOST, ~0ULL);
+	heap = nvkm_mmu_heap(mmu, NVKM_MEM_HOST | (NVKM_MEM_COMP * comp), ~0ULL);
 	nvkm_mmu_type(mmu, heap, type);
 
 	/* Non-coherent, cached, system memory.
