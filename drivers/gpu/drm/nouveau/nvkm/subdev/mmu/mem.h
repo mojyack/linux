@@ -5,6 +5,7 @@
 int nvkm_mem_new_type(struct nvkm_mmu *, int type, u8 page, u64 size,
 		      void *argv, u32 argc, struct nvkm_memory **);
 int nvkm_mem_map_host(struct nvkm_memory *, void **pmap);
+bool nvkm_mem_iommu_usable(struct nvkm_mmu *);
 
 int nv04_mem_new(struct nvkm_mmu *, int, u8, u64, void *, u32,
 		 struct nvkm_memory **);
