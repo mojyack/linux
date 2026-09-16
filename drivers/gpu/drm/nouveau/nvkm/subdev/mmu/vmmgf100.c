@@ -36,9 +36,12 @@ gf100_vmm_pgt_pte(struct nvkm_vmm *vmm, struct nvkm_mmu_pt *pt,
 	u64 data = base;
 
 	if (map->ctag && !(map->next & (1ULL << 44))) {
+		/* Two pages share a comptagline; bit 60 picks the half. */
 		while (ptes--) {
-			data = base | ((map->ctag >> 1) << 44);
-			if (!(map->ctag++ & 1))
+			const u64 ctag = map->ctag++ - 1;
+
+			data = base | ((ctag >> 1) << 44);
+			if (ctag & 1)
 				data |= BIT_ULL(60);
 
 			VMM_WO064(pt, vmm, ptei++ * 8, data);
