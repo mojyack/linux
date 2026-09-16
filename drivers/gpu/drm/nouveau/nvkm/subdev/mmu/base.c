@@ -282,7 +282,8 @@ nvkm_mmu_host(struct nvkm_mmu *mmu)
 	int heap;
 
 	/* Non-mappable system memory. */
-	heap = nvkm_mmu_heap(mmu, NVKM_MEM_HOST, ~0ULL);
+	heap = nvkm_mmu_heap(mmu, NVKM_MEM_HOST |
+			     (NVKM_MEM_COMP * !!mmu->func->comp_sys), ~0ULL);
 	nvkm_mmu_type(mmu, heap, type);
 
 	/* Non-coherent, cached, system memory.
