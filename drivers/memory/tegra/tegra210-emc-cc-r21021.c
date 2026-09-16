@@ -179,6 +179,15 @@ static void tegra210_emc_get_clktree_delay(struct tegra210_emc *emc,
 	}
 }
 
+/* An unpopulated rank reports "in power-down" forever, so never poll it. */
+static u32 tegra210_emc_dram_powerdown_mask(struct tegra210_emc *emc)
+{
+	if (emc->num_devices < 2)
+		return BIT(EMC_EMC_STATUS_DRAM_IN_POWERDOWN_SHIFT);
+
+	return EMC_EMC_STATUS_DRAM_IN_POWERDOWN_MASK;
+}
+
 static bool periodic_compensation_handler(struct tegra210_emc *emc, u32 type,
 					  struct tegra210_emc_timing *last,
 					  struct tegra210_emc_timing *next)
@@ -278,7 +287,7 @@ static u32 tegra210_emc_r21021_periodic_compensation(struct tegra210_emc *emc)
 
 		for (i = 0; i < emc->num_channels; i++)
 			tegra210_emc_wait_for_update(emc, i, EMC_EMC_STATUS,
-						     EMC_EMC_STATUS_DRAM_IN_POWERDOWN_MASK,
+						     tegra210_emc_dram_powerdown_mask(emc),
 						     0);
 
 		for (i = 0; i < emc->num_channels; i++)
@@ -478,7 +487,7 @@ static void tegra210_emc_r21021_set_clock(struct tegra210_emc *emc, u32 clksrc)
 
 		for (i = 0; i < emc->num_channels; i++)
 			tegra210_emc_wait_for_update(emc, i, EMC_EMC_STATUS,
-						     EMC_EMC_STATUS_DRAM_IN_POWERDOWN_MASK,
+						     tegra210_emc_dram_powerdown_mask(emc),
 						     0);
 
 		for (i = 0; i < emc->num_channels; i++)
