@@ -19,6 +19,8 @@ struct nouveau_bo {
 	bool force_coherent;
 	bool cpu_dirty;
 	bool cpu_mapped;
+	/* pages dirtied through the CPU mapping, [first, last) */
+	pgoff_t cpu_wb_first, cpu_wb_last;
 	struct ttm_bo_kmap_obj kmap;
 	struct list_head head;
 	struct list_head io_reserve_lru;

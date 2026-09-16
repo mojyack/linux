@@ -706,30 +706,38 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 {
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
-	int i, j;
-
-	nvbo->cpu_dirty = false;
-
-	if (drm->l2sysmem)
-		atomic_set(&drm->l2_dirty, 1);
+	pgoff_t i, j, end;
 
 	if (!ttm_dma || !ttm_dma->dma_address)
-		return;
+		goto done;
 	if (!ttm_dma->pages) {
 		NV_DEBUG(drm, "ttm_dma 0x%p: pages NULL\n", ttm_dma);
-		return;
+		goto done;
 	}
 
 	/* Don't waste time looping if the object is coherent */
 	if (nvbo->force_coherent)
-		return;
+		goto done;
 
-	i = 0;
-	while (i < ttm_dma->num_pages) {
+	/* Only the faulted-in range, unless cpu_dirty owes the whole object. */
+	if (nvbo->cpu_dirty) {
+		i = 0;
+		end = ttm_dma->num_pages;
+	} else {
+		i = nvbo->cpu_wb_first;
+		end = min_t(pgoff_t, nvbo->cpu_wb_last, ttm_dma->num_pages);
+	}
+	if (i >= end)
+		goto done;
+
+	if (drm->l2sysmem)
+		atomic_set(&drm->l2_dirty, 1);
+
+	while (i < end) {
 		struct page *p = ttm_dma->pages[i];
 		size_t num_pages = 1;
 
-		for (j = i + 1; j < ttm_dma->num_pages; ++j) {
+		for (j = i + 1; j < end; ++j) {
 			if (++p != ttm_dma->pages[j])
 				break;
 
@@ -740,6 +748,11 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 					   num_pages * PAGE_SIZE, DMA_TO_DEVICE);
 		i += num_pages;
 	}
+
+done:
+	nvbo->cpu_dirty = false;
+	nvbo->cpu_wb_first = 0;
+	nvbo->cpu_wb_last = 0;
 }
 
 void
@@ -828,6 +841,9 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 		    dma_dev_need_sync(drm->dev->dev)) {
 			nvbo->cpu_mapped = false;
 			ttm_bo_unmap_virtual(&nvbo->bo);
+		} else if (nvbo->cpu_mapped) {
+			/* Still mapped: writes need no fault, so no range. */
+			nvbo->cpu_dirty = true;
 		}
 
 		nouveau_bo_sync_for_device(nvbo);

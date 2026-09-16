@@ -54,9 +54,22 @@ static vm_fault_t nouveau_ttm_fault(struct vm_fault *vmf)
 	if (ret)
 		goto error_unlock;
 
-	/* Writes through this mapping are invisible to us from here on. */
-	if (vma->vm_flags & VM_WRITE)
-		nouveau_bo(bo)->cpu_mapped = true;
+	/* Writes are invisible from here on, but only to the pages made present. */
+	if (vma->vm_flags & VM_WRITE) {
+		struct nouveau_bo *nvbo = nouveau_bo(bo);
+		pgoff_t pg = linear_page_index(vma, vmf->address) -
+			     drm_vma_node_start(&bo->base.vma_node);
+
+		if (nvbo->cpu_wb_first >= nvbo->cpu_wb_last) {
+			nvbo->cpu_wb_first = pg;
+			nvbo->cpu_wb_last = pg + TTM_BO_VM_NUM_PREFAULT;
+		} else {
+			nvbo->cpu_wb_first = min(nvbo->cpu_wb_first, pg);
+			nvbo->cpu_wb_last = max(nvbo->cpu_wb_last,
+						pg + TTM_BO_VM_NUM_PREFAULT);
+		}
+		nvbo->cpu_mapped = true;
+	}
 
 	nouveau_bo_del_io_reserve_lru(bo);
 	prot = vma_get_page_prot(vma);
