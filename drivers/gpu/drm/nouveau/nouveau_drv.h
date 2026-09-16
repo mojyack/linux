@@ -246,6 +246,7 @@ struct nouveau_drm {
 		int type_vram;
 		int type_host[2];
 		int type_ncoh[2];
+		bool host_comp;
 		struct mutex io_reserve_mutex;
 		struct list_head io_reserve_lru;
 	} ttm;

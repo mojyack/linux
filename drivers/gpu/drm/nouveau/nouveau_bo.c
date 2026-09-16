@@ -287,7 +287,10 @@ nouveau_bo_alloc(struct nouveau_cli *cli, u64 *size, int *align, u32 domain,
 			    (domain & NOUVEAU_GEM_DOMAIN_VRAM) && !vmm->page[i].vram)
 				continue;
 			if ((domain & NOUVEAU_GEM_DOMAIN_GART) &&
-			    (!vmm->page[i].host || vmm->page[i].shift > PAGE_SHIFT))
+			    (!vmm->page[i].host ||
+			     (vmm->page[i].shift > PAGE_SHIFT &&
+			      !(nvbo->comp && vmm->page[i].comp &&
+				drm->ttm.host_comp))))
 				continue;
 
 			/* Select this page size if it's the first that supports
