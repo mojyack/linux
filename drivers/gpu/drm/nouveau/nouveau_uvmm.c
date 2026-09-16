@@ -1060,6 +1060,20 @@ nouveau_uvmm_bind_job_put(struct nouveau_uvmm_bind_job *job)
 	kref_put(&job->kref, nouveau_uvmm_bind_job_free);
 }
 
+/* A volatile map gets kindm[kind], which misreads data already compressed. */
+static bool
+nouveau_uvmm_map_misreads(struct nouveau_uvmm *uvmm, struct drm_gem_object *obj,
+			  u8 kind)
+{
+	struct nvif_mmu *mmu = &uvmm->vmm.cli->mmu;
+	struct nouveau_bo *nvbo = nouveau_gem_object(obj);
+
+	if (kind >= mmu->kind_nr || mmu->kind[kind] == kind)
+		return false;
+
+	return nouveau_bo_host_compressed(nvbo);
+}
+
 static int
 bind_validate_op(struct nouveau_job *job,
 		 struct bind_job_op *op)
@@ -1075,6 +1089,9 @@ bind_validate_op(struct nouveau_job *job,
 			return -EINVAL;
 
 		if (op->va.range > (obj->size - op->gem.offset))
+			return -EINVAL;
+
+		if (nouveau_uvmm_map_misreads(uvmm, obj, op->flags & 0xff))
 			return -EINVAL;
 	}
 

@@ -120,6 +120,10 @@ struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
 	if (nvbo->no_share)
 		return ERR_PTR(-EPERM);
 
+	/* Nothing would decompress it for the importer. */
+	if (nouveau_bo_host_compressed(nvbo))
+		return ERR_PTR(-EINVAL);
+
 	ret = ttm_bo_setup_export(&nvbo->bo, &ctx);
 	if (ret)
 		return ERR_PTR(ret);

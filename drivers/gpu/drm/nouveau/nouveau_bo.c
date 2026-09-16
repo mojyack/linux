@@ -282,7 +282,10 @@ nouveau_bo_alloc(struct nouveau_cli *cli, u64 *size, int *align, u32 domain,
 			    (domain & NOUVEAU_GEM_DOMAIN_VRAM) && !vmm->page[i].vram)
 				continue;
 			if ((domain & NOUVEAU_GEM_DOMAIN_GART) &&
-			    (!vmm->page[i].host || vmm->page[i].shift > PAGE_SHIFT))
+			    (!vmm->page[i].host ||
+			     (vmm->page[i].shift > PAGE_SHIFT &&
+			      !(nvbo->comp && vmm->page[i].comp &&
+				drm->ttm.host_comp))))
 				continue;
 
 			/* Select this page size if it's the first that supports
@@ -342,6 +345,16 @@ nouveau_bo_alloc(struct nouveau_cli *cli, u64 *size, int *align, u32 domain,
 	nouveau_bo_fixup_align(nvbo, align, size);
 
 	return nvbo;
+}
+
+/* GM20B: whether the pages may hold compressed data, now or later. */
+bool
+nouveau_bo_host_compressed(struct nouveau_bo *nvbo)
+{
+	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
+
+	return (drm->ttm.host_comp && nvbo->comp) ||
+	       (nvbo->keep && READ_ONCE(nvbo->keep->tags));
 }
 
 int
