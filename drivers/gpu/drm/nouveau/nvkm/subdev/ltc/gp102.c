@@ -45,6 +45,7 @@ gp102_ltc = {
 	.zbc_clear_stencil = gp102_ltc_zbc_clear_stencil,
 	.invalidate = gf100_ltc_invalidate,
 	.flush = gf100_ltc_flush,
+	.cbc_clean = gf100_ltc_cbc_clean,
 };
 
 int

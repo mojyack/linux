@@ -48,6 +48,7 @@ gk104_ltc = {
 	.zbc_clear_depth = gf100_ltc_zbc_clear_depth,
 	.invalidate = gf100_ltc_invalidate,
 	.flush = gf100_ltc_flush,
+	.cbc_clean = gf100_ltc_cbc_clean,
 };
 
 int

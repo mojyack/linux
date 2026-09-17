@@ -110,6 +110,21 @@ nvkm_ltc_init(struct nvkm_subdev *subdev)
 	return 0;
 }
 
+static int
+nvkm_ltc_fini(struct nvkm_subdev *subdev, enum nvkm_suspend_state suspend)
+{
+	struct nvkm_ltc *ltc = nvkm_ltc(subdev);
+
+	if (suspend == NVKM_POWEROFF)
+		return 0;
+
+	if (ltc->num_tags && ltc->func->cbc_clean)
+		ltc->func->cbc_clean(ltc);
+
+	nvkm_ltc_flush(ltc);
+	return 0;
+}
+
 static void *
 nvkm_ltc_dtor(struct nvkm_subdev *subdev)
 {
@@ -124,6 +139,7 @@ nvkm_ltc = {
 	.dtor = nvkm_ltc_dtor,
 	.oneinit = nvkm_ltc_oneinit,
 	.init = nvkm_ltc_init,
+	.fini = nvkm_ltc_fini,
 	.intr = nvkm_ltc_intr,
 };
 
