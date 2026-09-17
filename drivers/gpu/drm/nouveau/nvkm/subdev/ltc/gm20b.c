@@ -95,10 +95,27 @@ gm20b_ltc_init(struct nvkm_ltc *ltc)
 	}
 }
 
+/* The GPU is about to lose power, and the L2 and the CBC with it. */
+static void
+gm20b_ltc_suspend(struct nvkm_ltc *ltc)
+{
+	struct nvkm_device *device = ltc->subdev.device;
+
+	if (ltc->num_tags) {
+		mutex_lock(&ltc->mutex);
+		nvkm_wr32(device, 0x7000c, 0x00000001);
+		nvkm_wait_msec(device, 2000, 0x7000c, 0x00000003, 0x00000000);
+		mutex_unlock(&ltc->mutex);
+	}
+
+	nvkm_ltc_flush(ltc);
+}
+
 static const struct nvkm_ltc_func
 gm20b_ltc = {
 	.oneinit = gm20b_ltc_oneinit,
 	.init = gm20b_ltc_init,
+	.suspend = gm20b_ltc_suspend,
 	.intr = gm107_ltc_intr,
 	.cbc_clear = gm107_ltc_cbc_clear,
 	.cbc_wait = gm107_ltc_cbc_wait,

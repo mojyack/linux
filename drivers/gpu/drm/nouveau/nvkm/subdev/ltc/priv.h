@@ -11,6 +11,7 @@ int nvkm_ltc_new_(const struct nvkm_ltc_func *, struct nvkm_device *, enum nvkm_
 struct nvkm_ltc_func {
 	int  (*oneinit)(struct nvkm_ltc *);
 	void (*init)(struct nvkm_ltc *);
+	void (*suspend)(struct nvkm_ltc *);
 	void (*intr)(struct nvkm_ltc *);
 
 	void (*cbc_clear)(struct nvkm_ltc *, u32 start, u32 limit);
