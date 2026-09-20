@@ -7,6 +7,7 @@ struct nvkm_vma;
 struct nvkm_vmm;
 
 struct nvkm_tags {
+	struct nvkm_device *device;
 	struct nvkm_mm_node *mn;
 	refcount_t refcount;
 };

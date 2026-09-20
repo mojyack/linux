@@ -396,7 +396,6 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 		.size = args->size,
 		.used = true,
 		.mapref = false,
-		.no_comp = true,
 	};
 	struct nvkm_memory *memory;
 	void *argv = (void *)(uintptr_t)args->argv;

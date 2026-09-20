@@ -90,6 +90,7 @@ nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
 		tags->mn = NULL;
 	}
 
+	tags->device = device;
 	refcount_set(&tags->refcount, 1);
 	*ptags = memory->tags = tags;
 	mutex_unlock(&fb->tags.mutex);
@@ -108,6 +109,14 @@ static void
 nvkm_memory_del(struct kref *kref)
 {
 	struct nvkm_memory *memory = container_of(kref, typeof(*memory), kref);
+
+	/* Release comptags the raw (VM_BIND) map path left behind. */
+	while (memory->tags) {
+		struct nvkm_tags *tags = memory->tags;
+
+		nvkm_memory_tags_put(memory, tags->device, &tags);
+	}
+
 	if (!WARN_ON(!memory->func)) {
 		if (memory->func->dtor)
 			memory = memory->func->dtor(memory);
