@@ -120,7 +120,8 @@ nouveau_fence_context_free(struct nouveau_fence_chan *fctx)
 	kref_put(&fctx->fence_ref, nouveau_fence_context_put);
 }
 
-static void
+/* Returns true if the uevent should be blocked, which the caller must do */
+static bool
 nouveau_fence_update(struct nouveau_channel *chan, struct nouveau_fence_chan *fctx)
 {
 	struct nouveau_fence *fence, *tmp;
@@ -135,8 +136,23 @@ nouveau_fence_update(struct nouveau_channel *chan, struct nouveau_fence_chan *fc
 			drop = true;
 	}
 
-	if (drop)
-		nvif_event_block(&fctx->event);
+	return drop;
+}
+
+static bool
+nouveau_fence_update_locked(struct nouveau_fence_chan *fctx)
+{
+	struct nouveau_channel *chan;
+	struct nouveau_fence *fence;
+
+	lockdep_assert_held(&fctx->lock);
+
+	fence = list_first_entry_or_null(&fctx->pending, typeof(*fence), head);
+	if (!fence)
+		return false;
+
+	chan = rcu_dereference_protected(fence->channel, lockdep_is_held(&fctx->lock));
+	return nouveau_fence_update(chan, fctx);
 }
 
 static void
@@ -144,16 +160,16 @@ nouveau_fence_uevent_work(struct work_struct *work)
 {
 	struct nouveau_fence_chan *fctx = container_of(work, struct nouveau_fence_chan,
 						       uevent_work);
-	struct nouveau_channel *chan;
-	struct nouveau_fence *fence;
 	unsigned long flags;
+	bool drop;
 
 	spin_lock_irqsave(&fctx->lock, flags);
-	fence = list_first_entry_or_null(&fctx->pending, typeof(*fence), head);
-	if (fence) {
-		chan = rcu_dereference_protected(fence->channel, lockdep_is_held(&fctx->lock));
-		nouveau_fence_update(chan, fctx);
-	}
+	drop = nouveau_fence_update_locked(fctx);
+	drop |= fctx->uevent_drop;
+	fctx->uevent_drop = false;
+	/* A waiter may have re-armed the event since the notify handler ran */
+	if (drop && !fctx->notify_ref)
+		nvif_event_block(&fctx->event);
 	spin_unlock_irqrestore(&fctx->lock, flags);
 }
 
@@ -161,7 +177,17 @@ static int
 nouveau_fence_wait_uevent_handler(struct nvif_event *event, void *repv, u32 repc)
 {
 	struct nouveau_fence_chan *fctx = container_of(event, typeof(*fctx), event);
-	schedule_work(&fctx->uevent_work);
+	unsigned long flags;
+	bool drop;
+
+	spin_lock_irqsave(&fctx->lock, flags);
+	drop = nouveau_fence_update_locked(fctx);
+	fctx->uevent_drop |= drop;
+	spin_unlock_irqrestore(&fctx->lock, flags);
+
+	if (drop)
+		schedule_work(&fctx->uevent_work);
+
 	return NVIF_EVENT_KEEP;
 }
 
@@ -233,7 +259,8 @@ nouveau_fence_emit(struct nouveau_fence *fence)
 			return -ENODEV;
 		}
 
-		nouveau_fence_update(chan, fctx);
+		if (nouveau_fence_update(chan, fctx))
+			nvif_event_block(&fctx->event);
 		list_add_tail(&fence->head, &fctx->pending);
 		spin_unlock_irq(&fctx->lock);
 	}
@@ -253,8 +280,8 @@ nouveau_fence_done(struct nouveau_fence *fence)
 
 	spin_lock_irqsave(&fctx->lock, flags);
 	chan = rcu_dereference_protected(fence->channel, lockdep_is_held(&fctx->lock));
-	if (chan)
-		nouveau_fence_update(chan, fctx);
+	if (chan && nouveau_fence_update(chan, fctx))
+		nvif_event_block(&fctx->event);
 	spin_unlock_irqrestore(&fctx->lock, flags);
 
 	return dma_fence_is_signaled(&fence->base);

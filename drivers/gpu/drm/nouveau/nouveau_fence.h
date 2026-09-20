@@ -53,6 +53,7 @@ struct nouveau_fence_chan {
 	struct work_struct uevent_work;
 	struct nvif_event event;
 	int notify_ref, dead, killed;
+	bool uevent_drop;
 };
 
 struct nouveau_fence_priv {
