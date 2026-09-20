@@ -330,7 +330,10 @@ nouveau_bo_alloc(struct nouveau_cli *cli, u64 *size, int *align, u32 domain,
 			if ((domain & NOUVEAU_GEM_DOMAIN_VRAM) && !vmm->page[i].vram)
 				continue;
 			if ((domain & NOUVEAU_GEM_DOMAIN_GART) &&
-			    (!vmm->page[i].host || vmm->page[i].shift > PAGE_SHIFT))
+			    (!vmm->page[i].host ||
+			     (vmm->page[i].shift > PAGE_SHIFT &&
+			      (!drm->ttm.host_comp ||
+			       *align < 1ULL << vmm->page[i].shift))))
 				continue;
 
 			/* pick the last one as it will be smallest. */

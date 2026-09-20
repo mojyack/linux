@@ -109,7 +109,7 @@ nouveau_mem_host(struct ttm_resource *reg, struct ttm_tt *tt)
 	struct nouveau_drm *drm = mem->drm;
 	struct nvif_mmu *mmu = &drm->mmu;
 	struct nvif_mem_ram_v0 args = {};
-	u8 type;
+	u8 type, page;
 	int ret;
 
 	if (!nouveau_drm_use_coherent_gpu_mapping(drm))
@@ -130,10 +130,12 @@ nouveau_mem_host(struct ttm_resource *reg, struct ttm_tt *tt)
 	else
 		args.dma = tt->dma_address;
 
+	/* Only the comptag-capable types can reach the GPU IOMMU. */
+	page = (mmu->type[type].type & NVIF_MEM_COMP) ? mem->page : PAGE_SHIFT;
+
 	mutex_lock(&drm->client_mutex);
 	ret = nvif_mem_ctor_type(mmu, "ttmHostMem", mmu->mem, type,
-				 mem->comp ? mem->page : PAGE_SHIFT,
-				 reg->size,
+				 page, reg->size,
 				 &args, sizeof(args), &mem->mem);
 	mutex_unlock(&drm->client_mutex);
 	return ret;
