@@ -758,7 +758,14 @@ nouveau_abi16_ioctl_mthd(struct nouveau_abi16 *abi16, struct nvif_ioctl_v0 *ioct
 	argc -= sizeof(*args);
 
 	obj = nouveau_abi16_obj_find(abi16, ioctl->object);
-	if (!obj || obj->type != DEVICE)
+	if (!obj)
+		return -EINVAL;
+
+	if (obj->type == ENGOBJ)
+		return nvif_object_mthd(&obj->engobj, args->method,
+					args->data, argc);
+
+	if (obj->type != DEVICE)
 		return -EINVAL;
 
 	if (args->method != NV_DEVICE_V0_INFO ||
