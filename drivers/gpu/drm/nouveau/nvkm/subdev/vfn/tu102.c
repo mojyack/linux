@@ -31,6 +31,8 @@ tu102_vfn_intr_reset(struct nvkm_intr *intr, int leaf, u32 mask)
 	struct nvkm_vfn *vfn = container_of(intr, typeof(*vfn), intr);
 
 	nvkm_wr32(vfn->subdev.device, vfn->addr.priv + 0x1000 + (leaf * 4), mask);
+	/* post the ack before the handler looks at what raised it */
+	nvkm_rd32(vfn->subdev.device, vfn->addr.priv + 0x1000 + (leaf * 4));
 }
 
 static void

@@ -96,7 +96,6 @@ nouveau_fence_context_kill(struct nouveau_fence_chan *fctx, int error)
 void
 nouveau_fence_context_del(struct nouveau_fence_chan *fctx)
 {
-	disable_work_sync(&fctx->uevent_work);
 	nouveau_fence_context_kill(fctx, 0);
 	nvif_event_dtor(&fctx->event);
 	fctx->dead = 1;
@@ -139,11 +138,10 @@ nouveau_fence_update(struct nouveau_channel *chan, struct nouveau_fence_chan *fc
 		nvif_event_block(&fctx->event);
 }
 
-static void
-nouveau_fence_uevent_work(struct work_struct *work)
+static int
+nouveau_fence_wait_uevent_handler(struct nvif_event *event, void *repv, u32 repc)
 {
-	struct nouveau_fence_chan *fctx = container_of(work, struct nouveau_fence_chan,
-						       uevent_work);
+	struct nouveau_fence_chan *fctx = container_of(event, typeof(*fctx), event);
 	struct nouveau_channel *chan;
 	struct nouveau_fence *fence;
 	unsigned long flags;
@@ -155,13 +153,7 @@ nouveau_fence_uevent_work(struct work_struct *work)
 		nouveau_fence_update(chan, fctx);
 	}
 	spin_unlock_irqrestore(&fctx->lock, flags);
-}
 
-static int
-nouveau_fence_wait_uevent_handler(struct nvif_event *event, void *repv, u32 repc)
-{
-	struct nouveau_fence_chan *fctx = container_of(event, typeof(*fctx), event);
-	schedule_work(&fctx->uevent_work);
 	return NVIF_EVENT_KEEP;
 }
 
@@ -177,7 +169,6 @@ nouveau_fence_context_new(struct nouveau_channel *chan, struct nouveau_fence_cha
 				(struct nvif_chan_event_v0 *)args->data;
 	int ret;
 
-	INIT_WORK(&fctx->uevent_work, nouveau_fence_uevent_work);
 	INIT_LIST_HEAD(&fctx->flip);
 	INIT_LIST_HEAD(&fctx->pending);
 	spin_lock_init(&fctx->lock);
