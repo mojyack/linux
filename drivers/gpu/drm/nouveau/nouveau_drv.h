@@ -10,7 +10,7 @@
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		4
-#define DRIVER_PATCHLEVEL	3
+#define DRIVER_PATCHLEVEL	4
 
 /*
  * 1.1.1:
@@ -41,6 +41,8 @@
  *      - tell userspace LPTE/SPTE races are fixed.
  * 1.4.3:
  *      - VDEC contexts can be created.
+ * 1.4.4:
+ *      - VM_BIND maps can be compressed on pre-Turing.
  */
 
 #include <linux/notifier.h>
