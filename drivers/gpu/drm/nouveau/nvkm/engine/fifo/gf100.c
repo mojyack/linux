@@ -775,6 +775,8 @@ gf100_fifo_intr_engine_unit(struct nvkm_fifo *fifo, int engn)
 	u32 unkn;
 
 	nvkm_wr32(device, 0x0025a8 + (engn * 0x04), intr);
+	/* post the ack before handlers look at what raised it */
+	nvkm_rd32(device, 0x0025a8 + (engn * 0x04));
 
 	for (unkn = 0; unkn < 8; unkn++) {
 		u32 ints = (intr >> (unkn * 0x04)) & inte;
