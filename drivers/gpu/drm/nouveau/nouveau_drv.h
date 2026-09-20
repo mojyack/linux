@@ -10,7 +10,7 @@
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		4
-#define DRIVER_PATCHLEVEL	3
+#define DRIVER_PATCHLEVEL	4
 
 /*
  * 1.1.1:
@@ -41,6 +41,9 @@
  *      - tell userspace LPTE/SPTE races are fixed.
  * 1.4.3:
  *      - VDEC contexts can be created.
+ * 1.4.4:
+ *      - GM20B: VM_BIND maps of GART buffers can be compressed (64KiB
+ *        pages for buffers created with that alignment).
  */
 
 #include <linux/notifier.h>
