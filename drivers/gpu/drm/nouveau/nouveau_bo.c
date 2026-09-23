@@ -246,6 +246,7 @@ nouveau_bo_alloc(struct nouveau_cli *cli, u64 *size, int *align, u32 domain,
 			nvbo->force_coherent = true;
 	}
 
+	nvbo->wc = domain & NOUVEAU_GEM_DOMAIN_WC;
 	nvbo->contig = !(tile_flags & NOUVEAU_GEM_TILE_NONCONTIG);
 
 	if (cli->device.info.family >= NV_DEVICE_INFO_V0_FERMI) {
@@ -743,6 +744,13 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 	if (nvbo->force_coherent)
 		return;
 
+	/* Write-combined: no CPU cache to clean, but the L2 may be stale. */
+	if (nvbo->wc) {
+		if (drm->l2sysmem)
+			atomic_inc_return_release(&drm->l2_clean_seq);
+		return;
+	}
+
 	/* Only the faulted-in range, unless cpu_dirty owes the whole object. */
 	i = whole ? 0 : nvbo->cpu_wb_first;
 	end = whole ? ttm_dma->num_pages :
@@ -795,7 +803,7 @@ nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 	}
 
 	/* Don't waste time looping if the object is coherent */
-	if (nvbo->force_coherent)
+	if (nvbo->force_coherent || nvbo->wc)
 		return 0;
 
 	i = 0;
@@ -825,7 +833,7 @@ nouveau_bo_swap_notify(struct ttm_buffer_object *bo)
 	struct ttm_tt *ttm = bo->ttm;
 	pgoff_t i;
 
-	if (!nvbo->force_coherent || !ttm || !ttm->dma_address)
+	if (!(nvbo->force_coherent || nvbo->wc) || !ttm || !ttm->dma_address)
 		return;
 
 	/* TTM reads dma_alloc_attrs() pages through their own mapping. */
@@ -881,7 +889,8 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 
 		/* Unmap before the writeback, so a racing write refaults. */
 		if (nvbo->cpu_mapped && !nvbo->cpu_mapped_dmabuf &&
-		    !nvbo->force_coherent && ttm_dma && ttm_dma->dma_address &&
+		    !nvbo->force_coherent && !nvbo->wc &&
+		    ttm_dma && ttm_dma->dma_address &&
 		    dma_dev_need_sync(drm->dev->dev)) {
 			nvbo->cpu_mapped = false;
 			ttm_bo_unmap_virtual(&nvbo->bo);
