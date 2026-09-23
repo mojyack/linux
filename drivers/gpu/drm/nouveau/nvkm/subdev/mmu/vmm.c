@@ -23,6 +23,7 @@
 #include "vmm.h"
 
 #include <subdev/fb.h>
+#include <subdev/ltc.h>
 
 static void
 nvkm_vmm_pt_del(struct nvkm_vmm_pt **ppgt)
@@ -1411,11 +1412,24 @@ next:
 	return 0;
 }
 
+/* Without VRAM, the L2 may still hold dirty lines for pages being released. */
+static void
+nvkm_vmm_unmap_flush(struct nvkm_vmm *vmm)
+{
+	struct nvkm_device *device = vmm->mmu->subdev.device;
+
+	if (device->ltc && !device->fb->ram)
+		nvkm_ltc_flush(device->ltc);
+}
+
 void
 nvkm_vmm_unmap_region(struct nvkm_vmm *vmm, struct nvkm_vma *vma)
 {
 	struct nvkm_vma *prev = NULL;
 	struct nvkm_vma *next;
+
+	if (vma->memory)
+		nvkm_vmm_unmap_flush(vmm);
 
 	nvkm_memory_tags_put(vma->memory, vmm->mmu->subdev.device, &vma->tags);
 	nvkm_memory_unref(&vma->memory);
@@ -1874,6 +1888,7 @@ nvkm_vmm_raw_unmap(struct nvkm_vmm *vmm, u64 addr, u64 size,
 	const struct nvkm_vmm_page *page = &vmm->func->page[refd];
 
 	nvkm_vmm_ptes_unmap(vmm, page, addr, size, sparse, false);
+	nvkm_vmm_unmap_flush(vmm);
 }
 
 void
