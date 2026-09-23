@@ -2908,6 +2908,36 @@ out_unlock:
 	return VM_FAULT_NOPAGE;
 }
 
+static vm_fault_t __vmf_insert_pfn_prot(struct vm_area_struct *vma,
+		unsigned long addr, unsigned long pfn, pgprot_t pgprot,
+		bool mkwrite)
+{
+	/*
+	 * Technically, architectures with pte_special can avoid all these
+	 * restrictions (same for remap_pfn_range).  However we would like
+	 * consistency in testing and feature parity among all, so we should
+	 * try to keep these invariants in place for everybody.
+	 */
+	BUG_ON(!(vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)));
+	BUG_ON((vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)) ==
+						(VM_PFNMAP|VM_MIXEDMAP));
+	BUG_ON((vma->vm_flags & VM_PFNMAP) && vma_is_cow_mapping(vma));
+	BUG_ON((vma->vm_flags & VM_MIXEDMAP) && pfn_valid(pfn));
+
+	if (unlikely(is_zero_pfn(pfn)))
+		return VM_FAULT_SIGBUS;
+
+	if (addr < vma->vm_start || addr >= vma->vm_end)
+		return VM_FAULT_SIGBUS;
+
+	if (!pfn_modify_allowed(pfn, pgprot))
+		return VM_FAULT_SIGBUS;
+
+	pfnmap_setup_cachemode_pfn(pfn, &pgprot);
+
+	return insert_pfn(vma, addr, pfn, pgprot, mkwrite);
+}
+
 /**
  * vmf_insert_pfn_prot - insert single pfn into user vma with specified pgprot
  * @vma: user vma to map to
@@ -2944,32 +2974,47 @@ out_unlock:
 vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr,
 			unsigned long pfn, pgprot_t pgprot)
 {
-	/*
-	 * Technically, architectures with pte_special can avoid all these
-	 * restrictions (same for remap_pfn_range).  However we would like
-	 * consistency in testing and feature parity among all, so we should
-	 * try to keep these invariants in place for everybody.
-	 */
-	BUG_ON(!(vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)));
-	BUG_ON((vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)) ==
-						(VM_PFNMAP|VM_MIXEDMAP));
-	BUG_ON((vma->vm_flags & VM_PFNMAP) && vma_is_cow_mapping(vma));
-	BUG_ON((vma->vm_flags & VM_MIXEDMAP) && pfn_valid(pfn));
-
-	if (unlikely(is_zero_pfn(pfn)))
-		return VM_FAULT_SIGBUS;
-
-	if (addr < vma->vm_start || addr >= vma->vm_end)
-		return VM_FAULT_SIGBUS;
-
-	if (!pfn_modify_allowed(pfn, pgprot))
-		return VM_FAULT_SIGBUS;
-
-	pfnmap_setup_cachemode_pfn(pfn, &pgprot);
-
-	return insert_pfn(vma, addr, pfn, pgprot, false);
+	return __vmf_insert_pfn_prot(vma, addr, pfn, pgprot, false);
 }
 EXPORT_SYMBOL(vmf_insert_pfn_prot);
+
+/**
+ * vmf_insert_pfn_prot_mkwrite - insert single writable pfn for a write fault
+ * @vma: user vma to map to
+ * @addr: target user address of this page
+ * @pfn: source kernel pfn
+ * @pgprot: pgprot flags for the inserted page
+ *
+ * Like vmf_insert_pfn_prot(), with the same restrictions: @vma must have
+ * exactly one of VM_PFNMAP and VM_MIXEDMAP, a VM_PFNMAP @vma must not be a
+ * COW mapping, a VM_MIXEDMAP @vma takes only a @pfn without a struct page,
+ * and the zero page is refused.  The page table entry is inserted young and
+ * dirty, and writable if @vma has VM_WRITE, even when @pgprot itself is
+ * read-only.  On a CPU that does not manage the dirty bit in hardware, this
+ * saves the write fault a clean entry would take on the first store.
+ *
+ * If an entry for @pfn is already present, it is made young, dirty and
+ * writable in the same way, but its caching and encryption bits are not
+ * replaced by those of @pgprot.  An entry for a different pfn is left alone
+ * (with a one-time warning unless it maps the zero page), and VM_FAULT_NOPAGE
+ * is still returned.
+ *
+ * Use this only from a fault handler that has authorised a write to @addr,
+ * which need not be the faulting address: a handler that maps neighbouring
+ * pages ahead of the fault must have authorised each of them.  The vma's
+ * pfn_mkwrite() hook is not called, so any write tracking or write
+ * preparation the driver does for @addr must be complete before this is
+ * called.
+ *
+ * Context: Process context.  May allocate using %GFP_KERNEL.
+ * Return: vm_fault_t value.
+ */
+vm_fault_t vmf_insert_pfn_prot_mkwrite(struct vm_area_struct *vma,
+		unsigned long addr, unsigned long pfn, pgprot_t pgprot)
+{
+	return __vmf_insert_pfn_prot(vma, addr, pfn, pgprot, true);
+}
+EXPORT_SYMBOL(vmf_insert_pfn_prot_mkwrite);
 
 /**
  * vmf_insert_pfn - insert single pfn into user vma
