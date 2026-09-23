@@ -264,7 +264,12 @@ vm_fault_t ttm_bo_vm_fault_reserved(struct vm_fault *vmf,
 		 * at arbitrary times while the data is mmap'ed.
 		 * See vmf_insert_pfn_prot() for a discussion.
 		 */
-		ret = vmf_insert_pfn_prot(vma, address, pfn, prot);
+		/* A pfn_mkwrite() hook must see the first write to a page. */
+		if ((vmf->flags & FAULT_FLAG_WRITE) && !vma->vm_ops->pfn_mkwrite)
+			ret = vmf_insert_pfn_prot_mkwrite(vma, address, pfn,
+							  prot);
+		else
+			ret = vmf_insert_pfn_prot(vma, address, pfn, prot);
 
 		/* Never error on prefaulted PTEs */
 		if (unlikely((ret & VM_FAULT_ERROR))) {
