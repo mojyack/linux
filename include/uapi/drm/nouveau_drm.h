@@ -132,6 +132,8 @@ struct drm_nouveau_gpuobj_free {
 #define NOUVEAU_GEM_DOMAIN_COHERENT  (1 << 4)
 /* The BO will never be shared via import or export. */
 #define NOUVEAU_GEM_DOMAIN_NO_SHARE  (1 << 5)
+/* Map the BO write-combined for the CPU, for data the CPU streams to the GPU. */
+#define NOUVEAU_GEM_DOMAIN_WC        (1 << 6)
 
 #define NOUVEAU_GEM_TILE_COMP        0x00030000 /* nv50-only */
 #define NOUVEAU_GEM_TILE_LAYOUT_MASK 0x0000ff00

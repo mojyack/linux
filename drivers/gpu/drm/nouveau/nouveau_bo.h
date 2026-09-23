@@ -17,6 +17,7 @@ struct nouveau_bo {
 	u32 valid_domains;
 	struct ttm_place placements[3];
 	bool force_coherent;
+	bool wc;
 	bool cpu_dirty;
 	bool cpu_mapped;
 	/* pages dirtied through the CPU mapping, [first, last) */
