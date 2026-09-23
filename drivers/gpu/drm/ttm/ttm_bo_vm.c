@@ -175,6 +175,11 @@ EXPORT_SYMBOL(ttm_bo_vm_reserve);
  * memory backing the buffer object, and then returns a return code
  * instructing the caller to retry the page access.
  *
+ * On a write fault, unless the vma has a pfn_mkwrite() hook, the entries
+ * are inserted dirty and writable if the vma has VM_WRITE, even when @prot
+ * is read-only.  Any write preparation the caller needs must then cover
+ * every page of the prefault range, not only the faulting one.
+ *
  * Return:
  *   VM_FAULT_NOPAGE on success or pending signal
  *   VM_FAULT_SIGBUS on unspecified error
@@ -264,7 +269,12 @@ vm_fault_t ttm_bo_vm_fault_reserved(struct vm_fault *vmf,
 		 * at arbitrary times while the data is mmap'ed.
 		 * See vmf_insert_pfn_prot() for a discussion.
 		 */
-		ret = vmf_insert_pfn_prot(vma, address, pfn, prot);
+		/* A pfn_mkwrite() hook must see the first write to a page. */
+		if ((vmf->flags & FAULT_FLAG_WRITE) && !vma->vm_ops->pfn_mkwrite)
+			ret = vmf_insert_pfn_prot_mkwrite(vma, address, pfn,
+							  prot);
+		else
+			ret = vmf_insert_pfn_prot(vma, address, pfn, prot);
 
 		/* Never error on prefaulted PTEs */
 		if (unlikely((ret & VM_FAULT_ERROR))) {
