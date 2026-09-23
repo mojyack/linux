@@ -10,7 +10,7 @@
 
 #define DRIVER_MAJOR		1
 #define DRIVER_MINOR		4
-#define DRIVER_PATCHLEVEL	4
+#define DRIVER_PATCHLEVEL	5
 
 /*
  * 1.1.1:
@@ -43,6 +43,8 @@
  *      - VDEC contexts can be created.
  * 1.4.4:
  *      - VM_BIND maps can be compressed on pre-Turing.
+ * 1.4.5:
+ *      - add NOUVEAU_GEM_DOMAIN_WC flag
  */
 
 #include <linux/notifier.h>
