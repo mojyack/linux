@@ -102,10 +102,6 @@ allOf:
       required:
         - power-domains
     else:
-      properties:
-        interconnects: false
-        interconnect-names: false
-
       required:
         - vdd-supply
   - if:
@@ -125,7 +121,17 @@ allOf:
       properties:
         compatible:
           contains:
+            const: nvidia,gk20a
+    then:
+      properties:
+        interconnects: false
+        interconnect-names: false
+  - if:
+      properties:
+        compatible:
+          contains:
             enum:
+              - nvidia,gm20b
               - nvidia,gp10b
     then:
       properties:
