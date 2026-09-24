@@ -63,11 +63,11 @@ properties:
     maxItems: 1
 
   interconnects:
-    minItems: 4
+    minItems: 1
     maxItems: 12
 
   interconnect-names:
-    minItems: 4
+    minItems: 1
     maxItems: 12
 
   iommus:
@@ -97,12 +97,30 @@ allOf:
       required:
         - power-domains
     else:
+      required:
+        - vdd-supply
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: nvidia,gk20a
+    then:
       properties:
         interconnects: false
         interconnect-names: false
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: nvidia,gm20b
+    then:
+      properties:
+        interconnects:
+          maxItems: 1
 
-      required:
-        - vdd-supply
+        interconnect-names:
+          items:
+            - const: dma-mem
   - if:
       properties:
         compatible:
@@ -112,6 +130,7 @@ allOf:
     then:
       properties:
         interconnects:
+          minItems: 4
           maxItems: 4
 
         interconnect-names:
