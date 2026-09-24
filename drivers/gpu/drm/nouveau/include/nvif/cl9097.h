@@ -30,7 +30,7 @@ struct fermi_a_zbc_color_v0 {
 	__u8  index;
 	__u8  pad03[5];
 	__u32 ds[4];
-	__u32 l2[4];
+	__u32 l2[4];	/* out: derived by the kernel from format and ds */
 };
 
 struct fermi_a_zbc_depth_v0 {
@@ -40,6 +40,6 @@ struct fermi_a_zbc_depth_v0 {
 	__u8  index;
 	__u8  pad03[5];
 	__u32 ds;
-	__u32 l2;
+	__u32 l2;	/* out: derived by the kernel from format and ds */
 };
 #endif

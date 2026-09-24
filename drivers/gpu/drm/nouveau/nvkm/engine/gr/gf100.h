@@ -101,6 +101,7 @@ struct gf100_gr {
 	struct gf100_gr_zbc_color zbc_color[NVKM_LTC_MAX_ZBC_COLOR_CNT];
 	struct gf100_gr_zbc_depth zbc_depth[NVKM_LTC_MAX_ZBC_DEPTH_CNT];
 	struct gf100_gr_zbc_stencil zbc_stencil[NVKM_LTC_MAX_ZBC_DEPTH_CNT];
+	struct mutex zbc_mutex; /* zbc_color/depth/stencil and their registers */
 
 	u8 rop_nr;
 	u8 gpc_nr;
