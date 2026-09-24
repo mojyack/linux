@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include <linux/clk.h>
+#include <linux/interconnect.h>
 #include <linux/math64.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
@@ -49,6 +50,9 @@
 #define PWM_PMU_IDLE_MASK_GR_ENABLED		0x1U
 #define PWM_PMU_IDLE_MASK_CE_2_ENABLED		0x200000U
 
+/* DRAM bytes to request per Hz of GPC clock. */
+#define GK20A_DEVFREQ_BW_PER_HZ			32
+
 /**
  * struct gk20a_devfreq - Device frequency management
  */
@@ -58,6 +62,9 @@ struct gk20a_devfreq {
 
 	/** @regs: Device registers. */
 	void __iomem *regs;
+
+	/** @icc_path: Memory bandwidth path to the external memory controller. */
+	struct icc_path *icc_path;
 
 	/** @gov_data: Governor data. */
 	struct devfreq_simple_ondemand_data gov_data;
@@ -179,6 +186,17 @@ static void gk20a_devfreq_update_utilization(struct gk20a_devfreq *gdevfreq)
 	gdevfreq->time_last_update = now;
 }
 
+static void gk20a_devfreq_set_bw(struct gk20a_devfreq *gdevfreq,
+				 unsigned long freq)
+{
+	u64 bw = (u64)freq * GK20A_DEVFREQ_BW_PER_HZ;
+
+	if (!gdevfreq->icc_path)
+		return;
+
+	icc_set_bw(gdevfreq->icc_path, 0, (u32)Bps_to_icc(bw));
+}
+
 static int gk20a_devfreq_target(struct device *dev, unsigned long *freq,
 				u32 flags)
 {
@@ -201,6 +219,8 @@ static int gk20a_devfreq_target(struct device *dev, unsigned long *freq,
 	}
 
 	*freq = pstates[i].base.domain[nv_clk_src_gpc] * GK20A_CLK_GPC_MDIV;
+
+	gk20a_devfreq_set_bw(dev_to_gk20a_devfreq(dev), *freq);
 
 	return 0;
 }
@@ -281,6 +301,10 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **gdevfreq)
 
 	new_gdevfreq->regs = tdev->regs;
 
+	new_gdevfreq->icc_path = devm_of_icc_get(device->dev, "dma-mem");
+	if (IS_ERR(new_gdevfreq->icc_path))
+		return PTR_ERR(new_gdevfreq->icc_path);
+
 	for (i = 0; i < nr_pstates; i++)
 		dev_pm_opp_add(base->subdev.device->dev,
 			       pstates[i].base.domain[nv_clk_src_gpc] * GK20A_CLK_GPC_MDIV, 0);
@@ -300,6 +324,8 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **gdevfreq)
 							&new_gdevfreq->gov_data);
 	if (IS_ERR(new_gdevfreq->devfreq))
 		return PTR_ERR(new_gdevfreq->devfreq);
+
+	gk20a_devfreq_set_bw(new_gdevfreq, gk20a_devfreq_profile.initial_freq);
 
 	*gdevfreq = new_gdevfreq;
 
@@ -324,9 +350,13 @@ void gk20a_devfreq_fini(struct device *dev)
 int gk20a_devfreq_resume(struct device *dev)
 {
 	struct gk20a_devfreq *gdevfreq = dev_to_gk20a_devfreq(dev);
+	unsigned long freq;
 
 	if (!gdevfreq || !gdevfreq->devfreq)
 		return 0;
+
+	if (!gk20a_devfreq_get_cur_freq(dev, &freq))
+		gk20a_devfreq_set_bw(gdevfreq, freq);
 
 	return devfreq_resume_device(gdevfreq->devfreq);
 }
@@ -334,9 +364,16 @@ int gk20a_devfreq_resume(struct device *dev)
 int gk20a_devfreq_suspend(struct device *dev)
 {
 	struct gk20a_devfreq *gdevfreq = dev_to_gk20a_devfreq(dev);
+	int ret;
 
 	if (!gdevfreq || !gdevfreq->devfreq)
 		return 0;
 
-	return devfreq_suspend_device(gdevfreq->devfreq);
+	ret = devfreq_suspend_device(gdevfreq->devfreq);
+	if (ret)
+		return ret;
+
+	gk20a_devfreq_set_bw(gdevfreq, 0);
+
+	return 0;
 }
