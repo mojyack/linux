@@ -479,6 +479,9 @@
 
 		iommus = <&mc TEGRA_SWGROUP_GPU>;
 
+		interconnects = <&mc TEGRA210_MC_GPUSRD &emc>;
+		interconnect-names = "dma-mem";
+
 		status = "disabled";
 	};
 
