@@ -632,8 +632,8 @@ nouveau_drm_device_init(struct nouveau_drm *drm)
 	struct drm_device *dev = drm->dev;
 	int ret;
 
-	drm->sched_wq = alloc_workqueue("nouveau_sched_wq_shared", WQ_PERCPU,
-					WQ_MAX_ACTIVE);
+	drm->sched_wq = alloc_workqueue("nouveau_sched_wq_shared",
+					WQ_PERCPU | WQ_HIGHPRI, WQ_MAX_ACTIVE);
 	if (!drm->sched_wq)
 		return -ENOMEM;
 
