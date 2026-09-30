@@ -1245,9 +1245,13 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
 			return ret;
 	}
 
-	ret = ttm_bo_wait_ctx(bo, ctx);
-	if (ret)
-		return ret;
+	/* Populating a bo has no GPU access to wait for. */
+	if (old_reg && !(old_reg->mem_type == TTM_PL_SYSTEM &&
+			 (!bo->ttm || new_reg->mem_type == TTM_PL_TT))) {
+		ret = ttm_bo_wait_ctx(bo, ctx);
+		if (ret)
+			return ret;
+	}
 
 	drm_gpuvm_bo_gem_evict(obj, evict);
 	nouveau_bo_move_ntfy(bo, new_reg);
