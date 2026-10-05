@@ -854,7 +854,10 @@ gm20b_clk_init(struct nvkm_clk *base)
 		struct nvkm_volt *volt = device->volt;
 
 		/* Get current voltage */
-		_clk->uv = nvkm_volt_get(volt);
+		ret = nvkm_volt_get(volt);
+		if (ret < 0)
+			return ret;
+		_clk->uv = ret;
 
 		/* Initialize DVFS */
 		ret = gm20b_clk_init_dvfs(_clk);
