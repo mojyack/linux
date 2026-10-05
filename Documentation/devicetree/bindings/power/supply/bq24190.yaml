@@ -30,6 +30,8 @@ properties:
   interrupts:
     maxItems: 1
 
+  wakeup-source: true
+
   ce-gpios:
     description:
       Active low Charge Enable pin. Battery charging is enabled when
