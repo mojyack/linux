@@ -60,7 +60,7 @@ static const struct cvb_coef gm20b_na_cvb_coef[] = {
 
 static const u32 speedo_to_vmin[] = {
 	/*   0,      1,      2,      3,      4, */
-	950000, 840000, 818750, 840000, 810000,
+	950000, 840000, 818750, 810000, 810000,
 };
 
 int
