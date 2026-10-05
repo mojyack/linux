@@ -96,12 +96,15 @@ gk20a_volt_vid_get(struct nvkm_volt *base)
 	int i, uv;
 
 	uv = regulator_get_voltage(volt->vdd);
+	if (uv < 0)
+		return uv;
 
-	for (i = 0; i < volt->base.vid_nr; i++)
-		if (volt->base.vid[i].uv >= uv)
-			return i;
+	/* vid_set() lets the regulator round up, so look for the floor. */
+	for (i = volt->base.vid_nr - 1; i > 0; i--)
+		if (volt->base.vid[i].uv <= uv)
+			break;
 
-	return -EINVAL;
+	return i;
 }
 
 static int
