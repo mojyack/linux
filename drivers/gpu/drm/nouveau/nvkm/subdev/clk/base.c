@@ -620,12 +620,14 @@ nvkm_clk_init(struct nvkm_subdev *subdev)
 
 	nvkm_pstate_info(clk, &clk->bstate);
 
+	/* The hardware no longer runs the cached pstate. */
+	clk->pstate = -1;
+
 	if (clk->func->init)
 		return clk->func->init(clk);
 
 	clk->astate = clk->state_nr - 1;
 	clk->dstate = 0;
-	clk->pstate = -1;
 	clk->temp = 90; /* reasonable default value */
 	nvkm_pstate_calc(clk, true);
 	return 0;
