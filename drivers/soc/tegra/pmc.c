@@ -1112,6 +1112,32 @@ int tegra_pmc_powergate_remove_clamping(struct tegra_pmc *pmc, unsigned int id)
 EXPORT_SYMBOL(tegra_pmc_powergate_remove_clamping);
 
 /**
+ * tegra_pmc_gpu_set_clamping() - apply or remove the GPU clamps
+ * @pmc: power management controller
+ * @enable: true to clamp the GPU outputs, false to release them
+ *
+ * For a GPU whose rail its driver switches itself, on SoCs with a GPU clamp.
+ * The caller sequences it: drain the GPU's memory client before clamping,
+ * and release the clamp only with the rail and clocks up, reset asserted.
+ *
+ * Return: 0 on success, -EOPNOTSUPP if the SoC has no GPU clamp.
+ */
+int tegra_pmc_gpu_set_clamping(struct tegra_pmc *pmc, bool enable)
+{
+	if (!pmc->soc->has_gpu_clamps ||
+	    !tegra_powergate_is_available(pmc, TEGRA_POWERGATE_3D))
+		return -EOPNOTSUPP;
+
+	mutex_lock(&pmc->powergates_lock);
+	tegra_pmc_writel(pmc, enable, GPU_RG_CNTRL);
+	tegra_pmc_readl(pmc, GPU_RG_CNTRL);
+	mutex_unlock(&pmc->powergates_lock);
+
+	return 0;
+}
+EXPORT_SYMBOL(tegra_pmc_gpu_set_clamping);
+
+/**
  * tegra_pmc_powergate_sequence_power_up() - power up partition
  * @pmc: power management controller
  * @id: partition ID

@@ -151,6 +151,7 @@ struct tegra_pmc *devm_tegra_pmc_get(struct device *dev);
 int tegra_pmc_powergate_power_on(struct tegra_pmc *pmc, unsigned int id);
 int tegra_pmc_powergate_power_off(struct tegra_pmc *pmc, unsigned int id);
 int tegra_pmc_powergate_remove_clamping(struct tegra_pmc *pmc, unsigned int id);
+int tegra_pmc_gpu_set_clamping(struct tegra_pmc *pmc, bool enable);
 
 /* Must be called with clk disabled, and returns with clk enabled */
 int tegra_pmc_powergate_sequence_power_up(struct tegra_pmc *pmc,
@@ -181,6 +182,11 @@ static inline int
 tegra_pmc_powergate_remove_clamping(struct tegra_pmc *pmc, unsigned int id)
 {
 	return -ENOSYS;
+}
+
+static inline int tegra_pmc_gpu_set_clamping(struct tegra_pmc *pmc, bool enable)
+{
+	return -EOPNOTSUPP;
 }
 
 /* Must be called with clk disabled, and returns with clk enabled */
