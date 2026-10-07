@@ -53,11 +53,16 @@ properties:
       - enum: [ ref, fuse ]
 
   resets:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: GPU reset
+      - description: GPU memory client hot reset
 
   reset-names:
+    minItems: 1
     items:
       - const: gpu
+      - const: mc
 
   power-domains:
     maxItems: 1
@@ -103,6 +108,19 @@ allOf:
 
       required:
         - vdd-supply
+  - if:
+      properties:
+        compatible:
+          not:
+            contains:
+              const: nvidia,gm20b
+    then:
+      properties:
+        resets:
+          maxItems: 1
+
+        reset-names:
+          maxItems: 1
   - if:
       properties:
         compatible:
