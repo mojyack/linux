@@ -51,7 +51,9 @@ nvkm_device_tegra_power_up(struct nvkm_device_tegra *tdev)
 	udelay(10);
 
 	if (!tdev->pdev->dev.pm_domain) {
-		reset_control_assert(tdev->rst);
+		ret = reset_control_assert(tdev->rst);
+		if (ret)
+			goto err_clamp;
 		udelay(10);
 
 		ret = tegra_pmc_powergate_remove_clamping(tdev->pmc,
@@ -60,12 +62,44 @@ nvkm_device_tegra_power_up(struct nvkm_device_tegra *tdev)
 			goto err_clamp;
 		udelay(10);
 
-		reset_control_deassert(tdev->rst);
+		if (tdev->mc_rst)
+			clk_disable(tdev->clk);
+		ret = reset_control_deassert(tdev->rst);
+		if (tdev->mc_rst) {
+			int err = clk_enable(tdev->clk);
+
+			if (err) {
+				reset_control_assert(tdev->rst);
+				tegra_pmc_gpu_set_clamping(tdev->pmc, true);
+				clk_disable_unprepare(tdev->clk_pwr);
+				clk_disable_unprepare(tdev->clk_ref);
+				clk_unprepare(tdev->clk);
+				ret = ret ?: err;
+				goto err_clk;
+			}
+		}
+		if (ret)
+			goto err_reset;
 		udelay(10);
+
+		if (tdev->mc_rst) {
+			/* Re-establish the MC flush after boot or deep sleep. */
+			ret = reset_control_assert(tdev->mc_rst);
+			if (ret)
+				goto err_reset;
+			udelay(10);
+			ret = reset_control_deassert(tdev->mc_rst);
+			if (ret)
+				goto err_reset;
+			udelay(10);
+		}
 	}
 
 	return 0;
 
+err_reset:
+	reset_control_assert(tdev->rst);
+	tegra_pmc_gpu_set_clamping(tdev->pmc, true);
 err_clamp:
 	clk_disable_unprepare(tdev->clk_pwr);
 err_clk_pwr:
@@ -87,6 +121,12 @@ nvkm_device_tegra_power_down(struct nvkm_device_tegra *tdev)
 	int ret;
 
 	if (!dev->pm_domain) {
+		/* power_up() releases the flush after the next reset. */
+		ret = reset_control_assert(tdev->mc_rst);
+		if (ret)
+			dev_warn(dev, "failed to flush memory client: %d\n", ret);
+		udelay(10);
+
 		ret = tegra_pmc_gpu_set_clamping(tdev->pmc, true);
 		if (ret) {
 			dev_err(dev, "failed to clamp: %d\n", ret);
@@ -341,6 +381,12 @@ nvkm_device_tegra_new(const struct nvkm_device_tegra_func *func,
 	tdev->rst = devm_reset_control_get(&pdev->dev, "gpu");
 	if (IS_ERR(tdev->rst)) {
 		ret = PTR_ERR(tdev->rst);
+		goto free;
+	}
+
+	tdev->mc_rst = devm_reset_control_get_optional_exclusive(&pdev->dev, "mc");
+	if (IS_ERR(tdev->mc_rst)) {
+		ret = PTR_ERR(tdev->mc_rst);
 		goto free;
 	}
 

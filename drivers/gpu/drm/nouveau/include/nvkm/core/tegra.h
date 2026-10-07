@@ -12,6 +12,7 @@ struct nvkm_device_tegra {
 	void __iomem *regs;
 
 	struct reset_control *rst;
+	struct reset_control *mc_rst;
 	struct clk *clk;
 	struct clk *clk_ref;
 	struct clk *clk_pwr;
