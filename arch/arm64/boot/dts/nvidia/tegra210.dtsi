@@ -958,6 +958,7 @@
 				clocks = <&tegra_car TEGRA210_CLK_NVDEC>;
 				resets = <&mc TEGRA210_MC_RESET_NVDEC>,
 					 <&tegra_car 194>;
+				power-domains = <&pd_nvjpg>;
 				#power-domain-cells = <0>;
 			};
 
