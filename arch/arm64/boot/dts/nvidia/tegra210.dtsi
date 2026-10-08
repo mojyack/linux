@@ -956,7 +956,8 @@
 
 			pd_nvdec: nvdec {
 				clocks = <&tegra_car TEGRA210_CLK_NVDEC>;
-				resets = <&tegra_car 194>;
+				resets = <&mc TEGRA210_MC_RESET_NVDEC>,
+					 <&tegra_car 194>;
 				#power-domain-cells = <0>;
 			};
 
@@ -992,7 +993,8 @@
 
 			pd_vic: vic {
 				clocks = <&tegra_car TEGRA210_CLK_VIC03>;
-				resets = <&tegra_car 178>;
+				resets = <&mc TEGRA210_MC_RESET_VIC>,
+					 <&tegra_car 178>;
 				#power-domain-cells = <0>;
 			};
 
@@ -1016,7 +1018,8 @@
 
 			pd_nvjpg: nvjpg {
 				clocks = <&tegra_car TEGRA210_CLK_NVJPG>;
-				resets = <&tegra_car 195>;
+				resets = <&mc TEGRA210_MC_RESET_NVJPG>,
+					 <&tegra_car 195>;
 				#power-domain-cells = <0>;
 			};
 		};
