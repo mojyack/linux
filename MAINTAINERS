@@ -19851,6 +19851,12 @@ F:	Documentation/devicetree/bindings/input/nintendo,joycon-uart.yaml
 F:	drivers/input/joystick/joycon.c
 F:	include/linux/nintendo-joycon.h
 
+NINTENDO SWITCH BOARD SUPPORT
+M:	mojyack <mojyack@gmail.com>
+L:	linux-tegra@vger.kernel.org
+S:	Maintained
+F:	arch/arm64/boot/dts/nvidia/tegra210-nintendo-switch.dts
+
 NIOS2 ARCHITECTURE
 M:	Dinh Nguyen <dinguyen@kernel.org>
 M:	Simon Schuster <schuster.simon@siemens-energy.com>
