@@ -111,6 +111,7 @@
 		compatible = "ti,bq24192";
 		reg = <0x6b>;
 		interrupts-extended = <&spmi_bus 0 0xd5 0 IRQ_TYPE_EDGE_FALLING>;
+		wakeup-source;
 
 		omit-battery-class;
 
