@@ -406,6 +406,7 @@
 		reg = <0x6b>;
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PD7 IRQ_TYPE_EDGE_FALLING>;
+		wakeup-source;
 		pinctrl-names = "default";
 		pinctrl-0 = <&charger_int &chg_ctl &otg_en>;
 		ti,system-minimum-microvolt = <3200000>;
