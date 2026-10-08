@@ -19840,6 +19840,16 @@ M:	Vicki Pfau <vi@endrift.com>
 L:	linux-input@vger.kernel.org
 S:	Maintained
 F:	drivers/hid/hid-nintendo*
+F:	include/linux/nintendo-joycon.h
+
+NINTENDO JOY-CON RAIL DRIVER
+M:	mojyack <mojyack@gmail.com>
+L:	linux-input@vger.kernel.org
+S:	Maintained
+F:	Documentation/ABI/testing/sysfs-driver-joycon
+F:	Documentation/devicetree/bindings/input/nintendo,joycon-uart.yaml
+F:	drivers/input/joystick/joycon.c
+F:	include/linux/nintendo-joycon.h
 
 NIOS2 ARCHITECTURE
 M:	Dinh Nguyen <dinguyen@kernel.org>
