@@ -519,7 +519,8 @@ static void pwm_fan_cleanup(void *__ctx)
 	} else {
 		/* Switch off everything */
 		ctx->enable_mode = pwm_disable_reg_disable;
-		pwm_fan_power_off(ctx, true);
+		pwm_fan_set_idle(ctx, ctx->enable_mode);
+		ctx->enabled = false;
 	}
 }
 
