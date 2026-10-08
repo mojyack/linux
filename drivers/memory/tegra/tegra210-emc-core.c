@@ -2232,6 +2232,7 @@ static int __maybe_unused tegra210_emc_resume(struct device *dev)
 	err = tegra210_clk_emc_attach(emc->clk, &emc->provider);
 	if (err < 0) {
 		dev_err(dev, "failed to attach to EMC clock: %d\n", err);
+		clk_rate_exclusive_put(emc->clk);
 		return err;
 	}
 
