@@ -133,6 +133,7 @@ allOf:
           contains:
             enum:
               - nvidia,tegra124-dc
+              - nvidia,tegra210-dc
     then:
       properties:
         interconnects:
