@@ -767,6 +767,22 @@ static void tegra210_change_dll_src(struct tegra210_emc *emc,
 		tegra210_clk_emc_dll_enable(false);
 }
 
+/* called with emc->lock held, emc->next set to the new timing */
+static void tegra210_emc_change_clock(struct tegra210_emc *emc, u32 clksrc)
+{
+	s64 last_change_delay;
+
+	last_change_delay = ktime_us_delta(ktime_get(), emc->clkchange_time);
+
+	if (last_change_delay >= 0 &&
+	    last_change_delay < emc->clkchange_delay)
+		udelay(emc->clkchange_delay - (int)last_change_delay);
+
+	tegra210_emc_set_clock(emc, clksrc);
+	emc->clkchange_time = ktime_get();
+	emc->last = emc->next;
+}
+
 int tegra210_emc_set_refresh(struct tegra210_emc *emc,
 			     enum tegra210_emc_refresh refresh)
 {
@@ -803,9 +819,7 @@ int tegra210_emc_set_refresh(struct tegra210_emc *emc,
 		emc->next = &timings[index];
 		emc->timings = timings;
 
-		tegra210_emc_set_clock(emc, clksrc);
-		emc->clkchange_time = ktime_get();
-		emc->last = emc->next;
+		tegra210_emc_change_clock(emc, clksrc);
 	} else {
 		tegra210_emc_adjust_timing(emc, emc->last);
 		tegra210_emc_timing_update(emc);
@@ -1544,12 +1558,14 @@ static int tegra210_emc_set_rate(struct device *dev,
 	struct tegra210_emc *emc = dev_get_drvdata(dev);
 	struct tegra210_emc_timing *timing = NULL;
 	unsigned long rate = config->rate;
-	s64 last_change_delay;
 	unsigned long flags;
 	unsigned int i;
+	int err = 0;
+
+	spin_lock_irqsave(&emc->lock, flags);
 
 	if (rate == emc->last->rate * 1000UL)
-		return 0;
+		goto unlock;
 
 	for (i = 0; i < emc->num_timings; i++) {
 		if (emc->timings[i].rate * 1000UL == rate) {
@@ -1558,27 +1574,18 @@ static int tegra210_emc_set_rate(struct device *dev,
 		}
 	}
 
-	if (!timing)
-		return -EINVAL;
-
-	if (rate > 204000000 && !timing->trained)
-		return -EINVAL;
+	if (!timing || (rate > 204000000 && !timing->trained)) {
+		err = -EINVAL;
+		goto unlock;
+	}
 
 	emc->next = timing;
-	last_change_delay = ktime_us_delta(ktime_get(), emc->clkchange_time);
+	tegra210_emc_change_clock(emc, config->value);
 
-	/* XXX use non-busy-looping sleep? */
-	if ((last_change_delay >= 0) &&
-	    (last_change_delay < emc->clkchange_delay))
-		udelay(emc->clkchange_delay - (int)last_change_delay);
-
-	spin_lock_irqsave(&emc->lock, flags);
-	tegra210_emc_set_clock(emc, config->value);
-	emc->clkchange_time = ktime_get();
-	emc->last = timing;
+unlock:
 	spin_unlock_irqrestore(&emc->lock, flags);
 
-	return 0;
+	return err;
 }
 
 /*
