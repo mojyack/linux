@@ -265,6 +265,10 @@
 			interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&tegra_car TEGRA210_CLK_VIC03>;
 			clock-names = "vic";
+			assigned-clocks = <&tegra_car TEGRA210_CLK_VIC03>,
+					  <&tegra_car TEGRA210_CLK_PLL_C2>;
+			assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_C2>, <0>;
+			assigned-clock-rates = <0>, <307200000>;
 			resets = <&tegra_car 178>;
 			reset-names = "vic";
 
@@ -307,6 +311,8 @@
 			reg = <0x0 0x54480000 0x0 0x00040000>;
 			clocks = <&tegra_car TEGRA210_CLK_NVDEC>;
 			clock-names = "nvdec";
+			assigned-clocks = <&tegra_car TEGRA210_CLK_NVDEC>;
+			assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_P>;
 			resets = <&tegra_car 194>;
 			reset-names = "nvdec";
 
