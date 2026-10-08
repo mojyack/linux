@@ -1546,9 +1546,19 @@ static int tegra210_emc_set_rate(struct device *dev,
 	s64 last_change_delay;
 	unsigned long flags;
 	unsigned int i;
+	int err = 0;
+
+	last_change_delay = ktime_us_delta(ktime_get(), emc->clkchange_time);
+
+	/* XXX use non-busy-looping sleep? */
+	if (last_change_delay >= 0 &&
+	    last_change_delay < emc->clkchange_delay)
+		udelay(emc->clkchange_delay - (int)last_change_delay);
+
+	spin_lock_irqsave(&emc->lock, flags);
 
 	if (rate == emc->last->rate * 1000UL)
-		return 0;
+		goto unlock;
 
 	for (i = 0; i < emc->num_timings; i++) {
 		if (emc->timings[i].rate * 1000UL == rate) {
@@ -1557,27 +1567,20 @@ static int tegra210_emc_set_rate(struct device *dev,
 		}
 	}
 
-	if (!timing)
-		return -EINVAL;
-
-	if (rate > 204000000 && !timing->trained)
-		return -EINVAL;
+	if (!timing || (rate > 204000000 && !timing->trained)) {
+		err = -EINVAL;
+		goto unlock;
+	}
 
 	emc->next = timing;
-	last_change_delay = ktime_us_delta(ktime_get(), emc->clkchange_time);
-
-	/* XXX use non-busy-looping sleep? */
-	if ((last_change_delay >= 0) &&
-	    (last_change_delay < emc->clkchange_delay))
-		udelay(emc->clkchange_delay - (int)last_change_delay);
-
-	spin_lock_irqsave(&emc->lock, flags);
 	tegra210_emc_set_clock(emc, config->value);
 	emc->clkchange_time = ktime_get();
 	emc->last = timing;
+
+unlock:
 	spin_unlock_irqrestore(&emc->lock, flags);
 
-	return 0;
+	return err;
 }
 
 /*
