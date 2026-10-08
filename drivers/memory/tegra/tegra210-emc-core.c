@@ -83,7 +83,7 @@
 	  _OB_DDLL_LONG_DQ_RANK ## rank ## _BYTE ## byte2 ## _MASK))
 
 #define REFRESH_SPEEDUP(value, speedup) \
-		(((value) & 0xffff0000) | ((value) & 0xffff) * (speedup))
+		(((value) & 0xffff0000) | ((value) & 0xffff) / (speedup))
 
 #define LPDDR2_MR4_SRR GENMASK(2, 0)
 
