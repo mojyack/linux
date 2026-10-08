@@ -49,6 +49,9 @@ properties:
   "#reset-cells":
     const: 1
 
+  "#interconnect-cells":
+    const: 1
+
 required:
   - compatible
   - reg
@@ -74,4 +77,5 @@ examples:
 
         #iommu-cells = <1>;
         #reset-cells = <1>;
+        #interconnect-cells = <1>;
     };
