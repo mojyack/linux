@@ -530,6 +530,7 @@ static int tegra_gpio_irq_set_wake(struct irq_data *d, unsigned int enable)
 	struct gpio_chip *chip = irq_data_get_irq_chip_data(d);
 	struct tegra_gpio_info *tgi = gpiochip_get_data(chip);
 	struct tegra_gpio_bank *bank;
+	unsigned int gpio = d->hwirq, type;
 	int err;
 
 	bank = &tgi->bank_info[GPIO_BANK(d->hwirq)];
@@ -539,7 +540,14 @@ static int tegra_gpio_irq_set_wake(struct irq_data *d, unsigned int enable)
 		return err;
 
 	if (d->parent_data) {
-		err = irq_chip_set_wake_parent(d, enable);
+		/* the PMC wakes on a level: arm the one the pad is not at */
+		if (enable && irqd_get_trigger_type(d) == IRQ_TYPE_EDGE_BOTH) {
+			type = tegra_gpio_get(chip, gpio) ? IRQ_TYPE_EDGE_FALLING :
+							    IRQ_TYPE_EDGE_RISING;
+			err = irq_chip_set_type_parent(d, type);
+		}
+		if (!err)
+			err = irq_chip_set_wake_parent(d, enable);
 		if (err) {
 			irq_set_irq_wake(tgi->irqs[bank->bank], !enable);
 			return err;
