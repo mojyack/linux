@@ -49,6 +49,8 @@ struct tegra_cec {
 	u8			tx_buf_cur;
 	u8			tx_buf_cnt;
 	u32			rx_total_low_drives;
+	u32			hw_control;
+	bool			suspended;
 };
 
 static inline u32 cec_read(struct tegra_cec *cec, u32 reg)
@@ -193,10 +195,8 @@ static irqreturn_t tegra_cec_irq_handler(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static int tegra_cec_adap_enable(struct cec_adapter *adap, bool enable)
+static void tegra_cec_hw_init(struct tegra_cec *cec)
 {
-	struct tegra_cec *cec = adap->priv;
-
 	cec->rx_buf_cnt = 0;
 	cec->tx_buf_cnt = 0;
 	cec->tx_buf_cur = 0;
@@ -206,8 +206,8 @@ static int tegra_cec_adap_enable(struct cec_adapter *adap, bool enable)
 	cec_write(cec, TEGRA_CEC_INT_STAT, 0xffffffff);
 	cec_write(cec, TEGRA_CEC_SW_CONTROL, 0);
 
-	if (!enable)
-		return 0;
+	if (!cec->hw_control)
+		return;
 
 	cec_write(cec, TEGRA_CEC_INPUT_FILTER, (1U << 31) | 0x20);
 
@@ -253,6 +253,20 @@ static int tegra_cec_adap_enable(struct cec_adapter *adap, bool enable)
 		  TEGRA_CEC_INT_MASK_RX_BUS_ERROR_DETECTED |
 		  TEGRA_CEC_INT_MASK_RX_START_BIT_DETECTED);
 
+	cec_write(cec, TEGRA_CEC_HW_CONTROL, cec->hw_control);
+}
+
+static void tegra_cec_write_hw_control(struct tegra_cec *cec, u32 val)
+{
+	cec->hw_control = val;
+	if (!cec->suspended)
+		cec_write(cec, TEGRA_CEC_HW_CONTROL, val);
+}
+
+static int tegra_cec_adap_enable(struct cec_adapter *adap, bool enable)
+{
+	struct tegra_cec *cec = adap->priv;
+
 	/*
 	 * TX_NAK_MODE ensures that the whole message is transmitted even
 	 * if each byte is NACKed. Without this flag the retransmit of the
@@ -262,23 +276,24 @@ static int tegra_cec_adap_enable(struct cec_adapter *adap, bool enable)
 	 * that can be NACKed, with the exception of POLL messages which
 	 * are just one byte anyway.
 	 */
-	cec_write(cec, TEGRA_CEC_HW_CONTROL,
-		  TEGRA_CEC_HWCTRL_TX_RX_MODE |
-		  TEGRA_CEC_HWCTRL_TX_NAK_MODE);
+	cec->hw_control = enable ? TEGRA_CEC_HWCTRL_TX_RX_MODE |
+				   TEGRA_CEC_HWCTRL_TX_NAK_MODE : 0;
+	if (!cec->suspended)
+		tegra_cec_hw_init(cec);
 	return 0;
 }
 
 static int tegra_cec_adap_log_addr(struct cec_adapter *adap, u8 logical_addr)
 {
 	struct tegra_cec *cec = adap->priv;
-	u32 state = cec_read(cec, TEGRA_CEC_HW_CONTROL);
+	u32 state = cec->hw_control;
 
 	if (logical_addr == CEC_LOG_ADDR_INVALID)
 		state &= ~TEGRA_CEC_HWCTRL_RX_LADDR_MASK;
 	else
 		state |= TEGRA_CEC_HWCTRL_RX_LADDR((1 << logical_addr));
 
-	cec_write(cec, TEGRA_CEC_HW_CONTROL, state);
+	tegra_cec_write_hw_control(cec, state);
 	return 0;
 }
 
@@ -286,13 +301,13 @@ static int tegra_cec_adap_monitor_all_enable(struct cec_adapter *adap,
 					     bool enable)
 {
 	struct tegra_cec *cec = adap->priv;
-	u32 reg = cec_read(cec, TEGRA_CEC_HW_CONTROL);
+	u32 reg = cec->hw_control;
 
 	if (enable)
 		reg |= TEGRA_CEC_HWCTRL_RX_SNOOP;
 	else
 		reg &= ~TEGRA_CEC_HWCTRL_RX_SNOOP;
-	cec_write(cec, TEGRA_CEC_HW_CONTROL, reg);
+	tegra_cec_write_hw_control(cec, reg);
 	return 0;
 }
 
@@ -304,6 +319,9 @@ static int tegra_cec_adap_transmit(struct cec_adapter *adap, u8 attempts,
 	unsigned int i;
 	u32 mode = 0;
 	u32 mask;
+
+	if (cec->suspended)
+		return -EBUSY;
 
 	if (cec_msg_is_broadcast(msg))
 		mode = TEGRA_CEC_TX_REG_BCAST;
@@ -458,26 +476,41 @@ static void tegra_cec_remove(struct platform_device *pdev)
 	clk_disable_unprepare(cec->clk);
 }
 
-#ifdef CONFIG_PM
-static int tegra_cec_suspend(struct platform_device *pdev, pm_message_t state)
+static int tegra_cec_suspend(struct device *dev)
 {
-	struct tegra_cec *cec = platform_get_drvdata(pdev);
+	struct tegra_cec *cec = dev_get_drvdata(dev);
+
+	mutex_lock(&cec->adap->lock);
+	cec->suspended = true;
+	mutex_unlock(&cec->adap->lock);
 
 	clk_disable_unprepare(cec->clk);
 
-	dev_notice(&pdev->dev, "suspended\n");
+	dev_notice(dev, "suspended\n");
 	return 0;
 }
 
-static int tegra_cec_resume(struct platform_device *pdev)
+static int tegra_cec_resume(struct device *dev)
 {
-	struct tegra_cec *cec = platform_get_drvdata(pdev);
+	struct tegra_cec *cec = dev_get_drvdata(dev);
+	int ret;
 
-	dev_notice(&pdev->dev, "Resuming\n");
+	dev_notice(dev, "Resuming\n");
 
-	return clk_prepare_enable(cec->clk);
+	ret = clk_prepare_enable(cec->clk);
+	if (ret)
+		return ret;
+
+	mutex_lock(&cec->adap->lock);
+	cec->suspended = false;
+	tegra_cec_hw_init(cec);
+	mutex_unlock(&cec->adap->lock);
+
+	return 0;
 }
-#endif
+
+static DEFINE_NOIRQ_DEV_PM_OPS(tegra_cec_pm_ops, tegra_cec_suspend,
+			       tegra_cec_resume);
 
 static const struct of_device_id tegra_cec_of_match[] = {
 	{ .compatible = "nvidia,tegra114-cec", },
@@ -491,14 +524,10 @@ static struct platform_driver tegra_cec_driver = {
 	.driver = {
 		.name = TEGRA_CEC_NAME,
 		.of_match_table = tegra_cec_of_match,
+		.pm = pm_sleep_ptr(&tegra_cec_pm_ops),
 	},
 	.probe = tegra_cec_probe,
 	.remove = tegra_cec_remove,
-
-#ifdef CONFIG_PM
-	.suspend = tegra_cec_suspend,
-	.resume = tegra_cec_resume,
-#endif
 };
 
 module_platform_driver(tegra_cec_driver);
