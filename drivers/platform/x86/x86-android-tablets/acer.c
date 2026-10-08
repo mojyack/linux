@@ -46,6 +46,7 @@ static const struct x86_i2c_client_info acer_a1_840_i2c_clients[] __initconst = 
 			.type = "bq24297",
 			.addr = 0x6b,
 			.dev_name = "bq24297",
+			.flags = I2C_CLIENT_WAKE,
 			.swnode = &acer_a1_840_bq24190_node,
 			.platform_data = &bq24190_pdata,
 		},
