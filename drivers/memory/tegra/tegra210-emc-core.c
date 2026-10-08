@@ -786,6 +786,8 @@ int tegra210_emc_set_refresh(struct tegra210_emc *emc,
 
 	spin_lock_irqsave(&emc->lock, flags);
 
+	emc->refresh = refresh;
+
 	if (refresh == TEGRA210_EMC_REFRESH_THROTTLE && emc->derated)
 		timings = emc->derated;
 	else
@@ -802,6 +804,8 @@ int tegra210_emc_set_refresh(struct tegra210_emc *emc,
 		emc->timings = timings;
 
 		tegra210_emc_set_clock(emc, clksrc);
+		emc->clkchange_time = ktime_get();
+		emc->last = emc->next;
 	} else {
 		tegra210_emc_adjust_timing(emc, emc->last);
 		tegra210_emc_timing_update(emc);
@@ -1502,7 +1506,6 @@ void tegra210_emc_adjust_timing(struct tegra210_emc *emc,
 
 	switch (emc->refresh) {
 	case TEGRA210_EMC_REFRESH_NOMINAL:
-	case TEGRA210_EMC_REFRESH_THROTTLE:
 		break;
 
 	case TEGRA210_EMC_REFRESH_2X:
@@ -1510,6 +1513,12 @@ void tegra210_emc_adjust_timing(struct tegra210_emc *emc,
 		pre_ref = REFRESH_SPEEDUP(pre_ref, 2);
 		dsr_cntrl = REFRESH_SPEEDUP(dsr_cntrl, 2);
 		break;
+
+	case TEGRA210_EMC_REFRESH_THROTTLE:
+		/* derated timings carry their own refresh settings */
+		if (emc->timings == emc->derated)
+			break;
+		fallthrough;
 
 	case TEGRA210_EMC_REFRESH_4X:
 		ref = REFRESH_SPEEDUP(ref, 4);
