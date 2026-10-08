@@ -1918,7 +1918,7 @@ static int tegra_pmc_parse_dt(struct tegra_pmc *pmc, struct device_node *np)
 }
 
 /* translate sc7 wake sources back into IRQs to catch edge triggered wakeups */
-static void tegra186_pmc_wake_handler(struct irq_work *work)
+static void tegra_pmc_wake_handler(struct irq_work *work)
 {
 	struct tegra_pmc *pmc = container_of(work, struct tegra_pmc, wake_work);
 	unsigned int i, wake;
@@ -1993,7 +1993,7 @@ static int tegra_pmc_init(struct tegra_pmc *pmc)
 		 * because we call generic_handle_irq() which requires hard
 		 * IRQ context.
 		 */
-		pmc->wake_work = IRQ_WORK_INIT_HARD(tegra186_pmc_wake_handler);
+		pmc->wake_work = IRQ_WORK_INIT_HARD(tegra_pmc_wake_handler);
 	}
 
 	if (pmc->soc->init)
@@ -2387,13 +2387,6 @@ static int tegra210_pmc_irq_set_wake(struct irq_data *data, unsigned int on)
 
 	offset = data->hwirq / 32;
 	bit = data->hwirq % 32;
-
-	/* clear wake status */
-	tegra_pmc_writel(pmc, 0, PMC_SW_WAKE_STATUS);
-	tegra_pmc_writel(pmc, 0, PMC_SW_WAKE2_STATUS);
-
-	tegra_pmc_writel(pmc, 0, PMC_WAKE_STATUS);
-	tegra_pmc_writel(pmc, 0, PMC_WAKE2_STATUS);
 
 	/* enable PMC wake */
 	if (data->hwirq >= 32)
@@ -3362,6 +3355,36 @@ static const struct syscore_ops tegra186_pmc_wake_syscore_ops = {
 	.resume = tegra186_pmc_wake_syscore_resume,
 };
 
+static void tegra210_pmc_wake_syscore_resume(void *data)
+{
+	struct tegra_pmc *pmc = data;
+
+	pmc->wake_status[0] = tegra_pmc_readl(pmc, PMC_WAKE_STATUS) &
+			      tegra_pmc_readl(pmc, PMC_WAKE_MASK);
+	pmc->wake_status[1] = tegra_pmc_readl(pmc, PMC_WAKE2_STATUS) &
+			      tegra_pmc_readl(pmc, PMC_WAKE2_MASK);
+
+	irq_work_queue(&pmc->wake_work);
+}
+
+static int tegra210_pmc_wake_syscore_suspend(void *data)
+{
+	struct tegra_pmc *pmc = data;
+
+	/* the wake status registers are write-1-to-clear */
+	tegra_pmc_writel(pmc, tegra_pmc_readl(pmc, PMC_WAKE_STATUS),
+			 PMC_WAKE_STATUS);
+	tegra_pmc_writel(pmc, tegra_pmc_readl(pmc, PMC_WAKE2_STATUS),
+			 PMC_WAKE2_STATUS);
+
+	return 0;
+}
+
+static const struct syscore_ops tegra210_pmc_wake_syscore_ops = {
+	.suspend = tegra210_pmc_wake_syscore_suspend,
+	.resume = tegra210_pmc_wake_syscore_resume,
+};
+
 #if defined(CONFIG_PM_SLEEP) && defined(CONFIG_ARM)
 static int tegra_pmc_suspend(struct device *dev)
 {
@@ -3923,6 +3946,7 @@ static const struct tegra_pmc_soc tegra210_pmc_soc = {
 	.num_pin_descs = ARRAY_SIZE(tegra210_pin_descs),
 	.pin_descs = tegra210_pin_descs,
 	.regs = &tegra20_pmc_regs,
+	.syscore_ops = &tegra210_pmc_wake_syscore_ops,
 	.init = tegra20_pmc_init,
 	.setup_irq_polarity = tegra20_pmc_setup_irq_polarity,
 	.powergate_set = tegra114_powergate_set,
@@ -3934,6 +3958,8 @@ static const struct tegra_pmc_soc tegra210_pmc_soc = {
 	.num_reset_levels = 0,
 	.num_wake_events = ARRAY_SIZE(tegra210_wake_events),
 	.wake_events = tegra210_wake_events,
+	.max_wake_events = 64,
+	.max_wake_vectors = 2,
 	.pmc_clks_data = tegra_pmc_clks_data,
 	.num_pmc_clks = ARRAY_SIZE(tegra_pmc_clks_data),
 	.has_blink_output = true,
