@@ -200,6 +200,45 @@ static int pwm_fan_power_off(struct pwm_fan_ctx *ctx, bool force_disable)
 	return 0;
 }
 
+/* Apply the stopped-fan PWM state of @mode */
+static int pwm_fan_stop_pwm(struct pwm_fan_ctx *ctx,
+			    enum pwm_fan_enable_mode mode,
+			    bool *enable_regulator)
+{
+	struct pwm_state state = ctx->pwm_state;
+	int ret;
+
+	state.duty_cycle = 0;
+	pwm_fan_enable_mode_2_state(mode, &state, enable_regulator);
+
+	ret = pwm_apply_might_sleep(ctx->pwm, &state);
+	if (ret) {
+		dev_err(ctx->dev, "failed to apply PWM state\n");
+		return ret;
+	}
+	ctx->pwm_state = state;
+
+	return 0;
+}
+
+/* Apply the stopped-fan PWM and regulator state of @mode */
+static int pwm_fan_set_idle(struct pwm_fan_ctx *ctx,
+			    enum pwm_fan_enable_mode mode)
+{
+	bool enable_regulator = false;
+	int ret;
+
+	ret = pwm_fan_stop_pwm(ctx, mode, &enable_regulator);
+	if (ret)
+		return ret;
+
+	ret = pwm_fan_switch_power(ctx, enable_regulator);
+	if (ret)
+		dev_err(ctx->dev, "failed to switch power supply\n");
+
+	return ret;
+}
+
 static int  __set_pwm(struct pwm_fan_ctx *ctx, unsigned long pwm)
 {
 	struct pwm_state *state = &ctx->pwm_state;
@@ -289,16 +328,7 @@ static int pwm_fan_update_enable(struct pwm_fan_ctx *ctx, long val)
 		 * Nothing to do if currently enabled
 		 */
 		if (!ctx->enabled) {
-			struct pwm_state *state = &ctx->pwm_state;
-			bool enable_regulator = false;
-
-			state->duty_cycle = 0;
-			pwm_fan_enable_mode_2_state(val,
-						    state,
-						    &enable_regulator);
-
-			pwm_apply_might_sleep(ctx->pwm, state);
-			pwm_fan_switch_power(ctx, enable_regulator);
+			pwm_fan_set_idle(ctx, val);
 			pwm_fan_update_state(ctx, 0);
 		}
 	}
