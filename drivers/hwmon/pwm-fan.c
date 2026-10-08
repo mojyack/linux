@@ -748,15 +748,34 @@ static void pwm_fan_shutdown(struct platform_device *pdev)
 static int pwm_fan_suspend(struct device *dev)
 {
 	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
+	bool enable_regulator;
+	int ret;
 
-	return pwm_fan_power_off(ctx, true);
+	mutex_lock(&ctx->lock);
+	ret = pwm_fan_stop_pwm(ctx, ctx->enable_mode, &enable_regulator);
+	if (!ret) {
+		ctx->enabled = false;
+		if (pwm_fan_switch_power(ctx, false))
+			dev_warn(ctx->dev, "failed to switch off power supply\n");
+	}
+	mutex_unlock(&ctx->lock);
+
+	return ret;
 }
 
 static int pwm_fan_resume(struct device *dev)
 {
 	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
+	int ret;
 
-	return set_pwm(ctx, ctx->pwm_value);
+	if (ctx->pwm_value)
+		return set_pwm(ctx, ctx->pwm_value);
+
+	mutex_lock(&ctx->lock);
+	ret = pwm_fan_set_idle(ctx, ctx->enable_mode);
+	mutex_unlock(&ctx->lock);
+
+	return ret;
 }
 
 static DEFINE_SIMPLE_DEV_PM_OPS(pwm_fan_pm, pwm_fan_suspend, pwm_fan_resume);
