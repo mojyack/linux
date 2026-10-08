@@ -38,6 +38,13 @@ properties:
   reg:
     maxItems: 1
 
+  resets:
+    maxItems: 1
+
+  reset-names:
+    items:
+      - const: cec
+
 required:
   - compatible
   - clocks
@@ -59,5 +66,7 @@ examples:
         interrupts = <GIC_SPI 3 IRQ_TYPE_LEVEL_HIGH>;
         clocks = <&tegra_car TEGRA124_CLK_CEC>;
         clock-names = "cec";
+        resets = <&tegra_car TEGRA124_CLK_CEC>;
+        reset-names = "cec";
         hdmi-phandle = <&hdmi>;
     };
