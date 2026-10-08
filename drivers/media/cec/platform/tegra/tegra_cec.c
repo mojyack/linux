@@ -49,6 +49,7 @@ struct tegra_cec {
 	u8			tx_buf_cur;
 	u8			tx_buf_cnt;
 	u32			rx_total_low_drives;
+	u32			hw_control;
 };
 
 static inline u32 cec_read(struct tegra_cec *cec, u32 reg)
@@ -463,6 +464,7 @@ static int tegra_cec_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	struct tegra_cec *cec = platform_get_drvdata(pdev);
 
+	cec->hw_control = cec_read(cec, TEGRA_CEC_HW_CONTROL);
 	clk_disable_unprepare(cec->clk);
 
 	dev_notice(&pdev->dev, "suspended\n");
@@ -472,10 +474,21 @@ static int tegra_cec_suspend(struct platform_device *pdev, pm_message_t state)
 static int tegra_cec_resume(struct platform_device *pdev)
 {
 	struct tegra_cec *cec = platform_get_drvdata(pdev);
+	int ret;
 
 	dev_notice(&pdev->dev, "Resuming\n");
 
-	return clk_prepare_enable(cec->clk);
+	ret = clk_prepare_enable(cec->clk);
+	if (ret)
+		return ret;
+
+	/* The registers do not survive SC7; HW_CONTROL is 0 iff disabled. */
+	if (cec->hw_control) {
+		tegra_cec_adap_enable(cec->adap, true);
+		cec_write(cec, TEGRA_CEC_HW_CONTROL, cec->hw_control);
+	}
+
+	return 0;
 }
 #endif
 
