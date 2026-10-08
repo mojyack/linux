@@ -179,6 +179,7 @@
 		compatible = "ti,bq24196";
 		reg = <0x6b>;
 		interrupts-extended = <&tlmm 31 IRQ_TYPE_EDGE_FALLING>;
+		wakeup-source;
 		omit-battery-class;
 	};
 };
