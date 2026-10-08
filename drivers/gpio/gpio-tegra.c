@@ -488,10 +488,43 @@ static void tegra_gpio_resume(void *data)
 	tegra_gpio_restore(data);
 }
 
+/* the PMC wakes on a level: arm the one the pad is not at */
+static int tegra_gpio_arm_dual_edge_wakes(struct tegra_gpio_info *tgi)
+{
+	struct irq_domain *domain = tgi->gc.irq.domain;
+	unsigned int gpio, irq, type;
+	struct irq_data *d;
+	int err;
+
+	for (gpio = 0; gpio < tgi->gc.ngpio; gpio++) {
+		irq = irq_find_mapping(domain, gpio);
+		if (!irq)
+			continue;
+
+		d = irq_get_irq_data(irq);
+		if (!d->parent_data || !irqd_is_wakeup_set(d) ||
+		    irqd_get_trigger_type(d) != IRQ_TYPE_EDGE_BOTH)
+			continue;
+
+		type = tegra_gpio_get(&tgi->gc, gpio) ? IRQ_TYPE_EDGE_FALLING :
+							IRQ_TYPE_EDGE_RISING;
+		err = irq_chip_set_type_parent(d, type);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
 static int tegra_gpio_suspend(void *data)
 {
 	struct tegra_gpio_info *tgi = data;
 	unsigned int b, p;
+	int err;
+
+	err = tegra_gpio_arm_dual_edge_wakes(tgi);
+	if (err)
+		return err;
 
 	for (b = 0; b < tgi->bank_count; b++) {
 		struct tegra_gpio_bank *bank = &tgi->bank_info[b];
