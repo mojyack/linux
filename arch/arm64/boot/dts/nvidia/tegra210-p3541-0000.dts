@@ -12,6 +12,17 @@
 	};
 
 	host1x@50000000 {
+		vic@54340000 {
+			/delete-property/ assigned-clocks;
+			/delete-property/ assigned-clock-parents;
+			/delete-property/ assigned-clock-rates;
+		};
+
+		nvdec@54480000 {
+			/delete-property/ assigned-clocks;
+			/delete-property/ assigned-clock-parents;
+		};
+
 		sor@54540000 {
 			status = "disabled";
 		};

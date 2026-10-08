@@ -77,6 +77,18 @@
 			};
 		};
 
+		vic@54340000 {
+			assigned-clocks = <&tegra_car TEGRA210_CLK_VIC03>,
+					  <&tegra_car TEGRA210_CLK_PLL_C2>;
+			assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_C2>, <0>;
+			assigned-clock-rates = <0>, <307200000>;
+		};
+
+		nvdec@54480000 {
+			assigned-clocks = <&tegra_car TEGRA210_CLK_NVDEC>;
+			assigned-clock-parents = <&tegra_car TEGRA210_CLK_PLL_P>;
+		};
+
 		sor@54540000 {
 			status = "okay";
 
