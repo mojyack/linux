@@ -1526,8 +1526,11 @@ static int tegra_powergate_init(struct tegra_pmc *pmc,
 	for_each_child_of_node_scoped(np, child) {
 		err = tegra_powergate_add(pmc, child);
 		if (err < 0)
-			break;
+			goto put;
+	}
 
+	/* a parent domain may come later in the node list */
+	for_each_child_of_node_scoped(np, child) {
 		if (of_parse_phandle_with_args(child, "power-domains",
 					       "#power-domain-cells",
 					       0, &parent_args))
@@ -1542,6 +1545,7 @@ static int tegra_powergate_init(struct tegra_pmc *pmc,
 			break;
 	}
 
+put:
 	of_node_put(np);
 
 	return err;
