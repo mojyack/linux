@@ -790,6 +790,8 @@ int tegra210_emc_set_refresh(struct tegra210_emc *emc,
 
 	spin_lock_irqsave(&emc->lock, flags);
 
+	emc->refresh = refresh;
+
 	if (refresh == TEGRA210_EMC_REFRESH_THROTTLE && emc->derated)
 		timings = emc->derated;
 	else
@@ -806,6 +808,8 @@ int tegra210_emc_set_refresh(struct tegra210_emc *emc,
 		emc->timings = timings;
 
 		tegra210_emc_set_clock(emc, clksrc);
+		emc->clkchange_time = ktime_get();
+		emc->last = emc->next;
 	} else {
 		tegra210_emc_adjust_timing(emc, emc->last);
 		tegra210_emc_timing_update(emc);
