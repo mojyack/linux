@@ -24389,6 +24389,13 @@ S:	Supported
 F:	drivers/iio/adc/rohm-bd79112.c
 F:	drivers/iio/adc/rohm-bd79124.c
 
+ROHM BH1730 AMBIENT LIGHT SENSOR DRIVER
+M:	mojyack <mojyack@gmail.com>
+L:	linux-iio@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/iio/light/rohm,bh1730fvc.yaml
+F:	drivers/iio/light/bh1730.c
+
 ROHM BH1745 COLOUR SENSOR
 M:	Mudit Sharma <muditsharma.info@gmail.com>
 L:	linux-iio@vger.kernel.org
