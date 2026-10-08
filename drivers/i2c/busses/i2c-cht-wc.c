@@ -303,6 +303,7 @@ static struct i2c_board_info gpd_win_board_info = {
 	.type = "bq24190",
 	.addr = 0x6b,
 	.dev_name = "bq24190",
+	.flags = I2C_CLIENT_WAKE,
 	.swnode = &bq24190_node,
 	.platform_data = &bq24190_pdata,
 };
