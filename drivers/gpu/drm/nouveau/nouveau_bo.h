@@ -21,6 +21,8 @@ struct nouveau_bo {
 	bool cpu_mapped;
 	bool cpu_mapped_dmabuf;
 	unsigned int cpu_vmapped; /* drm_gem_vmap()s, under the reservation */
+	/* pages dirtied through the CPU mapping, [first, last) */
+	pgoff_t cpu_wb_first, cpu_wb_last;
 	struct ttm_bo_kmap_obj kmap;
 	struct list_head head;
 	struct list_head io_reserve_lru;

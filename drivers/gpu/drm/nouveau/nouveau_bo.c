@@ -697,7 +697,8 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 {
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
-	int i, j;
+	pgoff_t i, j, end;
+	bool whole = nvbo->cpu_dirty;
 
 	nvbo->cpu_dirty = false;
 
@@ -712,12 +713,16 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 	if (nvbo->force_coherent)
 		return;
 
-	i = 0;
-	while (i < ttm_dma->num_pages) {
+	/* Only the faulted-in range, unless cpu_dirty owes the whole object. */
+	i = whole ? 0 : nvbo->cpu_wb_first;
+	end = whole ? ttm_dma->num_pages :
+		      min_t(pgoff_t, nvbo->cpu_wb_last, ttm_dma->num_pages);
+
+	while (i < end) {
 		struct page *p = ttm_dma->pages[i];
 		size_t num_pages = 1;
 
-		for (j = i + 1; j < ttm_dma->num_pages; ++j) {
+		for (j = i + 1; j < end; ++j) {
 			if (++p != ttm_dma->pages[j])
 				break;
 
@@ -814,9 +819,17 @@ nouveau_bo_validate(struct nouveau_bo *nvbo, bool interruptible,
 		    dma_dev_need_sync(drm->dev->dev)) {
 			nvbo->cpu_mapped = false;
 			ttm_bo_unmap_virtual(&nvbo->bo);
-		}
+			nouveau_bo_sync_for_device(nvbo);
 
-		nouveau_bo_sync_for_device(nvbo);
+			/* No PTE is left, so the next write starts a new range. */
+			nvbo->cpu_wb_first = 0;
+			nvbo->cpu_wb_last = 0;
+		} else {
+			/* Still mapped: a write needs no fault, so no range. */
+			if (nvbo->cpu_mapped)
+				nvbo->cpu_dirty = true;
+			nouveau_bo_sync_for_device(nvbo);
+		}
 	}
 
 	return 0;
