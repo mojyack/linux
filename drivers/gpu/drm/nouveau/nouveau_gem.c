@@ -24,6 +24,8 @@
  *
  */
 
+#include <linux/pagemap.h>
+
 #include <drm/drm_gem_ttm_helper.h>
 
 #include "nouveau_drv.h"
@@ -54,12 +56,25 @@ static vm_fault_t nouveau_ttm_fault(struct vm_fault *vmf)
 	if (ret)
 		goto error_unlock;
 
-	/* Writes through this mapping are invisible to us from here on. */
+	/* Writes are invisible from here on, but only to the pages made present. */
 	if (vma->vm_flags & VM_MAYWRITE) {
+		struct nouveau_bo *nvbo = nouveau_bo(bo);
+		pgoff_t pg = linear_page_index(vma, vmf->address) -
+			     drm_vma_node_start(&bo->base.vma_node);
+
+		if (nvbo->cpu_wb_first >= nvbo->cpu_wb_last) {
+			nvbo->cpu_wb_first = pg;
+			nvbo->cpu_wb_last = pg + TTM_BO_VM_NUM_PREFAULT;
+		} else {
+			nvbo->cpu_wb_first = min(nvbo->cpu_wb_first, pg);
+			nvbo->cpu_wb_last = max(nvbo->cpu_wb_last,
+						pg + TTM_BO_VM_NUM_PREFAULT);
+		}
+
 		/* A dma-buf mmap is out of ttm_bo_unmap_virtual()'s reach. */
 		if (vma->vm_file->f_mapping != bo->bdev->dev_mapping)
-			nouveau_bo(bo)->cpu_mapped_dmabuf = true;
-		nouveau_bo(bo)->cpu_mapped = true;
+			nvbo->cpu_mapped_dmabuf = true;
+		nvbo->cpu_mapped = true;
 	}
 
 	nouveau_bo_del_io_reserve_lru(bo);
