@@ -33,6 +33,19 @@
 #include <nvif/if900b.h>
 #include <nvif/if900d.h>
 
+bool
+nouveau_mem_l2_cacheable(struct nouveau_mem *mem)
+{
+	struct nouveau_bo *nvbo;
+
+	if (!mem->drm->l2sysmem || !mem->base.bo ||
+	    nouveau_drm_use_coherent_gpu_mapping(mem->drm))
+		return false;
+
+	nvbo = nouveau_bo(mem->base.bo);
+	return !nvbo->force_coherent && !nvbo->l2_volatile;
+}
+
 int
 nouveau_mem_map(struct nouveau_mem *mem,
 		struct nvif_vmm *vmm, struct nvif_vma *vma)
@@ -59,7 +72,8 @@ nouveau_mem_map(struct nouveau_mem *mem,
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
 		/* A compressed mapping cannot bypass the L2. */
-		if (mem->mem.type & NVIF_MEM_VRAM || mem->comp)
+		if (mem->mem.type & NVIF_MEM_VRAM || mem->comp ||
+		    nouveau_mem_l2_cacheable(mem))
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;

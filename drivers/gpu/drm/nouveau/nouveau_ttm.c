@@ -278,6 +278,10 @@ nouveau_ttm_init(struct nouveau_drm *drm)
 	struct drm_device *dev = drm->dev;
 	int typei, ret;
 
+	/* Tegra Maxwell (GM20B) only: the L2 is what fronts all its memory. */
+	drm->l2sysmem = drm->client.device.info.platform == NV_DEVICE_INFO_V0_SOC &&
+			drm->client.device.info.family == NV_DEVICE_INFO_V0_MAXWELL;
+
 	ret = nouveau_ttm_init_host(drm, 0);
 	if (ret)
 		return ret;

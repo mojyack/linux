@@ -790,7 +790,7 @@ nouveau_gem_ioctl_pushbuf(struct drm_device *dev, void *data,
 	struct validate_op op;
 	struct nouveau_fence *fence = NULL;
 	int i, j, ret = 0;
-	bool do_reloc = false, sync = false;
+	bool do_reloc = false, sync = false, l2_invalidated = false;
 
 	if (unlikely(!abi16))
 		return -ENOMEM;
@@ -884,6 +884,21 @@ revalidate:
 		}
 	}
 
+	/* Drop L2 lines that predate the CPU writes validate cleaned. */
+	if (drm->l2sysmem) {
+		u32 seq = atomic_read_acquire(&drm->l2_clean_seq);
+
+		if (chan->l2_seq != seq) {
+			ret = nouveau_channel_l2_invalidate(chan);
+			if (ret) {
+				NV_PRINTK(err, cli, "l2 invalidate: %d\n", ret);
+				goto out;
+			}
+			chan->l2_seq = seq;
+			l2_invalidated = true;
+		}
+	}
+
 	if (chan->user.oclass >= NV50_CHANNEL_GPFIFO) {
 		ret = nvif_chan_gpfifo_wait(&chan->chan, req->nr_push + 1, 16);
 		if (ret) {
@@ -897,6 +912,10 @@ revalidate:
 			u64 addr = vma->addr + push[i].offset;
 			u32 length = push[i].length & ~NOUVEAU_GEM_PUSHBUF_NO_PREFETCH;
 			bool no_prefetch = push[i].length & NOUVEAU_GEM_PUSHBUF_NO_PREFETCH;
+
+			/* The PBDMA reads pushbufs through the L2 too: fetch after it. */
+			if (l2_invalidated && i == 0)
+				no_prefetch = true;
 
 			nvif_chan_gpfifo_push(&chan->chan, addr, length, no_prefetch);
 		}
@@ -1037,7 +1056,8 @@ nouveau_gem_ioctl_cpu_prep(struct drm_device *dev, void *data,
 	else
 		ret = lret;
 
-	nouveau_bo_sync_for_cpu(nvbo);
+	if (!ret)
+		nouveau_bo_sync_for_cpu(nvbo);
 	drm_gem_object_put(gem);
 
 	return ret;

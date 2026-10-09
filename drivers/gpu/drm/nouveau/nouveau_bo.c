@@ -700,7 +700,7 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
 	pgoff_t i, j, end;
-	bool whole = nvbo->cpu_dirty;
+	bool whole = nvbo->cpu_dirty, synced = false;
 
 	nvbo->cpu_dirty = false;
 
@@ -734,7 +734,12 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 					   ttm_dma->dma_address[i],
 					   num_pages * PAGE_SIZE, DMA_TO_DEVICE);
 		i += num_pages;
+		synced = true;
 	}
+
+	/* After the clean: a submit that sees the new value invalidates. */
+	if (synced && drm->l2sysmem)
+		atomic_inc_return_release(&drm->l2_clean_seq);
 }
 
 void
@@ -745,6 +750,10 @@ nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 	int i, j;
 
 	nvbo->cpu_dirty = true;
+
+	/* The GPU L2 first, then whatever the CPU cache holds. */
+	if (drm->l2sysmem && !nvbo->force_coherent && !nvbo->l2_volatile)
+		nvkm_ltc_flush(nvxx_device(drm)->ltc);
 
 	if (!ttm_dma || !ttm_dma->dma_address)
 		return;

@@ -20,6 +20,7 @@ struct nouveau_bo {
 	bool cpu_dirty;
 	bool cpu_mapped;
 	bool cpu_mapped_dmabuf;
+	bool l2_volatile; /* shared with a device that doesn't see the GPU L2 */
 	/* pages dirtied through the CPU mapping, [first, last) */
 	pgoff_t cpu_wb_first, cpu_wb_last;
 	struct ttm_bo_kmap_obj kmap;

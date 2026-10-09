@@ -149,7 +149,8 @@ nouveau_uvmm_vmm_map(struct nouveau_uvmm *uvmm,
 	case NVIF_CLASS_VMM_GM200:
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
-		if (mem->mem.type & NVIF_MEM_VRAM)
+		if (mem->mem.type & NVIF_MEM_VRAM ||
+		    nouveau_mem_l2_cacheable(mem))
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;
