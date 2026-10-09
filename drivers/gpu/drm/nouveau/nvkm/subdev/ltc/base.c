@@ -66,15 +66,21 @@ nvkm_ltc_zbc_stencil_get(struct nvkm_ltc *ltc, int index, const u32 stencil)
 void
 nvkm_ltc_invalidate(struct nvkm_ltc *ltc)
 {
-	if (ltc->func->invalidate)
+	if (ltc->func->invalidate) {
+		mutex_lock(&ltc->mutex);
 		ltc->func->invalidate(ltc);
+		mutex_unlock(&ltc->mutex);
+	}
 }
 
 void
 nvkm_ltc_flush(struct nvkm_ltc *ltc)
 {
-	if (ltc->func->flush)
+	if (ltc->func->flush) {
+		mutex_lock(&ltc->mutex);
 		ltc->func->flush(ltc);
+		mutex_unlock(&ltc->mutex);
+	}
 }
 
 static void

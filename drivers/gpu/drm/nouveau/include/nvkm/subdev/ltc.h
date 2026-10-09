@@ -14,7 +14,7 @@ struct nvkm_ltc {
 	u32 ltc_nr;
 	u32 lts_nr;
 
-	struct mutex mutex; /* serialises CBC operations */
+	struct mutex mutex; /* serialises CBC and L2 operations */
 	u32 num_tags;
 	u32 tag_base;
 	struct nvkm_memory *tag_ram;
