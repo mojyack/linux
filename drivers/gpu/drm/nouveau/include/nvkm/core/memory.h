@@ -56,6 +56,7 @@ int nvkm_memory_tags_get(struct nvkm_memory *, struct nvkm_device *, u32 tags,
 			 struct nvkm_tags **);
 void nvkm_memory_tags_put(struct nvkm_memory *, struct nvkm_device *,
 			  struct nvkm_tags **);
+bool nvkm_memory_tags_live(struct nvkm_memory *, struct nvkm_device *);
 
 #define nvkm_memory_target(p) (p)->func->target(p)
 #define nvkm_memory_page(p) (p)->func->page(p)

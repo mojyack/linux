@@ -103,6 +103,21 @@ nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
 	return 0;
 }
 
+/* Whether the memory holds comptag lines, i.e. may be stored compressed. */
+bool
+nvkm_memory_tags_live(struct nvkm_memory *memory, struct nvkm_device *device)
+{
+	struct nvkm_fb *fb = device->fb;
+	struct nvkm_tags *tags;
+	bool live;
+
+	mutex_lock(&fb->tags.mutex);
+	tags = memory->tags;
+	live = tags && tags->mn;
+	mutex_unlock(&fb->tags.mutex);
+	return live;
+}
+
 void
 nvkm_memory_ctor(const struct nvkm_memory_func *func,
 		 struct nvkm_memory *memory)
