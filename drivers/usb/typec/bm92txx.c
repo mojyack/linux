@@ -6,6 +6,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/i2c.h>
@@ -113,8 +114,27 @@
 #define BM92T_RETRY_MS		100
 #define BM92T_FAULT_POLL_MS	2000
 #define BM92T_RAISE_DELAY_MS	2000
+#define BM92T_REQ_TIMEOUT_MS	3000
 #define BM92T_DP_CFG_RETRIES	3
 #define BM92T_RDO_RETRIES	2
+
+/* Nintendo dock protocol */
+#define USB_SID_NINTENDO	0x057E
+#define PID_NINTENDO_DOCK	0x2003
+
+#define ND_READ			0
+#define ND_WRITE		1
+#define ND_HOST			1
+#define ND_DOCK			2
+#define ND_BUSY			BIT(0)
+
+#define ND_CMD_LED		0x01
+#define ND_CMD_DEVICE_STATE	0x16
+#define ND_CMD_DP_SIGNAL_DISABLE 0x1C
+#define ND_CMD_HUB_CONTROL	0x20
+
+#define ND_HUB_RETRIES		10
+#define ND_REARM_DELAY_MS	500
 
 enum bm92t_state {
 	BM92T_IDLE,
@@ -129,7 +149,19 @@ enum bm92t_state {
 	BM92T_DISC_MODE_SENT,
 	BM92T_DISC_MODE_ACCEPT,
 	BM92T_DP_ENTER_SENT,
+	BM92T_DP_QUERY_SENT,
+	BM92T_DP_QUERY_ACCEPT,
 	BM92T_DP_CFG_SENT,
+	BM92T_ND_ENTER_SENT,
+	BM92T_ND_ENTER_ACCEPT,
+	BM92T_ND_QUERY_SENT,
+	BM92T_ND_QUERY_ACCEPT,
+	BM92T_ND_LED_SENT,
+	BM92T_ND_LED_ACCEPT,
+	BM92T_ND_HUB_SENT,
+	BM92T_ND_HUB_ACCEPT,
+	BM92T_ND_REQ_SENT,
+	BM92T_ND_REQ_ACCEPT,
 	BM92T_NUM_STATES
 };
 
@@ -146,10 +178,35 @@ static const char * const bm92t_state_names[] = {
 	[BM92T_DISC_MODE_SENT]	= "disc-mode-sent",
 	[BM92T_DISC_MODE_ACCEPT] = "disc-mode-accept",
 	[BM92T_DP_ENTER_SENT]	= "dp-enter-sent",
+	[BM92T_DP_QUERY_SENT]	= "dp-query-sent",
+	[BM92T_DP_QUERY_ACCEPT]	= "dp-query-accept",
 	[BM92T_DP_CFG_SENT]	= "dp-cfg-sent",
+	[BM92T_ND_ENTER_SENT]	= "nd-enter-sent",
+	[BM92T_ND_ENTER_ACCEPT]	= "nd-enter-accept",
+	[BM92T_ND_QUERY_SENT]	= "nd-query-sent",
+	[BM92T_ND_QUERY_ACCEPT]	= "nd-query-accept",
+	[BM92T_ND_LED_SENT]	= "nd-led-sent",
+	[BM92T_ND_LED_ACCEPT]	= "nd-led-accept",
+	[BM92T_ND_HUB_SENT]	= "nd-hub-sent",
+	[BM92T_ND_HUB_ACCEPT]	= "nd-hub-accept",
+	[BM92T_ND_REQ_SENT]	= "nd-req-sent",
+	[BM92T_ND_REQ_ACCEPT]	= "nd-req-accept",
 };
 
 static_assert(ARRAY_SIZE(bm92t_state_names) == BM92T_NUM_STATES);
+
+enum bm92t_req_state {
+	BM92T_REQ_NONE,
+	BM92T_REQ_PENDING,
+	BM92T_REQ_ACTIVE,
+	BM92T_REQ_DONE,
+};
+
+/* A Nintendo dock request: unstructured VDM payload after the header */
+struct bm92t_nd_msg {
+	u8 data[8];
+	u8 len;
+};
 
 struct bm92t_info {
 	struct device *dev;
@@ -182,11 +239,22 @@ struct bm92t_info {
 	unsigned int pending_ma;
 	unsigned long raise_at;
 	u32 dp_conf;
+	u32 dp_vdo;
 	unsigned int dp_cfg_retries;
+
+	bool nintendo;
+	unsigned int hub_retries;
+	bool rearm;
+	unsigned long rearm_at;
 
 	/* Fields below are protected by lock */
 	struct mutex lock;
 	bool stopped;
+	enum bm92t_req_state req_state;
+	struct bm92t_nd_msg req_msg;
+	int req_status;
+	struct completion req_done;
+	struct mutex req_mutex;		/* one synchronous caller at a time */
 
 	struct typec_port *port;
 	struct typec_partner *partner;
@@ -195,7 +263,9 @@ struct bm92t_info {
 	struct typec_plug *plug;
 	struct typec_altmode *port_altmode[2];
 	struct typec_altmode *port_dp;
+	struct typec_altmode *port_nd;
 	struct typec_altmode *partner_dp;
+	struct typec_altmode *partner_nd;
 	struct fwnode_handle *connector;
 
 	struct usb_role_switch *role_sw;
@@ -611,6 +681,26 @@ static void bm92t_update_roles(struct bm92t_info *info, u16 status1,
 		bm92t_retry_soon(info);
 }
 
+static void bm92t_req_finish(struct bm92t_info *info, int status)
+{
+	mutex_lock(&info->lock);
+	if (info->req_state == BM92T_REQ_ACTIVE) {
+		info->req_status = status;
+		info->req_state = BM92T_REQ_DONE;
+		complete(&info->req_done);
+	}
+	mutex_unlock(&info->lock);
+}
+
+/* Drop the transaction in flight; a late reply finds nobody waiting */
+static void bm92t_abort(struct bm92t_info *info, int status)
+{
+	if (info->state == BM92T_ND_REQ_SENT ||
+	    info->state == BM92T_ND_REQ_ACCEPT)
+		bm92t_req_finish(info, status);
+	bm92t_set_state(info, BM92T_IDLE);
+}
+
 static void bm92t_altmode_active(struct typec_altmode *alt)
 {
 	if (alt)
@@ -661,14 +751,18 @@ static void bm92t_attach(struct bm92t_info *info, u16 status1, u16 status2)
 	info->rdo_retries = BM92T_RDO_RETRIES;
 	info->discovered = false;
 	info->partner_drd = false;
+	info->dp_vdo = 0;
 	info->dp_conf = 0;
+	info->nintendo = false;
+	info->rearm = false;
 }
 
 static void bm92t_detach(struct bm92t_info *info)
 {
-	bm92t_set_state(info, BM92T_IDLE);
+	bm92t_abort(info, -ENODEV);
 
 	bm92t_unregister_altmode(&info->partner_dp);
+	bm92t_unregister_altmode(&info->partner_nd);
 	if (info->plug)
 		typec_unregister_plug(info->plug);
 	if (info->cable)
@@ -721,22 +815,106 @@ static void bm92t_contract_ready(struct bm92t_info *info, u16 status1)
 	}
 }
 
+static int bm92t_nd_send(struct bm92t_info *info, const struct bm92t_nd_msg *msg,
+			 enum bm92t_state state)
+{
+	return bm92t_send_vdm(info, VDO(USB_SID_NINTENDO, 0, 0, 0),
+			      msg->data, msg->len, state);
+}
+
+static void bm92t_nd_cmd(struct bm92t_nd_msg *msg, u8 rw, u8 cmd)
+{
+	*msg = (struct bm92t_nd_msg) {
+		.data = { rw, ND_HOST, cmd, 0 },
+		.len = 4,
+	};
+}
+
+static void bm92t_nd_led(struct bm92t_nd_msg *msg, u8 duty, u8 time_on,
+			 u8 time_off, u8 fade)
+{
+	*msg = (struct bm92t_nd_msg) {
+		.data = { ND_WRITE, ND_HOST, ND_CMD_LED, 0,
+			  fade, time_off, time_on, duty },
+		.len = 8,
+	};
+}
+
+static void bm92t_nd_dp_sleep(struct bm92t_nd_msg *msg, bool sleep)
+{
+	bm92t_nd_cmd(msg, sleep, ND_CMD_DP_SIGNAL_DISABLE);
+}
+
+/* Check a dock reply to @cmd; returns its status byte */
+static int bm92t_nd_reply(struct bm92t_info *info, u8 *vdm, size_t size,
+			  u8 cmd)
+{
+	int n;
+
+	n = bm92t_read_vdm(info, vdm, size, USB_SID_NINTENDO, -1);
+	if (n < 1)
+		return n < 0 ? n : -EPROTO;
+
+	if (vdm[6] != ND_DOCK || vdm[7] != cmd + 1)
+		return -EPROTO;
+
+	return vdm[5];
+}
+
+static void bm92t_nd_hub_enable(struct bm92t_info *info)
+{
+	struct bm92t_nd_msg msg;
+
+	bm92t_nd_cmd(&msg, ND_WRITE, ND_CMD_HUB_CONTROL);
+	bm92t_nd_send(info, &msg, BM92T_ND_HUB_SENT);
+}
+
+static void bm92t_nd_enter(struct bm92t_info *info)
+{
+	bm92t_send_vdm(info, VDO(USB_SID_NINTENDO, 1, SVDM_VER_1_0,
+				 VDO_OPOS(1) | CMD_ENTER_MODE),
+		       NULL, 0, BM92T_ND_ENTER_SENT);
+}
+
+static void bm92t_nd_start(struct bm92t_info *info)
+{
+	struct bm92t_nd_msg msg;
+
+	bm92t_nd_cmd(&msg, ND_READ, ND_CMD_DEVICE_STATE);
+	bm92t_nd_send(info, &msg, BM92T_ND_QUERY_SENT);
+}
+
 static void bm92t_dp_active(struct bm92t_info *info)
 {
 	bm92t_altmode_active(info->partner_dp);
-	bm92t_set_state(info, BM92T_IDLE);
+
+	if (info->nintendo) {
+		info->rearm = true;
+		info->rearm_at = jiffies + msecs_to_jiffies(ND_REARM_DELAY_MS);
+		bm92t_nd_start(info);
+	} else {
+		bm92t_set_state(info, BM92T_IDLE);
+	}
 }
 
 static void bm92t_dp_done(struct bm92t_info *info)
 {
-	bm92t_set_state(info, BM92T_IDLE);
+	if (info->nintendo)
+		bm92t_nd_start(info);
+	else
+		bm92t_set_state(info, BM92T_IDLE);
 }
 
 /* Pin assignments both ends support, preferring D, which keeps USB */
 static int bm92t_dp_pin(struct bm92t_info *info, u32 vdo)
 {
-	unsigned long pins = DP_CAP_PIN_ASSIGN_DFP_D(info->port_dp->vdo) &
-			     DP_CAP_PIN_ASSIGN_UFP_D(vdo);
+	unsigned long pins = DP_CAP_PIN_ASSIGN_DFP_D(info->port_dp->vdo);
+
+	/* The dock claims a plug but fills in the receptacle field */
+	if (info->nintendo)
+		pins &= DP_CAP_UFP_D_PIN_ASSIGN(vdo);
+	else
+		pins &= DP_CAP_PIN_ASSIGN_UFP_D(vdo);
 
 	if (pins & BIT(DP_PIN_ASSIGN_D))
 		return DP_PIN_ASSIGN_D;
@@ -766,6 +944,7 @@ static int bm92t_dp_register(struct bm92t_info *info, u32 vdo)
 		return pin;
 	}
 
+	info->dp_vdo = vdo;
 	info->dp_conf = DP_CONF_UFP_U_AS_UFP_D |
 			FIELD_PREP(DP_CONF_SIGNALLING_MASK,
 				   DP_CONF_SIGNALLING_HBR3) |
@@ -805,6 +984,39 @@ static void bm92t_dp_entered(struct bm92t_info *info, u16 dp_status)
 	}
 }
 
+/* Role bits tell the bare mode VDO from a stale Enter Mode reply */
+static int bm92t_dp_mailbox_vdo(struct bm92t_info *info, u32 *vdo)
+{
+	u8 buf[5];
+	int ret;
+
+	ret = bm92t_read(info, INCOMING_VDM_REG, buf, sizeof(buf));
+	if (ret)
+		return ret;
+
+	*vdo = get_unaligned_le32(&buf[1]);
+	if (buf[0] != 4 || !DP_CAP_CAPABILITY(*vdo))
+		return -EPROTO;
+
+	return 0;
+}
+
+static void bm92t_dp_query(struct bm92t_info *info)
+{
+	bm92t_send_vdm(info, VDO(USB_TYPEC_DP_SID, 1, SVDM_VER_1_0,
+				 CMD_DISCOVER_MODES),
+		       NULL, 0, BM92T_DP_QUERY_SENT);
+}
+
+static bool bm92t_is_dock(struct bm92t_info *info)
+{
+	struct usb_pd_identity *id = &info->partner_ident;
+
+	return PD_IDH_PTYPE(id->id_header) == IDH_PTYPE_AMA &&
+	       PD_IDH_VID(id->id_header) == USB_SID_NINTENDO &&
+	       PD_PRODUCT_PID(id->product) == PID_NINTENDO_DOCK;
+}
+
 /* A VDM was sent: accept the reply when it comes */
 static void bm92t_vdm_sent(struct bm92t_info *info, u16 alert, u16 status1,
 			   enum bm92t_state accept)
@@ -822,6 +1034,8 @@ static bool bm92t_step_done(struct bm92t_info *info, u16 alert, u16 status1)
 		return false;
 
 	if (!bm92t_lastcmd_ok(info, status1)) {
+		if (info->state == BM92T_ND_REQ_ACCEPT)
+			bm92t_req_finish(info, -EIO);
 		bm92t_set_state(info, BM92T_IDLE);
 		return false;
 	}
@@ -832,6 +1046,7 @@ static bool bm92t_step_done(struct bm92t_info *info, u16 alert, u16 status1)
 static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1,
 		       u16 dp_status)
 {
+	struct bm92t_nd_msg msg;
 	u8 vdm[29];
 	u32 vdo;
 	int i, n, ret;
@@ -946,7 +1161,9 @@ static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1,
 			 PD_PRODUCT_PID(info->partner_ident.product),
 			 PD_IDH_PTYPE(info->partner_ident.id_header));
 
-		if (info->port_dp)
+		if (bm92t_is_dock(info) && info->port_nd)
+			bm92t_nd_enter(info);
+		else if (info->port_dp)
 			bm92t_send_vdm(info, VDO(USB_SID_PD, 1, SVDM_VER_1_0,
 						 CMD_DISCOVER_SVID),
 				       NULL, 0, BM92T_DISC_SVID_SENT);
@@ -1011,7 +1228,41 @@ static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1,
 			break;
 		}
 
-		bm92t_dp_entered(info, dp_status);
+		if (info->dp_vdo) {
+			bm92t_dp_entered(info, dp_status);
+		} else if (!bm92t_dp_mailbox_vdo(info, &vdo)) {
+			if (bm92t_dp_register(info, vdo))
+				bm92t_dp_done(info);
+			else
+				bm92t_dp_entered(info, dp_status);
+		} else {
+			/* Ask the partner when the mailbox holds no VDO */
+			bm92t_dp_query(info);
+		}
+		break;
+
+	case BM92T_DP_QUERY_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_DP_QUERY_ACCEPT);
+		break;
+
+	case BM92T_DP_QUERY_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		n = bm92t_read_vdm(info, vdm, sizeof(vdm), USB_TYPEC_DP_SID,
+				   CMD_DISCOVER_MODES);
+		if (n < 1 || bm92t_dp_register(info, get_unaligned_le32(&vdm[5]))) {
+			dev_info(info->dev, "no DP mode VDO: %d\n", n);
+			bm92t_dp_done(info);
+			break;
+		}
+
+		/* The link may have come up while we asked */
+		ret = bm92t_read16(info, DP_STATUS_REG, &dp_status);
+		if (ret)
+			bm92t_dp_done(info);
+		else
+			bm92t_dp_entered(info, dp_status);
 		break;
 
 	case BM92T_DP_CFG_SENT:
@@ -1024,6 +1275,113 @@ static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1,
 			bm92t_dp_configure(info);
 		else
 			bm92t_dp_done(info);
+		break;
+
+	case BM92T_ND_ENTER_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_ND_ENTER_ACCEPT);
+		break;
+
+	case BM92T_ND_ENTER_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		n = bm92t_read_vdm(info, vdm, sizeof(vdm), USB_SID_NINTENDO,
+				   CMD_ENTER_MODE);
+		if (n < 0) {
+			dev_err(info->dev, "dock refused its alt mode: %d\n", n);
+			bm92t_set_state(info, BM92T_IDLE);
+			break;
+		}
+
+		info->nintendo = true;
+		if (info->partner && !info->partner_nd) {
+			struct typec_altmode_desc desc = {
+				.svid = USB_SID_NINTENDO,
+				.mode = 1,
+			};
+
+			info->partner_nd =
+				typec_partner_register_altmode(info->partner,
+							       &desc);
+			if (IS_ERR(info->partner_nd))
+				info->partner_nd = NULL;
+			bm92t_altmode_active(info->partner_nd);
+		}
+
+		if (info->port_dp)
+			bm92t_send_cmd(info, DP_ENTER_MODE_CMD,
+				       BM92T_DP_ENTER_SENT);
+		else
+			bm92t_nd_start(info);
+		break;
+
+	case BM92T_ND_QUERY_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_ND_QUERY_ACCEPT);
+		break;
+
+	case BM92T_ND_QUERY_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		ret = bm92t_nd_reply(info, vdm, sizeof(vdm),
+				     ND_CMD_DEVICE_STATE);
+		if (ret < 0 || vdm[0] < 12)
+			dev_warn(info->dev, "no dock state: %d\n", ret);
+		else
+			dev_info(info->dev, "dock state %*ph\n", 4, &vdm[9]);
+
+		bm92t_nd_led(&msg, 128, 0, 0, 64);
+		bm92t_nd_send(info, &msg, BM92T_ND_LED_SENT);
+		break;
+
+	case BM92T_ND_LED_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_ND_LED_ACCEPT);
+		break;
+
+	case BM92T_ND_LED_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		/* The hub powers up behind the LED command */
+		msleep(500);
+		info->hub_retries = ND_HUB_RETRIES;
+		bm92t_nd_hub_enable(info);
+		break;
+
+	case BM92T_ND_HUB_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_ND_HUB_ACCEPT);
+		break;
+
+	case BM92T_ND_HUB_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		ret = bm92t_nd_reply(info, vdm, sizeof(vdm), ND_CMD_HUB_CONTROL);
+		if (ret >= 0 && (ret & ND_BUSY) && info->hub_retries--) {
+			msleep(250);
+			bm92t_nd_hub_enable(info);
+			break;
+		}
+
+		if (ret < 0 || (ret & ND_BUSY))
+			dev_err(info->dev, "dock hub enable failed: %d\n", ret);
+		bm92t_set_state(info, BM92T_IDLE);
+		break;
+
+	case BM92T_ND_REQ_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_ND_REQ_ACCEPT);
+		if (info->state == BM92T_IDLE)
+			bm92t_req_finish(info, -EIO);
+		break;
+
+	case BM92T_ND_REQ_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		/* Drain the reply, its content is not of interest */
+		bm92t_read(info, INCOMING_VDM_REG, vdm, sizeof(vdm));
+		bm92t_req_finish(info, 0);
+		bm92t_set_state(info, BM92T_IDLE);
 		break;
 
 	case BM92T_NUM_STATES:
@@ -1039,7 +1397,7 @@ static void bm92t_timeout(struct bm92t_info *info)
 	dev_warn(info->dev, "%s timed out\n", bm92t_state_names[state]);
 
 	bm92t_write16(info, COMMAND_REG, ABORT_LASTCMD_SENT_CMD);
-	bm92t_set_state(info, BM92T_IDLE);
+	bm92t_abort(info, -ETIMEDOUT);
 
 	/* The contract the controller holds stands: carry on from it */
 	if ((state == BM92T_RDO_SENT || state == BM92T_PS_RDY_SENT) &&
@@ -1126,7 +1484,7 @@ static int bm92t_service(struct bm92t_info *info)
 		bm92t_write16(info, COMMAND_REG, PD_HARD_RST_CMD);
 		info->vbus_blocked = true;
 		info->negotiated = false;
-		bm92t_set_state(info, BM92T_IDLE);
+		bm92t_abort(info, -EIO);
 	}
 
 	if (!(status1 & STATUS1_INSERT)) {
@@ -1162,6 +1520,56 @@ static int bm92t_service(struct bm92t_info *info)
 	return 0;
 }
 
+static bool bm92t_nd_next(struct bm92t_info *info, struct bm92t_nd_msg *msg,
+			  bool *is_req)
+{
+	u16 dp_status;
+
+	*is_req = false;
+
+	mutex_lock(&info->lock);
+	if (info->req_state == BM92T_REQ_PENDING) {
+		if (info->attached && info->nintendo) {
+			*msg = info->req_msg;
+			info->req_state = BM92T_REQ_ACTIVE;
+			*is_req = true;
+		} else {
+			info->req_status = -ENODEV;
+			info->req_state = BM92T_REQ_DONE;
+			complete(&info->req_done);
+		}
+	}
+	mutex_unlock(&info->lock);
+
+	if (*is_req || !info->nintendo)
+		return *is_req;
+
+	if (!info->rearm || time_before(jiffies, info->rearm_at))
+		return false;
+
+	info->rearm = false;
+	if (bm92t_read16(info, DP_STATUS_REG, &dp_status) ||
+	    !(dp_status & DP_STATUS_DP_EN) || (dp_status & DP_STATUS_SIGNAL_ON))
+		return false;
+
+	dev_info(info->dev, "DP up but dark (%04x), waking it\n", dp_status);
+	bm92t_nd_dp_sleep(msg, false);
+
+	return true;
+}
+
+static void bm92t_idle(struct bm92t_info *info)
+{
+	struct bm92t_nd_msg msg;
+	bool is_req;
+
+	if (!bm92t_nd_next(info, &msg, &is_req))
+		return;
+
+	if (bm92t_nd_send(info, &msg, BM92T_ND_REQ_SENT) && is_req)
+		bm92t_req_finish(info, -EIO);
+}
+
 static void bm92t_arm_timer(struct bm92t_info *info)
 {
 	unsigned long next = 0;
@@ -1172,6 +1580,9 @@ static void bm92t_arm_timer(struct bm92t_info *info)
 		next = info->poll_at;
 	if (info->raise_at && (!next || time_before(info->raise_at, next)))
 		next = info->raise_at;
+	if (info->rearm && info->state == BM92T_IDLE &&
+	    (!next || time_before(info->rearm_at, next)))
+		next = info->rearm_at;
 
 	mutex_lock(&info->lock);
 	if (!info->stopped && next)
@@ -1213,6 +1624,9 @@ static void bm92t_run(struct bm92t_info *info)
 
 	bm92t_raise_limit(info);
 
+	if (info->state == BM92T_IDLE)
+		bm92t_idle(info);
+
 	bm92t_arm_timer(info);
 }
 
@@ -1242,6 +1656,51 @@ static irqreturn_t bm92t_irq(int irq, void *data)
 	bm92t_kick(info);
 
 	return IRQ_HANDLED;
+}
+
+/* Send a dock request through the work item and wait for its reply */
+static int bm92t_nd_request(struct bm92t_info *info,
+			    const struct bm92t_nd_msg *msg)
+{
+	int ret;
+
+	mutex_lock(&info->req_mutex);
+
+	mutex_lock(&info->lock);
+	if (info->stopped) {
+		mutex_unlock(&info->lock);
+		mutex_unlock(&info->req_mutex);
+		return -ESHUTDOWN;
+	}
+	info->req_msg = *msg;
+	info->req_state = BM92T_REQ_PENDING;
+	reinit_completion(&info->req_done);
+	mutex_unlock(&info->lock);
+
+	bm92t_kick(info);
+	wait_for_completion_timeout(&info->req_done,
+				    msecs_to_jiffies(BM92T_REQ_TIMEOUT_MS));
+
+	mutex_lock(&info->lock);
+	ret = info->req_state == BM92T_REQ_DONE ? info->req_status : -ETIMEDOUT;
+	info->req_state = BM92T_REQ_NONE;
+	mutex_unlock(&info->lock);
+
+	mutex_unlock(&info->req_mutex);
+
+	return ret;
+}
+
+static void bm92t_nd_set_led(struct bm92t_info *info, u8 duty, u8 time_on,
+			     u8 time_off, u8 fade)
+{
+	struct bm92t_nd_msg msg;
+	int ret;
+
+	bm92t_nd_led(&msg, duty, time_on, time_off, fade);
+	ret = bm92t_nd_request(info, &msg);
+	if (ret && ret != -ENODEV)
+		dev_warn(info->dev, "dock LED request failed: %d\n", ret);
 }
 
 /* Stop the work item and keep it stopped: nothing touches the chip after */
@@ -1341,6 +1800,7 @@ static void bm92t_destroy_wq(void *wq)
 
 static int bm92t_register_port(struct bm92t_info *info)
 {
+	struct typec_altmode_desc nd = { .svid = USB_SID_NINTENDO, .mode = 1 };
 	struct typec_capability cap = {
 		.pd_revision = BM92T_PD_REVISION,
 		.svdm_version = SVDM_VER_1_0,
@@ -1367,6 +1827,10 @@ static int bm92t_register_port(struct bm92t_info *info)
 		    info->port_altmode[i]->svid == USB_TYPEC_DP_SID)
 			info->port_dp = info->port_altmode[i];
 
+	info->port_nd = typec_port_register_altmode(info->port, &nd);
+	if (IS_ERR(info->port_nd))
+		info->port_nd = NULL;
+
 	return 0;
 }
 
@@ -1374,6 +1838,7 @@ static void bm92t_unregister_port(struct bm92t_info *info)
 {
 	unsigned int i;
 
+	bm92t_unregister_altmode(&info->port_nd);
 	for (i = 0; i < ARRAY_SIZE(info->port_altmode); i++)
 		bm92t_unregister_altmode(&info->port_altmode[i]);
 	typec_unregister_port(info->port);
@@ -1397,6 +1862,8 @@ static int bm92t_probe(struct i2c_client *client)
 	info->dev = dev;
 	info->client = client;
 	mutex_init(&info->lock);
+	mutex_init(&info->req_mutex);
+	init_completion(&info->req_done);
 	INIT_WORK(&info->work, bm92t_work);
 	INIT_DELAYED_WORK(&info->timer, bm92t_timer);
 	i2c_set_clientdata(client, info);
@@ -1524,6 +1991,7 @@ static void bm92t_shutdown(struct i2c_client *client)
 {
 	struct bm92t_info *info = i2c_get_clientdata(client);
 
+	bm92t_nd_set_led(info, 0, 0, 0, 128);
 	bm92t_stop(info);
 	bm92t_update16(info, CONFIG1_REG, CONFIG1_SPDSRC,
 		       FIELD_PREP(CONFIG1_SPDSRC, SPDSRC12_OFF));
@@ -1534,6 +2002,8 @@ static int bm92t_suspend(struct device *dev)
 {
 	struct bm92t_info *info = dev_get_drvdata(dev);
 
+	/* Breathing dock LED while asleep */
+	bm92t_nd_set_led(info, 32, 1, 255, 255);
 	bm92t_stop(info);
 
 	return 0;
@@ -1541,7 +2011,10 @@ static int bm92t_suspend(struct device *dev)
 
 static int bm92t_resume(struct device *dev)
 {
-	bm92t_start(dev_get_drvdata(dev));
+	struct bm92t_info *info = dev_get_drvdata(dev);
+
+	bm92t_start(info);
+	bm92t_nd_set_led(info, 128, 0, 0, 64);
 
 	return 0;
 }
