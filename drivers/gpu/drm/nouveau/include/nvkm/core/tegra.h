@@ -12,11 +12,18 @@ struct nvkm_device_tegra {
 	void __iomem *regs;
 
 	struct reset_control *rst;
+	struct reset_control *mc_rst;
 	struct clk *clk;
 	struct clk *clk_ref;
 	struct clk *clk_pwr;
 
 	struct regulator *vdd;
+	bool vdd_on;
+	bool clk_on;
+	bool clk_gated;
+	bool isolated;
+	bool railgate;
+	bool suspended;
 
 	struct tegra_pmc *pmc;
 
@@ -56,4 +63,5 @@ int nvkm_device_tegra_new(const struct nvkm_device_tegra_func *,
 			  struct platform_device *,
 			  const char *cfg, const char *dbg,
 			  struct nvkm_device **);
+bool nvkm_device_tegra_can_suspend(struct nvkm_device *);
 #endif

@@ -2969,10 +2969,10 @@ nvkm_device_fini(struct nvkm_device *device, enum nvkm_suspend_state suspend)
 
 	nvkm_therm_clkgate_fini(device->therm, suspend);
 
+	nvkm_intr_unarm(device);
+
 	if (device->func->fini)
 		device->func->fini(device, suspend);
-
-	nvkm_intr_unarm(device);
 
 	time = ktime_to_us(ktime_get()) - time;
 	nvdev_trace(device, "%s completed in %lldus...\n", action, time);
@@ -2999,13 +2999,13 @@ nvkm_device_preinit(struct nvkm_device *device)
 	nvdev_trace(device, "preinit running...\n");
 	time = ktime_to_us(ktime_get());
 
-	nvkm_intr_unarm(device);
-
 	if (device->func->preinit) {
 		ret = device->func->preinit(device);
 		if (ret)
 			goto fail;
 	}
+
+	nvkm_intr_unarm(device);
 
 	list_for_each_entry(subdev, &device->subdev, head) {
 		ret = nvkm_subdev_preinit(subdev);
