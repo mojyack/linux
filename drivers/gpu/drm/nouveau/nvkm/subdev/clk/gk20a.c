@@ -541,10 +541,12 @@ gk20a_clk_setup_slide(struct gk20a_clk *clk)
 }
 
 void
-gk20a_clk_fini(struct nvkm_clk *base)
+gk20a_clk_fini(struct nvkm_clk *base, enum nvkm_suspend_state suspend)
 {
 	struct nvkm_device *device = base->subdev.device;
 	struct gk20a_clk *clk = gk20a_clk(base);
+
+	gk20a_devfreq_fini(base, &clk->devfreq, suspend);
 
 	/* slide to VCO min */
 	if (gk20a_pllg_is_enabled(clk)) {

@@ -718,10 +718,12 @@ gm20b_pstates[] = {
 };
 
 static void
-gm20b_clk_fini(struct nvkm_clk *base)
+gm20b_clk_fini(struct nvkm_clk *base, enum nvkm_suspend_state suspend)
 {
 	struct nvkm_device *device = base->subdev.device;
 	struct gm20b_clk *clk = gm20b_clk(base);
+
+	gk20a_devfreq_fini(base, &clk->base.devfreq, suspend);
 
 	/* slide to VCO min */
 	if (gk20a_pllg_is_enabled(&clk->base)) {

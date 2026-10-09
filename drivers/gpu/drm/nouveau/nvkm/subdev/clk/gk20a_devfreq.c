@@ -4,8 +4,6 @@
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
 
-#include <drm/drm_managed.h>
-
 #include <subdev/clk.h>
 
 #include "nouveau_drv.h"
@@ -70,6 +68,9 @@ struct gk20a_devfreq {
 
 	/** @time_last_update: Last update time. */
 	ktime_t time_last_update;
+
+	/** @suspended: Governor suspended by gk20a_devfreq_fini(). */
+	bool suspended;
 };
 
 static struct gk20a_devfreq *dev_to_gk20a_devfreq(struct device *dev)
@@ -258,63 +259,88 @@ static struct devfreq_dev_profile gk20a_devfreq_profile = {
 	.get_dev_status = gk20a_devfreq_get_dev_status,
 };
 
-int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **gdevfreq)
+int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq)
 {
 	struct nvkm_device *device = base->subdev.device;
-	struct nouveau_drm *drm = dev_get_drvdata(device->dev);
 	struct nvkm_device_tegra *tdev = device->func->tegra(device);
 	struct nvkm_pstate *pstates = base->func->pstates;
 	int nr_pstates = base->func->nr_pstates;
-	struct gk20a_devfreq *new_gdevfreq;
-	int i;
+	struct gk20a_devfreq *gdevfreq = *pgdevfreq;
+	int i, ret;
 
-	new_gdevfreq = drmm_kzalloc(drm->dev, sizeof(struct gk20a_devfreq), GFP_KERNEL);
-	if (!new_gdevfreq)
+	if (gdevfreq) {
+		/* The perfmon counters lose their setup with the GPU. */
+		gk20a_pmu_init_perfmon_counter(gdevfreq);
+		gk20a_devfreq_reset(gdevfreq);
+
+		if (!gdevfreq->suspended)
+			return 0;
+
+		gdevfreq->suspended = false;
+		return devfreq_resume_device(gdevfreq->devfreq);
+	}
+
+	gdevfreq = kzalloc_obj(*gdevfreq);
+	if (!gdevfreq)
 		return -ENOMEM;
 
-	new_gdevfreq->regs = tdev->regs;
+	gdevfreq->regs = tdev->regs;
 
-	for (i = 0; i < nr_pstates; i++)
-		dev_pm_opp_add(base->subdev.device->dev,
-			       pstates[i].base.domain[nv_clk_src_gpc] * GK20A_CLK_GPC_MDIV, 0);
+	for (i = 0; i < nr_pstates; i++) {
+		unsigned long freq = pstates[i].base.domain[nv_clk_src_gpc] *
+				     GK20A_CLK_GPC_MDIV;
 
-	gk20a_pmu_init_perfmon_counter(new_gdevfreq);
-	gk20a_devfreq_reset(new_gdevfreq);
+		ret = dev_pm_opp_add(device->dev, freq, 0);
+		if (ret)
+			goto err_opp;
+	}
+
+	gk20a_pmu_init_perfmon_counter(gdevfreq);
+	gk20a_devfreq_reset(gdevfreq);
 
 	gk20a_devfreq_profile.initial_freq =
 		nvkm_clk_read(base, nv_clk_src_gpc) * GK20A_CLK_GPC_MDIV;
 
-	new_gdevfreq->gov_data.upthreshold = 45;
-	new_gdevfreq->gov_data.downdifferential = 5;
+	gdevfreq->gov_data.upthreshold = 45;
+	gdevfreq->gov_data.downdifferential = 5;
 
-	new_gdevfreq->devfreq = devm_devfreq_add_device(device->dev,
-							&gk20a_devfreq_profile,
-							DEVFREQ_GOV_SIMPLE_ONDEMAND,
-							&new_gdevfreq->gov_data);
-	if (IS_ERR(new_gdevfreq->devfreq))
-		return PTR_ERR(new_gdevfreq->devfreq);
+	/* The callbacks can run before devfreq_add_device() returns. */
+	*pgdevfreq = gdevfreq;
 
-	*gdevfreq = new_gdevfreq;
+	gdevfreq->devfreq = devfreq_add_device(device->dev, &gk20a_devfreq_profile,
+					       DEVFREQ_GOV_SIMPLE_ONDEMAND,
+					       &gdevfreq->gov_data);
+	if (IS_ERR(gdevfreq->devfreq)) {
+		ret = PTR_ERR(gdevfreq->devfreq);
+		goto err_opp;
+	}
 
 	return 0;
+
+err_opp:
+	*pgdevfreq = NULL;
+	dev_pm_opp_remove_all_dynamic(device->dev);
+	kfree(gdevfreq);
+	return ret;
 }
 
-int gk20a_devfreq_resume(struct device *dev)
+void gk20a_devfreq_fini(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq,
+			enum nvkm_suspend_state suspend)
 {
-	struct gk20a_devfreq *gdevfreq = dev_to_gk20a_devfreq(dev);
+	struct gk20a_devfreq *gdevfreq = *pgdevfreq;
 
-	if (!gdevfreq || !gdevfreq->devfreq)
-		return 0;
+	if (!gdevfreq || gdevfreq->suspended)
+		return;
 
-	return devfreq_resume_device(gdevfreq->devfreq);
-}
+	if (suspend != NVKM_POWEROFF) {
+		if (!devfreq_suspend_device(gdevfreq->devfreq))
+			gdevfreq->suspended = true;
+		return;
+	}
 
-int gk20a_devfreq_suspend(struct device *dev)
-{
-	struct gk20a_devfreq *gdevfreq = dev_to_gk20a_devfreq(dev);
-
-	if (!gdevfreq || !gdevfreq->devfreq)
-		return 0;
-
-	return devfreq_suspend_device(gdevfreq->devfreq);
+	/* Every callback reaches the clk through the nouveau_drm drvdata. */
+	devfreq_remove_device(gdevfreq->devfreq);
+	dev_pm_opp_remove_all_dynamic(base->subdev.device->dev);
+	kfree(gdevfreq);
+	*pgdevfreq = NULL;
 }

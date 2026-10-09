@@ -31,6 +31,12 @@ gp10b_clk_init(struct nvkm_clk *base)
 	return 0;
 }
 
+static void
+gp10b_clk_fini(struct nvkm_clk *base, enum nvkm_suspend_state suspend)
+{
+	gk20a_devfreq_fini(base, &gp10b_clk(base)->devfreq, suspend);
+}
+
 static int
 gp10b_clk_read(struct nvkm_clk *base, enum nv_clk_src src)
 {
@@ -144,6 +150,7 @@ gp10b_pstates[] = {
 static const struct nvkm_clk_func
 gp10b_clk = {
 	.init = gp10b_clk_init,
+	.fini = gp10b_clk_fini,
 	.read = gp10b_clk_read,
 	.calc = gp10b_clk_calc,
 	.prog = gp10b_clk_prog,
