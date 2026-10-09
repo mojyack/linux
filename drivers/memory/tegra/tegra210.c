@@ -1233,6 +1233,8 @@ static const struct tegra_smmu_soc tegra210_smmu_soc = {
 	.supports_request_limit = true,
 	.num_tlb_lines = 48,
 	.num_asids = 128,
+	.untranslated_start = SZ_1G,
+	.untranslated_size = SZ_1G,
 };
 
 #define TEGRA210_MC_RESET(_name, _control, _status, _bit)	\

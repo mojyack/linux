@@ -93,6 +93,10 @@ struct tegra_smmu_soc {
 
 	unsigned int num_tlb_lines;
 	unsigned int num_asids;
+
+	/* IOVAs the MC routes to its own apertures instead of translating */
+	u32 untranslated_start;
+	u32 untranslated_size;
 };
 
 struct tegra_mc;

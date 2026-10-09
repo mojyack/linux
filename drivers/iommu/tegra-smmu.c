@@ -1022,6 +1022,22 @@ static int tegra_smmu_def_domain_type(struct device *dev)
 	return IOMMU_DOMAIN_IDENTITY;
 }
 
+static void tegra_smmu_get_resv_regions(struct device *dev,
+					struct list_head *head)
+{
+	struct tegra_smmu *smmu = dev_iommu_priv_get(dev);
+	struct iommu_resv_region *region;
+
+	if (!smmu->soc->untranslated_size)
+		return;
+
+	region = iommu_alloc_resv_region(smmu->soc->untranslated_start,
+					 smmu->soc->untranslated_size, 0,
+					 IOMMU_RESV_RESERVED, GFP_KERNEL);
+	if (region)
+		list_add_tail(&region->list, head);
+}
+
 static const struct iommu_ops tegra_smmu_ops = {
 	.identity_domain = &tegra_smmu_identity_domain,
 	.def_domain_type = &tegra_smmu_def_domain_type,
@@ -1029,6 +1045,7 @@ static const struct iommu_ops tegra_smmu_ops = {
 	.probe_device = tegra_smmu_probe_device,
 	.device_group = tegra_smmu_device_group,
 	.of_xlate = tegra_smmu_of_xlate,
+	.get_resv_regions = tegra_smmu_get_resv_regions,
 	.default_domain_ops = &(const struct iommu_domain_ops) {
 		.attach_dev	= tegra_smmu_attach_dev,
 		.map_pages	= tegra_smmu_map,
