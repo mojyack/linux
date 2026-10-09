@@ -39,28 +39,52 @@ static const struct device_type power_supply_dev_type = {
 
 #define POWER_SUPPLY_DEFERRED_REGISTER_TIME	msecs_to_jiffies(10)
 
-static bool __power_supply_is_supplied_by(struct power_supply *supplier,
-					 struct power_supply *supply)
+/* -ENOENT if @supply has no "power-supplies"; unregistered swnodes are skipped */
+static int power_supply_fwnode_is_supplied_by(struct power_supply *supplier,
+					      struct power_supply *supply)
 {
+	struct fwnode_handle *np;
+	bool match;
 	int i;
 
-	if (!supply->supplied_from && !supplier->supplied_to)
-		return false;
+	for (i = 0; ; i++) {
+		np = fwnode_find_reference(supply->dev.fwnode, "power-supplies", i);
+		if (np == ERR_PTR(-ENOTCONN))
+			continue;
+		if (IS_ERR(np))
+			return i ? 0 : -ENOENT;
 
-	/* Support both supplied_to and supplied_from modes */
+		match = np == supplier->dev.fwnode;
+		fwnode_handle_put(np);
+		if (match)
+			return 1;
+	}
+}
+
+static bool __power_supply_is_supplied_by(struct power_supply *supplier,
+					  struct power_supply *supply)
+{
+	int i, ret;
+
+	/* A list given by the supply itself excludes all other suppliers */
 	if (supply->supplied_from) {
 		if (!supplier->desc->name)
 			return false;
 		for (i = 0; i < supply->num_supplies; i++)
 			if (!strcmp(supplier->desc->name, supply->supplied_from[i]))
 				return true;
-	} else {
-		if (!supply->desc->name)
-			return false;
-		for (i = 0; i < supplier->num_supplicants; i++)
-			if (!strcmp(supplier->supplied_to[i], supply->desc->name))
-				return true;
+		return false;
 	}
+
+	ret = power_supply_fwnode_is_supplied_by(supplier, supply);
+	if (ret >= 0)
+		return ret;
+
+	if (!supply->desc->name)
+		return false;
+	for (i = 0; i < supplier->num_supplicants; i++)
+		if (!strcmp(supplier->supplied_to[i], supply->desc->name))
+			return true;
 
 	return false;
 }
@@ -219,114 +243,32 @@ static int power_supply_check_supplies_by_name(struct power_supply *psy)
 	return 0;
 }
 
-static int __power_supply_populate_supplied_from(struct power_supply *epsy,
-						 void *data)
-{
-	struct power_supply *psy = data;
-	struct fwnode_handle *np;
-	int i = 0;
-
-	do {
-		np = fwnode_find_reference(psy->dev.fwnode, "power-supplies", i++);
-		if (IS_ERR(np))
-			break;
-
-		if (np == epsy->dev.fwnode) {
-			dev_dbg(&psy->dev, "%s: Found supply : %s\n",
-				psy->desc->name, epsy->desc->name);
-			psy->supplied_from[i-1] = (char *)epsy->desc->name;
-			psy->num_supplies++;
-			fwnode_handle_put(np);
-			break;
-		}
-		fwnode_handle_put(np);
-	} while (true);
-
-	return 0;
-}
-
-static int power_supply_populate_supplied_from(struct power_supply *psy)
-{
-	int error;
-
-	error = power_supply_for_each_psy(psy, __power_supply_populate_supplied_from);
-
-	dev_dbg(&psy->dev, "%s %d\n", __func__, error);
-
-	return error;
-}
-
-static int  __power_supply_find_supply_from_node(struct power_supply *epsy,
-						 void *data)
-{
-	struct fwnode_handle *fwnode = data;
-
-	/* returning non-zero breaks out of power_supply_for_each_psy loop */
-	if (epsy->dev.fwnode == fwnode)
-		return 1;
-
-	return 0;
-}
-
-static int power_supply_find_supply_from_fwnode(struct fwnode_handle *supply_node)
-{
-	int error;
-
-	/*
-	 * power_supply_for_each_psy() either returns its own errors or values
-	 * returned by __power_supply_find_supply_from_node().
-	 *
-	 * __power_supply_find_supply_from_fwnode() will return 0 (no match)
-	 * or 1 (match).
-	 *
-	 * We return 0 if power_supply_for_each_psy() returned 1, -EPROBE_DEFER if
-	 * it returned 0, or error as returned by it.
-	 */
-	error = power_supply_for_each_psy(supply_node, __power_supply_find_supply_from_node);
-
-	return error ? (error == 1 ? 0 : error) : -EPROBE_DEFER;
-}
-
 static int power_supply_check_supplies(struct power_supply *psy)
 {
 	struct fwnode_handle *np;
-	int cnt, ret;
+	int i;
 
 	/* If there is already a list honor it */
 	if (psy->supplied_from && psy->num_supplies > 0)
 		return 0;
 
-	for (cnt = 0; psy->dev.fwnode; cnt++) {
-		np = fwnode_find_reference(psy->dev.fwnode, "power-supplies", cnt);
-		if (IS_ERR(np)) {
-			ret = PTR_ERR(np);
-			if (ret != -ENOENT)
-				return ret;
-
+	/* The suppliers need not be registered, see __power_supply_is_supplied_by() */
+	for (i = 0; ; i++) {
+		np = fwnode_find_reference(psy->dev.fwnode, "power-supplies", i);
+		if (np == ERR_PTR(-ENOENT))
 			break;
-		}
-
-		ret = power_supply_find_supply_from_fwnode(np);
+		if (np == ERR_PTR(-ENOTCONN))
+			continue;
+		if (IS_ERR_OR_NULL(np))
+			return np ? PTR_ERR(np) : -EINVAL;
 		fwnode_handle_put(np);
-
-		if (ret) {
-			dev_dbg(&psy->dev, "Failed to find supply!\n");
-			return ret;
-		}
 	}
 
 	/* Fall back to the name-based property if no references were specified. */
-	if (!cnt)
+	if (!i)
 		return power_supply_check_supplies_by_name(psy);
 
-	/* All supplies found, allocate char * array for filling */
-	psy->supplied_from = devm_kcalloc(&psy->dev,
-					  cnt, sizeof(*psy->supplied_from),
-					  GFP_KERNEL);
-	if (!psy->supplied_from)
-		return -ENOMEM;
-
-	return power_supply_populate_supplied_from(psy);
+	return 0;
 }
 
 struct psy_am_i_supplied_data {
@@ -1793,7 +1735,7 @@ __power_supply_register(struct device *parent,
 
 	rc = power_supply_check_supplies(psy);
 	if (rc) {
-		dev_dbg(dev, "Not all required supplies found, defer probe\n");
+		dev_err(dev, "Failed to read the supplier properties: %pe\n", ERR_PTR(rc));
 		goto check_supplies_failed;
 	}
 
