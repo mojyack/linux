@@ -570,9 +570,8 @@ gm20b_dvfs_program_dfs_detection(struct gm20b_clk *clk,
 }
 
 static int
-gm20b_clk_prog(struct nvkm_clk *base)
+gm20b_clk_prog_pll(struct gm20b_clk *clk)
 {
-	struct gm20b_clk *clk = gm20b_clk(base);
 	u32 cur_freq;
 	int ret;
 
@@ -633,6 +632,22 @@ prog:
 	clk->base.pll = clk->new_pll;
 
 	return gm20b_pllg_program_mnp_slide(clk, &clk->base.pll);
+}
+
+static int
+gm20b_clk_prog(struct nvkm_clk *base)
+{
+	struct gm20b_clk *clk = gm20b_clk(base);
+	u32 rate = gk20a_pllg_calc_rate(&clk->base, &clk->new_pll);
+	int ret;
+
+	gk20a_devfreq_pre_prog(clk->base.devfreq, rate);
+
+	ret = gm20b_clk_prog_pll(clk);
+	if (!ret)
+		gk20a_devfreq_post_prog(clk->base.devfreq, rate);
+
+	return ret;
 }
 
 static struct nvkm_pstate
@@ -875,7 +890,7 @@ gm20b_clk_init(struct nvkm_clk *base)
 		return ret;
 	}
 
-	ret = gk20a_devfreq_init(base, &clk->devfreq);
+	ret = gk20a_devfreq_init(base, &clk->devfreq, true);
 	if (ret)
 		return ret;
 

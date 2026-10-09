@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include <linux/clk.h>
+#include <linux/interconnect.h>
 #include <linux/math64.h>
 #include <linux/platform_device.h>
 #include <linux/pm_opp.h>
@@ -46,6 +47,9 @@
 #define PWM_PMU_IDLE_MASK_GR_ENABLED		0x1U
 #define PWM_PMU_IDLE_MASK_CE_2_ENABLED		0x200000U
 
+/* DRAM bytes per GPC Hz; nvgpu: TEGRA_GM20B_BW_PER_FREQ (64) * 750 / 1000 = 48 */
+#define GK20A_DEVFREQ_BW_PER_HZ			32
+
 /**
  * struct gk20a_devfreq - Device frequency management
  */
@@ -58,6 +62,15 @@ struct gk20a_devfreq {
 
 	/** @regs: Device registers. */
 	void __iomem *regs;
+
+	/** @icc_path: Memory bandwidth path to the EMC, or NULL. */
+	struct icc_path *icc_path;
+
+	/** @icc_bw: Peak bandwidth @icc_path holds, in kBps. */
+	u32 icc_bw;
+
+	/** @icc_follow: @icc_bw follows the GPC PLL changes. */
+	bool icc_follow;
 
 	/** @gov_data: Governor data. */
 	struct devfreq_simple_ondemand_data gov_data;
@@ -189,6 +202,79 @@ static void gk20a_devfreq_update_utilization(struct gk20a_devfreq *gdevfreq)
 	gdevfreq->time_last_update = now;
 }
 
+static u32 gk20a_devfreq_bw(unsigned long rate)
+{
+	return Bps_to_icc(rate) * GK20A_DEVFREQ_BW_PER_HZ;
+}
+
+/* A failed request leaves @icc_bw alone, so the next call retries it. */
+static void gk20a_devfreq_set_bw(struct gk20a_devfreq *gdevfreq, u32 bw)
+{
+	int ret;
+
+	lockdep_assert_held(&gdevfreq->clk->mutex);
+
+	if (bw == gdevfreq->icc_bw)
+		return;
+
+	ret = icc_set_bw(gdevfreq->icc_path, 0, bw);
+	if (ret) {
+		dev_warn_ratelimited(gdevfreq->clk->subdev.device->dev,
+				     "cannot request %u kBps of memory bandwidth: %d\n",
+				     bw, ret);
+		return;
+	}
+
+	gdevfreq->icc_bw = bw;
+}
+
+/* Under the clk mutex: raise the floor before the PLL, lower it after. */
+void gk20a_devfreq_pre_prog(struct gk20a_devfreq *gdevfreq, u32 rate)
+{
+	if (gdevfreq && gdevfreq->icc_follow &&
+	    gk20a_devfreq_bw(rate) > gdevfreq->icc_bw)
+		gk20a_devfreq_set_bw(gdevfreq, gk20a_devfreq_bw(rate));
+}
+
+void gk20a_devfreq_post_prog(struct gk20a_devfreq *gdevfreq, u32 rate)
+{
+	if (gdevfreq && gdevfreq->icc_follow)
+		gk20a_devfreq_set_bw(gdevfreq, gk20a_devfreq_bw(rate));
+}
+
+static unsigned long gk20a_devfreq_read_freq(struct gk20a_devfreq *gdevfreq)
+{
+	return nvkm_clk_read(gdevfreq->clk, nv_clk_src_gpc) * GK20A_CLK_GPC_MDIV;
+}
+
+/* Returns the GPC rate read back, or 0 when @on is false. */
+static unsigned long __gk20a_devfreq_sync_bw(struct gk20a_devfreq *gdevfreq, bool on)
+{
+	unsigned long rate = on ? gk20a_devfreq_read_freq(gdevfreq) : 0;
+
+	lockdep_assert_held(&gdevfreq->clk->mutex);
+
+	if (gdevfreq->icc_path) {
+		gdevfreq->icc_follow = on;
+		gk20a_devfreq_set_bw(gdevfreq, gk20a_devfreq_bw(rate));
+	}
+
+	return rate;
+}
+
+/* Also retries a failed request: @icc_bw is what the core accepted. */
+static unsigned long gk20a_devfreq_sync_bw(struct gk20a_devfreq *gdevfreq, bool on)
+{
+	struct nvkm_clk *base = gdevfreq->clk;
+	unsigned long rate;
+
+	mutex_lock(&base->mutex);
+	rate = __gk20a_devfreq_sync_bw(gdevfreq, on);
+	mutex_unlock(&base->mutex);
+
+	return rate;
+}
+
 static int gk20a_devfreq_target(struct device *dev, unsigned long *freq,
 				u32 flags)
 {
@@ -196,6 +282,7 @@ static int gk20a_devfreq_target(struct device *dev, unsigned long *freq,
 	struct nvkm_clk *base = gdevfreq->clk;
 	struct nvkm_pstate *pstates = base->func->pstates;
 	int nr_pstates = base->func->nr_pstates;
+	unsigned long rate;
 	int i, ret;
 
 	for (i = 0; i < nr_pstates - 1; i++)
@@ -210,21 +297,18 @@ static int gk20a_devfreq_target(struct device *dev, unsigned long *freq,
 
 	ret = nvkm_clk_ustate(base, pstates[i].pstate, 0);
 	ret |= nvkm_clk_ustate(base, pstates[i].pstate, 1);
+	rate = gk20a_devfreq_sync_bw(gdevfreq, true);
 	if (ret) {
 		nvkm_error(&base->subdev, "cannot update clock\n");
 		goto unlock;
 	}
 
-	*freq = pstates[i].base.domain[nv_clk_src_gpc] * GK20A_CLK_GPC_MDIV;
+	/* Another pstate requester may have superseded this one. */
+	*freq = rate;
 
 unlock:
 	mutex_unlock(&gdevfreq->lock);
 	return ret;
-}
-
-static unsigned long gk20a_devfreq_read_freq(struct gk20a_devfreq *gdevfreq)
-{
-	return nvkm_clk_read(gdevfreq->clk, nv_clk_src_gpc) * GK20A_CLK_GPC_MDIV;
 }
 
 static int gk20a_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
@@ -292,7 +376,8 @@ static struct devfreq_dev_profile gk20a_devfreq_profile = {
 	.get_dev_status = gk20a_devfreq_get_dev_status,
 };
 
-int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq)
+int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq,
+		       bool icc)
 {
 	struct nvkm_device *device = base->subdev.device;
 	struct nvkm_device_tegra *tdev = device->func->tegra(device);
@@ -309,6 +394,8 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq)
 		mutex_lock(&gdevfreq->lock);
 		gdevfreq->active = true;
 		mutex_unlock(&gdevfreq->lock);
+
+		gk20a_devfreq_sync_bw(gdevfreq, true);
 
 		if (gdevfreq->suspended) {
 			gdevfreq->suspended = false;
@@ -328,10 +415,18 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq)
 	mutex_init(&gdevfreq->lock);
 	gdevfreq->active = true;
 
+	if (icc) {
+		gdevfreq->icc_path = of_icc_get(device->dev, "dma-mem");
+		if (IS_ERR(gdevfreq->icc_path)) {
+			ret = PTR_ERR(gdevfreq->icc_path);
+			goto err_free;
+		}
+	}
+
 	res = devres_alloc(gk20a_devfreq_release, sizeof(*res), GFP_KERNEL);
 	if (!res) {
 		ret = -ENOMEM;
-		goto err_free;
+		goto err_icc;
 	}
 	*res = gdevfreq;
 	devres_add(device->dev, res);
@@ -353,20 +448,32 @@ int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq)
 	gdevfreq->gov_data.upthreshold = 45;
 	gdevfreq->gov_data.downdifferential = 5;
 
+	/* The governor can program the PLL before devfreq_add_device() returns. */
+	mutex_lock(&base->mutex);
+	*pgdevfreq = gdevfreq;
+	__gk20a_devfreq_sync_bw(gdevfreq, true);
+	mutex_unlock(&base->mutex);
+
 	gdevfreq->devfreq = devfreq_add_device(device->dev, &gk20a_devfreq_profile,
 					       DEVFREQ_GOV_SIMPLE_ONDEMAND,
 					       &gdevfreq->gov_data);
 	if (IS_ERR(gdevfreq->devfreq)) {
 		ret = PTR_ERR(gdevfreq->devfreq);
-		goto err_opp;
+		goto err_unpublish;
 	}
 
-	*pgdevfreq = gdevfreq;
 	return 0;
 
+err_unpublish:
+	/* devfreq_add_device() has stopped any governor it started. */
+	mutex_lock(&base->mutex);
+	*pgdevfreq = NULL;
+	mutex_unlock(&base->mutex);
 err_opp:
 	dev_pm_opp_remove_all_dynamic(device->dev);
 	devres_destroy(device->dev, gk20a_devfreq_release, NULL, NULL);
+err_icc:
+	icc_put(gdevfreq->icc_path);
 err_free:
 	mutex_destroy(&gdevfreq->lock);
 	kfree(gdevfreq);
@@ -390,7 +497,9 @@ void gk20a_devfreq_fini(struct nvkm_clk *base, struct gk20a_devfreq *gdevfreq)
 	gdevfreq->active = false;
 	mutex_unlock(&gdevfreq->lock);
 
-	/* nvkm_clk_ustate() can return before the pstate work it queued. */
+	gk20a_devfreq_sync_bw(gdevfreq, false);
+
+	/* Not every pstate request waits for the work it queued. */
 	flush_work(&base->work);
 }
 
@@ -406,6 +515,7 @@ void gk20a_devfreq_dtor(struct nvkm_clk *base, struct gk20a_devfreq **pgdevfreq)
 	devfreq_remove_device(gdevfreq->devfreq);
 	dev_pm_opp_remove_all_dynamic(dev);
 	devres_destroy(dev, gk20a_devfreq_release, NULL, NULL);
+	icc_put(gdevfreq->icc_path);
 	mutex_destroy(&gdevfreq->lock);
 	kfree(gdevfreq);
 	*pgdevfreq = NULL;

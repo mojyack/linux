@@ -490,11 +490,17 @@ int
 gk20a_clk_prog(struct nvkm_clk *base)
 {
 	struct gk20a_clk *clk = gk20a_clk(base);
+	u32 rate = gk20a_pllg_calc_rate(clk, &clk->pll);
 	int ret;
+
+	gk20a_devfreq_pre_prog(clk->devfreq, rate);
 
 	ret = gk20a_pllg_program_mnp_slide(clk, &clk->pll);
 	if (ret)
 		ret = gk20a_pllg_program_mnp(clk, &clk->pll);
+
+	if (!ret)
+		gk20a_devfreq_post_prog(clk->devfreq, rate);
 
 	return ret;
 }
@@ -598,7 +604,7 @@ gk20a_clk_init(struct nvkm_clk *base)
 		return ret;
 	}
 
-	ret = gk20a_devfreq_init(base, &clk->devfreq);
+	ret = gk20a_devfreq_init(base, &clk->devfreq, false);
 	if (ret)
 		return ret;
 
