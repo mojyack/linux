@@ -251,6 +251,61 @@ nvkm_device_tegra_put_vdd(struct nvkm_device_tegra *tdev)
 	}
 }
 
+#if IS_ENABLED(CONFIG_IOMMU_API)
+static int
+nvkm_device_tegra_iommu_mm_init(struct nvkm_device_tegra *tdev, u64 start, u64 end)
+{
+	struct iommu_group *group = iommu_group_get(&tdev->pdev->dev);
+	unsigned int shift = tdev->iommu.pgshift;
+	struct iommu_resv_region *region, *tmp;
+	LIST_HEAD(resv);
+	int ret;
+
+	if (!group)
+		return -ENODEV;
+
+	ret = iommu_get_group_resv_regions(group, &resv);
+	iommu_group_put(group);
+	if (ret)
+		goto out;
+
+	/* Sorted by start; excluded ranges are widened to whole pages. */
+	list_for_each_entry(region, &resv, list) {
+		u64 rstart = region->start, rend;
+
+		if (rstart >= end)
+			break;
+		if (check_add_overflow(rstart, (u64)region->length, &rend))
+			rend = end;
+		rend = min(rend, end);
+		if (rend <= start)
+			continue;
+
+		rstart = ALIGN_DOWN(rstart, BIT_ULL(shift));
+		if (rstart > start) {
+			ret = nvkm_mm_init(&tdev->iommu.mm, 0, start >> shift,
+					   (rstart - start) >> shift, 1);
+			if (ret)
+				goto out;
+		}
+		start = ALIGN(rend, BIT_ULL(shift));
+	}
+
+	if (start < end)
+		ret = nvkm_mm_init(&tdev->iommu.mm, 0, start >> shift,
+				   (end - start) >> shift, 1);
+	else if (!nvkm_mm_initialised(&tdev->iommu.mm))
+		ret = -ERANGE;
+
+out:
+	if (ret)
+		nvkm_mm_fini(&tdev->iommu.mm);
+	list_for_each_entry_safe(region, tmp, &resv, list)
+		kfree(region);
+	return ret;
+}
+#endif
+
 static void
 nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
 {
@@ -311,8 +366,7 @@ nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
 			goto detach_device;
 		}
 
-		ret = nvkm_mm_init(&tdev->iommu.mm, 0, start >> tdev->iommu.pgshift,
-				   (end - start) >> tdev->iommu.pgshift, 1);
+		ret = nvkm_device_tegra_iommu_mm_init(tdev, start, end);
 		if (ret)
 			goto detach_device;
 	}
