@@ -115,6 +115,54 @@ nvkm_device_tegra_power_down(struct nvkm_device_tegra *tdev)
 	}
 }
 
+#if IS_ENABLED(CONFIG_IOMMU_API)
+static int
+nvkm_device_tegra_iommu_mm_init(struct nvkm_device_tegra *tdev, u64 end)
+{
+	struct iommu_group *group = iommu_group_get(&tdev->pdev->dev);
+	unsigned int shift = tdev->iommu.pgshift;
+	struct iommu_resv_region *region, *tmp;
+	LIST_HEAD(resv);
+	u64 start = 0;
+	int ret = 0;
+
+	if (group) {
+		iommu_get_group_resv_regions(group, &resv);
+		iommu_group_put(group);
+	}
+
+	/* Sorted and merged, so the free ranges come out in order. */
+	list_for_each_entry(region, &resv, list) {
+		u64 rstart = region->start;
+		u64 rend = region->start + region->length;
+
+		if (rend <= start || rstart >= end)
+			continue;
+
+		if (rstart > start) {
+			ret = nvkm_mm_init(&tdev->iommu.mm, 0, start >> shift,
+					   (rstart - start) >> shift, 1);
+			if (ret)
+				goto out;
+		}
+		start = rend;
+	}
+
+	if (start < end)
+		ret = nvkm_mm_init(&tdev->iommu.mm, 0, start >> shift,
+				   (end - start) >> shift, 1);
+	else if (!nvkm_mm_initialised(&tdev->iommu.mm))
+		ret = -ERANGE;
+
+out:
+	if (ret)
+		nvkm_mm_fini(&tdev->iommu.mm);
+	list_for_each_entry_safe(region, tmp, &resv, list)
+		kfree(region);
+	return ret;
+}
+#endif
+
 static void
 nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
 {
@@ -166,8 +214,7 @@ nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
 
 		end = min_t(u64, tdev->iommu.domain->geometry.aperture_end,
 			    BIT_ULL(tdev->func->iommu_bit) - 1) + 1;
-		ret = nvkm_mm_init(&tdev->iommu.mm, 0, 0,
-				   end >> tdev->iommu.pgshift, 1);
+		ret = nvkm_device_tegra_iommu_mm_init(tdev, end);
 		if (ret)
 			goto detach_device;
 	}
