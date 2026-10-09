@@ -121,6 +121,7 @@ nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
 #if IS_ENABLED(CONFIG_IOMMU_API)
 	struct device *dev = &tdev->pdev->dev;
 	unsigned long pgsize_bitmap;
+	u64 end;
 	int ret;
 
 #if IS_ENABLED(CONFIG_ARM_DMA_USE_IOMMU)
@@ -163,9 +164,10 @@ nvkm_device_tegra_probe_iommu(struct nvkm_device_tegra *tdev)
 		if (ret)
 			goto free_domain;
 
+		end = min_t(u64, tdev->iommu.domain->geometry.aperture_end,
+			    BIT_ULL(tdev->func->iommu_bit) - 1) + 1;
 		ret = nvkm_mm_init(&tdev->iommu.mm, 0, 0,
-				   (1ULL << tdev->func->iommu_bit) >>
-				   tdev->iommu.pgshift, 1);
+				   end >> tdev->iommu.pgshift, 1);
 		if (ret)
 			goto detach_device;
 	}
