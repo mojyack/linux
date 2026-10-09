@@ -40,6 +40,36 @@ static void nouveau_platform_remove(struct platform_device *pdev)
 	nouveau_drm_device_remove(drm);
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int nouveau_platform_suspend(struct device *dev)
+{
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+	int ret;
+
+	ret = nouveau_do_suspend(drm, false);
+	if (ret)
+		return ret;
+
+	nvkm_device_tegra_suspend(nvxx_device(drm));
+	return 0;
+}
+
+static int nouveau_platform_resume(struct device *dev)
+{
+	struct nouveau_drm *drm = dev_get_drvdata(dev);
+	int ret;
+
+	ret = nvkm_device_tegra_resume(nvxx_device(drm));
+	if (ret)
+		return ret;
+
+	return nouveau_do_resume(drm, false);
+}
+
+static SIMPLE_DEV_PM_OPS(nouveau_pm_ops, nouveau_platform_suspend,
+			 nouveau_platform_resume);
+#endif
+
 #if IS_ENABLED(CONFIG_OF)
 static const struct nvkm_device_tegra_func gk20a_platform_data = {
 	.iommu_bit = 34,
@@ -81,6 +111,9 @@ struct platform_driver nouveau_platform_driver = {
 	.driver = {
 		.name = "nouveau",
 		.of_match_table = of_match_ptr(nouveau_platform_match),
+#ifdef CONFIG_PM_SLEEP
+		.pm = &nouveau_pm_ops,
+#endif
 	},
 	.probe = nouveau_platform_probe,
 	.remove = nouveau_platform_remove,

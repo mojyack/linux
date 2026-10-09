@@ -79,23 +79,40 @@ err_power:
 	return ret;
 }
 
-static int
+static void
 nvkm_device_tegra_power_down(struct nvkm_device_tegra *tdev)
 {
+	struct device *dev = &tdev->pdev->dev;
+	bool isolated = true;
 	int ret;
+
+	if (!dev->pm_domain) {
+		ret = tegra_pmc_gpu_set_clamping(tdev->pmc, true);
+		if (ret) {
+			dev_err(dev, "failed to clamp: %d\n", ret);
+			isolated = false;
+		}
+		udelay(10);
+
+		ret = reset_control_assert(tdev->rst);
+		if (ret) {
+			dev_err(dev, "failed to assert reset: %d\n", ret);
+			isolated = false;
+		}
+		udelay(10);
+	}
 
 	clk_disable_unprepare(tdev->clk_pwr);
 	clk_disable_unprepare(tdev->clk_ref);
 	clk_disable_unprepare(tdev->clk);
 	udelay(10);
 
-	if (tdev->vdd) {
+	/* Never cut the rail under a GPU that is not clamped and in reset. */
+	if (tdev->vdd && isolated) {
 		ret = regulator_disable(tdev->vdd);
 		if (ret)
-			return ret;
+			dev_warn(dev, "failed to disable vdd: %d\n", ret);
 	}
-
-	return 0;
 }
 
 static void
@@ -346,6 +363,18 @@ remove:
 free:
 	kfree(tdev);
 	return ret;
+}
+
+void
+nvkm_device_tegra_suspend(struct nvkm_device *device)
+{
+	nvkm_device_tegra_power_down(nvkm_device_tegra(device));
+}
+
+int
+nvkm_device_tegra_resume(struct nvkm_device *device)
+{
+	return nvkm_device_tegra_power_up(nvkm_device_tegra(device));
 }
 #else
 int
