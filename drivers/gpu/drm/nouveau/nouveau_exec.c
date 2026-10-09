@@ -11,6 +11,9 @@
 #include "nouveau_uvmm.h"
 
 #include <nvif/class.h>
+#include <nvif/push906f.h>
+
+#include <nvhw/class/clc36f.h>
 
 /**
  * DOC: Overview
@@ -125,13 +128,58 @@ nouveau_exec_job_armed_submit(struct nouveau_job *job,
 	drm_gpuvm_exec_unlock(vme);
 }
 
+/* Host MEM_OP, in the MEM_OP_C/D form GM20B's Maxwell channel takes. */
+static int
+nouveau_channel_l2_op(struct nouveau_channel *chan, u32 op, bool wfi)
+{
+	struct nvif_push *push = &chan->chan.push;
+	int ret;
+
+	ret = PUSH_WAIT(push, 5);
+	if (ret)
+		return ret;
+
+	/* SET_REFERENCE waits for the channel to go idle, as in NVK. */
+	if (wfi)
+		PUSH_MTHD(push, NV906F, SET_REFERENCE, 0);
+	PUSH_NVSQ(push, NV906F, 0x0030, 0, 0x0034, op);
+	PUSH_KICK(push);
+	return 0;
+}
+
+/* Drop the L2's clean system-memory lines before what follows reads them. */
+int
+nouveau_channel_l2_invalidate(struct nouveau_channel *chan)
+{
+	return nouveau_channel_l2_op(chan,
+		NVDEF(NVC36F, MEM_OP_D, OPERATION, L2_SYSMEM_INVALIDATE), false);
+}
+
+/* Write back what the channel left dirty in the L2, once it is idle. */
+int
+nouveau_channel_l2_flush(struct nouveau_channel *chan)
+{
+	return nouveau_channel_l2_op(chan,
+		NVDEF(NVC36F, MEM_OP_D, OPERATION, L2_FLUSH_DIRTY), true);
+}
+
 static struct dma_fence *
 nouveau_exec_job_run(struct nouveau_job *job)
 {
 	struct nouveau_exec_job *exec_job = to_nouveau_exec_job(job);
 	struct nouveau_channel *chan = exec_job->chan;
 	struct nouveau_fence *fence = exec_job->fence;
+	bool l2 = job->cli->drm->l2sysmem && exec_job->push.count;
 	int i, ret;
+
+	/* No validate step: any CPU write may be behind a clean L2 line. */
+	if (l2) {
+		ret = nouveau_channel_l2_invalidate(chan);
+		if (ret) {
+			NV_PRINTK(err, job->cli, "l2 invalidate: %d\n", ret);
+			return ERR_PTR(ret);
+		}
+	}
 
 	ret = nvif_chan_gpfifo_wait(&chan->chan, exec_job->push.count + 1, 16);
 	if (ret) {
@@ -143,12 +191,19 @@ nouveau_exec_job_run(struct nouveau_job *job)
 		struct drm_nouveau_exec_push *p = &exec_job->push.s[i];
 		bool no_prefetch = p->flags & DRM_NOUVEAU_EXEC_PUSH_NO_PREFETCH;
 
+		/* The PBDMA reads pushbufs through the L2 too: fetch after it. */
+		if (l2 && i == 0)
+			no_prefetch = true;
+
 		nvif_chan_gpfifo_push(&chan->chan, p->va, p->va_len, no_prefetch);
 	}
 
 	nvif_chan_gpfifo_post(&chan->chan);
 
-	ret = nouveau_fence_emit(fence);
+	/* The fence must still mean the job's writes are in memory. */
+	ret = l2 ? nouveau_channel_l2_flush(chan) : 0;
+	if (!ret)
+		ret = nouveau_fence_emit(fence);
 	if (ret) {
 		nouveau_fence_unref(&exec_job->fence);
 		NV_PRINTK(err, job->cli, "error fencing pushbuf: %d\n", ret);

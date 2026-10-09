@@ -51,6 +51,9 @@ struct nouveau_channel {
 
 	struct nvif_event kill;
 	atomic_t killed;
+
+	u32 l2_seq; /* drm->l2_clean_seq at the last L2 invalidate */
+	bool l2_fetch_wait; /* no user push fetched since that invalidate */
 };
 
 int nouveau_channels_init(struct nouveau_drm *);
@@ -61,6 +64,8 @@ int  nouveau_channel_new(struct nouveau_cli *, bool priv, u64 runm,
 void nouveau_channel_del(struct nouveau_channel **);
 int  nouveau_channel_idle(struct nouveau_channel *);
 void nouveau_channel_kill(struct nouveau_channel *);
+int  nouveau_channel_l2_invalidate(struct nouveau_channel *);
+int  nouveau_channel_l2_flush(struct nouveau_channel *);
 
 extern int nouveau_vram_pushbuf;
 

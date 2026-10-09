@@ -27,6 +27,9 @@
 
 #include "nouveau_drv.h"
 #include "nouveau_gem.h"
+#include "nouveau_mem.h"
+#include "nouveau_uvmm.h"
+#include "nouveau_vmm.h"
 
 struct sg_table *nouveau_gem_prime_get_sg_table(struct drm_gem_object *obj)
 {
@@ -57,6 +60,7 @@ struct drm_gem_object *nouveau_gem_prime_import_sg_table(struct drm_device *dev,
 	}
 
 	nvbo->valid_domains = NOUVEAU_GEM_DOMAIN_GART;
+	nvbo->l2_volatile = true;
 
 	nvbo->bo.base.funcs = &nouveau_gem_object_funcs;
 
@@ -108,6 +112,7 @@ struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
 					 int flags)
 {
 	struct nouveau_bo *nvbo = nouveau_gem_object(gobj);
+	struct nouveau_drm *drm = nouveau_drm(gobj->dev);
 	struct ttm_operation_ctx ctx = {
 		.interruptible = true,
 		.no_wait_gpu = true,
@@ -127,6 +132,52 @@ struct dma_buf *nouveau_gem_prime_export(struct drm_gem_object *gobj,
 	ret = ttm_bo_setup_export(&nvbo->bo, &ctx);
 	if (ret)
 		return ERR_PTR(ret);
+
+	/* An importer can't see the GPU L2: map volatile from here on. */
+	if (drm->l2sysmem) {
+		struct ttm_resource *res;
+		struct nouveau_vma *vma;
+		long lret;
+
+		ret = ttm_bo_reserve(&nvbo->bo, true, false, NULL);
+		if (ret)
+			return ERR_PTR(ret);
+
+		nvbo->l2_volatile = true;
+		WRITE_ONCE(nvbo->l2_drain_owed, true);
+		res = nvbo->bo.resource;
+		if (res && res->mem_type != TTM_PL_SYSTEM) {
+			list_for_each_entry(vma, &nvbo->vma_list, head) {
+				ret = nouveau_vma_map(vma, nouveau_mem(res));
+				if (ret)
+					break;
+			}
+			if (!ret)
+				ret = nouveau_uvmm_bo_map_all(nvbo, nouveau_mem(res));
+		}
+		/* Unshared, a mix of cached and volatile aliases is coherent. */
+		if (ret) {
+			nvbo->l2_volatile = false;
+			nvbo->l2_drain_owed = false;
+		}
+		ttm_bo_unreserve(&nvbo->bo);
+		if (ret)
+			return ERR_PTR(ret);
+
+		/* Work already queued may write through the old mappings. */
+		lret = dma_resv_wait_timeout(nvbo->bo.base.resv,
+					     DMA_RESV_USAGE_BOOKKEEP, true,
+					     MAX_SCHEDULE_TIMEOUT);
+		if (lret < 0)
+			return ERR_PTR(lret);
+
+		ret = nvkm_ltc_flush(nvxx_device(drm)->ltc);
+		if (!ret)
+			ret = nvkm_ltc_invalidate(nvxx_device(drm)->ltc);
+		if (ret)
+			return ERR_PTR(ret);
+		WRITE_ONCE(nvbo->l2_drain_owed, false);
+	}
 
 	return drm_gem_prime_export(gobj, flags);
 }

@@ -918,6 +918,21 @@ revalidate:
 		}
 	}
 
+	/* Drop L2 lines that predate the CPU writes validate cleaned. */
+	if (drm->l2sysmem) {
+		u32 seq = atomic_read_acquire(&drm->l2_clean_seq);
+
+		if (chan->l2_seq != seq) {
+			ret = nouveau_channel_l2_invalidate(chan);
+			if (ret) {
+				NV_PRINTK(err, cli, "l2 invalidate: %d\n", ret);
+				goto out;
+			}
+			chan->l2_seq = seq;
+			chan->l2_fetch_wait = true;
+		}
+	}
+
 	if (chan->user.oclass >= NV50_CHANNEL_GPFIFO) {
 		ret = nvif_chan_gpfifo_wait(&chan->chan, req->nr_push + 1, 16);
 		if (ret) {
@@ -932,10 +947,16 @@ revalidate:
 			u32 length = push[i].length & ~NOUVEAU_GEM_PUSHBUF_NO_PREFETCH;
 			bool no_prefetch = push[i].length & NOUVEAU_GEM_PUSHBUF_NO_PREFETCH;
 
+			/* The PBDMA reads pushbufs through the L2 too: fetch after it. */
+			if (chan->l2_fetch_wait && i == 0)
+				no_prefetch = true;
+
 			nvif_chan_gpfifo_push(&chan->chan, addr, length, no_prefetch);
 		}
 
 		nvif_chan_gpfifo_post(&chan->chan);
+		if (req->nr_push)
+			chan->l2_fetch_wait = false;
 	} else
 	if (drm->client.device.info.chipset >= 0x25) {
 		ret = PUSH_WAIT(&chan->chan.push, req->nr_push * 2);
@@ -1072,12 +1093,11 @@ nouveau_gem_ioctl_cpu_prep(struct drm_device *dev, void *data,
 		ret = lret;
 
 	/* The tracking state is the reservation's, as in validate. */
-	lret = ttm_bo_reserve(&nvbo->bo, true, false, NULL);
-	if (!lret) {
-		nouveau_bo_sync_for_cpu(nvbo);
+	if (!ret)
+		ret = ttm_bo_reserve(&nvbo->bo, true, false, NULL);
+	if (!ret) {
+		ret = nouveau_bo_sync_for_cpu(nvbo);
 		ttm_bo_unreserve(&nvbo->bo);
-	} else if (!ret) {
-		ret = lret;
 	}
 	drm_gem_object_put(gem);
 

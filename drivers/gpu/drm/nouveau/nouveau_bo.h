@@ -22,6 +22,8 @@ struct nouveau_bo {
 	bool cpu_mapped;
 	bool cpu_mapped_dmabuf;
 	unsigned int cpu_vmapped; /* drm_gem_vmap()s, under the reservation */
+	bool l2_volatile; /* shared with a device that doesn't see the GPU L2 */
+	bool l2_drain_owed; /* l2_volatile, its cached writes not yet flushed */
 	/* pages dirtied through the CPU mapping, [first, last) */
 	pgoff_t cpu_wb_first, cpu_wb_last;
 	struct ttm_bo_kmap_obj kmap;
@@ -93,9 +95,10 @@ vm_fault_t nouveau_ttm_fault_reserve_notify(struct ttm_buffer_object *bo);
 void nouveau_bo_fence(struct nouveau_bo *, struct nouveau_fence *, bool exclusive);
 int  nouveau_bo_validate(struct nouveau_bo *, bool interruptible,
 			 bool no_wait_gpu);
+bool nouveau_bo_l2_cacheable(struct nouveau_bo *nvbo);
 bool nouveau_bo_host_compressed(struct nouveau_bo *nvbo);
 void nouveau_bo_sync_for_device(struct nouveau_bo *nvbo);
-void nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo);
+int nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo);
 void nouveau_bo_add_io_reserve_lru(struct ttm_buffer_object *bo);
 void nouveau_bo_del_io_reserve_lru(struct ttm_buffer_object *bo);
 

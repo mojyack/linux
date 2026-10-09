@@ -77,7 +77,7 @@ struct nouveau_uvmm_bind_job_args {
 
 void nouveau_uvmm_fini(struct nouveau_uvmm *uvmm);
 
-void nouveau_uvmm_bo_map_all(struct nouveau_bo *nvbov, struct nouveau_mem *mem);
+int nouveau_uvmm_bo_map_all(struct nouveau_bo *nvbov, struct nouveau_mem *mem);
 void nouveau_uvmm_bo_unmap_all(struct nouveau_bo *nvbo);
 
 int nouveau_uvmm_ioctl_vm_init(struct drm_device *dev, void *data,

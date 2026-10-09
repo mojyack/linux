@@ -708,13 +708,24 @@ nouveau_bo_unmap(struct nouveau_bo *nvbo)
 	nvbo->cpu_dirty = true;
 }
 
+bool
+nouveau_bo_l2_cacheable(struct nouveau_bo *nvbo)
+{
+	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
+
+	if (!drm->l2sysmem || nouveau_drm_use_coherent_gpu_mapping(drm))
+		return false;
+
+	return !nvbo->force_coherent && !READ_ONCE(nvbo->l2_volatile);
+}
+
 void
 nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 {
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
 	pgoff_t i, j, end;
-	bool whole = nvbo->cpu_dirty;
+	bool whole = nvbo->cpu_dirty, synced = false;
 
 	nvbo->cpu_dirty = false;
 
@@ -748,28 +759,41 @@ nouveau_bo_sync_for_device(struct nouveau_bo *nvbo)
 					   ttm_dma->dma_address[i],
 					   num_pages * PAGE_SIZE, DMA_TO_DEVICE);
 		i += num_pages;
+		synced = true;
 	}
+
+	/* After the clean: a submit that sees the new value invalidates. */
+	if (synced && drm->l2sysmem)
+		atomic_inc_return_release(&drm->l2_clean_seq);
 }
 
-void
+int
 nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 {
 	struct nouveau_drm *drm = nouveau_bdev(nvbo->bo.bdev);
 	struct ttm_tt *ttm_dma = (struct ttm_tt *)nvbo->bo.ttm;
-	int i, j;
+	int i, j, ret;
 
 	nvbo->cpu_dirty = true;
 
+	/* The GPU L2 first, then whatever the CPU cache holds. */
+	if (drm->l2sysmem && !nvbo->force_coherent &&
+	    (!nvbo->l2_volatile || READ_ONCE(nvbo->l2_drain_owed))) {
+		ret = nvkm_ltc_flush(nvxx_device(drm)->ltc);
+		if (ret)
+			return ret;
+	}
+
 	if (!ttm_dma || !ttm_dma->dma_address)
-		return;
+		return 0;
 	if (!ttm_dma->pages) {
 		NV_DEBUG(drm, "ttm_dma 0x%p: pages NULL\n", ttm_dma);
-		return;
+		return 0;
 	}
 
 	/* Don't waste time looping if the object is coherent */
 	if (nvbo->force_coherent)
-		return;
+		return 0;
 
 	i = 0;
 	while (i < ttm_dma->num_pages) {
@@ -787,6 +811,8 @@ nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 					num_pages * PAGE_SIZE, DMA_FROM_DEVICE);
 		i += num_pages;
 	}
+
+	return 0;
 }
 
 void nouveau_bo_add_io_reserve_lru(struct ttm_buffer_object *bo)

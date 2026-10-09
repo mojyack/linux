@@ -251,6 +251,10 @@ struct nouveau_drm {
 		struct list_head io_reserve_lru;
 	} ttm;
 
+	/* GM20B: the GPU L2 caches system memory, see nouveau_mem_map() */
+	bool l2sysmem;
+	atomic_t l2_clean_seq; /* bumped by every CPU writeback */
+
 	/* GEM interface support */
 	struct {
 		u64 vram_available;
@@ -390,6 +394,7 @@ extern int nouveau_modeset;
 #include <subdev/i2c.h>
 #include <subdev/timer.h>
 #include <subdev/therm.h>
+#include <subdev/ltc.h>
 
 static inline struct nvkm_device *
 nvxx_device(struct nouveau_drm *drm)

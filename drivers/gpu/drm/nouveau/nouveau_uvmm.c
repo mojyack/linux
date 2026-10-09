@@ -149,7 +149,8 @@ nouveau_uvmm_vmm_map(struct nouveau_uvmm *uvmm,
 	case NVIF_CLASS_VMM_GM200:
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
-		if (mem->mem.type & NVIF_MEM_VRAM)
+		if (mem->mem.type & NVIF_MEM_VRAM ||
+		    nouveau_mem_l2_cacheable(mem))
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;
@@ -1071,7 +1072,7 @@ nouveau_uvmm_map_misreads(struct nouveau_uvmm *uvmm, struct drm_gem_object *obj,
 	if (kind >= mmu->kind_nr || mmu->kind[kind] == kind)
 		return false;
 
-	return nouveau_bo_host_compressed(nvbo);
+	return nouveau_bo_host_compressed(nvbo) && !nouveau_bo_l2_cacheable(nvbo);
 }
 
 static int
@@ -1853,23 +1854,30 @@ out_free_args:
 	return ret;
 }
 
-void
+int
 nouveau_uvmm_bo_map_all(struct nouveau_bo *nvbo, struct nouveau_mem *mem)
 {
 	struct drm_gem_object *obj = &nvbo->bo.base;
 	struct drm_gpuvm_bo *vm_bo;
 	struct drm_gpuva *va;
+	int ret = 0;
 
 	dma_resv_assert_held(obj->resv);
 
 	drm_gem_for_each_gpuvm_bo(vm_bo, obj) {
 		drm_gpuvm_bo_for_each_va(va, vm_bo) {
 			struct nouveau_uvma *uvma = uvma_from_va(va);
+			int err = nouveau_uvma_map(uvma, mem);
 
-			nouveau_uvma_map(uvma, mem);
+			/* A va that didn't map keeps its invalidation state. */
+			if (err) {
+				ret = ret ?: err;
+				continue;
+			}
 			drm_gpuva_invalidate(va, false);
 		}
 	}
+	return ret;
 }
 
 void
