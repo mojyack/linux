@@ -159,6 +159,21 @@ properties:
               goes LOW.
             enum: [0, 1]
 
+  onkey:
+    type: object
+    $ref: /schemas/input/input.yaml#
+    additionalProperties: false
+    description:
+      The EN0 input of the ON/OFF controller is connected to a power button.
+      Presses and releases are latched as EN0 edges and signalled through the
+      PMIC interrupt.
+
+    properties:
+      linux,code:
+        default: 116  # KEY_POWER
+
+      wakeup-source: true
+
   pinmux:
     $ref: /schemas/pinctrl/maxim,max77620-pinctrl.yaml
 
@@ -176,6 +191,7 @@ allOf:
     then:
       properties:
         "#thermal-sensor-cells": false
+        onkey: false
         fps:
           patternProperties:
             "^fps[0-2]$":
@@ -220,6 +236,7 @@ additionalProperties: false
 
 examples:
   - |
+    #include <dt-bindings/input/linux-event-codes.h>
     #include <dt-bindings/interrupt-controller/irq.h>
     #include <dt-bindings/mfd/max77620.h>
 
@@ -246,6 +263,11 @@ examples:
 
             pinctrl-names = "default";
             pinctrl-0 = <&max77620_default>;
+
+            onkey {
+                linux,code = <KEY_POWER>;
+                wakeup-source;
+            };
 
             max77620_default: pinmux {
                 gpio0 {
