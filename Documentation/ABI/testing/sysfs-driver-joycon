@@ -1,0 +1,71 @@
+What:		/sys/bus/serial/devices/<dev>/pairing_host
+Date:		October 2026
+KernelVersion:	7.5
+Contact:	linux-input@vger.kernel.org
+Description:
+		(RW) Address of the Bluetooth host the attached Joy-Con is
+		paired to, as recorded in the controller's own flash, in the
+		usual colon-separated form (00:11:22:33:44:55).
+
+		A Joy-Con is the same controller on the rail and over
+		Bluetooth, and it keeps the host it belongs to. Reading this
+		says which adapter it would reconnect to once detached.
+
+		Reading returns -ENODATA for a controller that has never been
+		paired, and until the record has been read from the
+		controller: a moment after it is docked, after system sleep
+		until the controller on the rail has been found to be the
+		same one, and from the start of a pairing written here until
+		its outcome has been read back.
+
+		Writing an address pairs the controller to that host over the
+		rail, with no SYNC button and no Bluetooth pairing, and
+		replaces the record that was there - a controller holds one
+		host. The write blocks until the controller has stored it and
+		the record read back from it names that host, at most three
+		seconds, and returns:
+
+		==========  ==================================================
+		-EINVAL     the address does not parse
+		-ENODEV     the rail is empty, or the controller left or was
+		            swapped while pairing
+		-EBUSY      another pairing write is in flight
+		-EIO        the controller refused a step or answered one
+		            out of sequence, or the record read back names
+		            another host
+		-ETIMEDOUT  the controller stopped answering; the first
+		            pairing of a controller fresh from the factory
+		            writes its flash first and can take this long,
+		            so retry once
+		==========  ==================================================
+
+		or the error of the serial write. A writer killed while
+		waiting stops waiting; the pairing is abandoned as if it had
+		failed.
+
+		A failed or abandoned write leaves the controller with the
+		record it had or the new one. The driver then opens the rail
+		session again, so that no answer to the abandoned pairing can
+		be taken for one to the next, and reads the record again:
+		reading the attribute returns -ENODATA until it has, then the
+		record the controller holds. System sleep waits for a write
+		in flight to finish.
+
+What:		/sys/bus/serial/devices/<dev>/pairing_record
+Date:		October 2026
+KernelVersion:	7.5
+Contact:	linux-input@vger.kernel.org
+Description:
+		(RO) The pairing pairing_host describes, with its Bluetooth
+		link key: the host address as pairing_host prints it, a space,
+		and the key as 32 hex digits, all from one record.
+
+		A detached Joy-Con reconnects by paging the host it stored and
+		asking it for this key. Only the controller has it - it is not
+		established through bonding, so a Bluetooth host has no way to
+		learn it - and a host that cannot answer has to pair again,
+		which is what a user notices as a controller that never comes
+		back on its own. Reading it here lets that host be told.
+
+		Readable by root only. Returns -ENODATA under the same
+		conditions as pairing_host.
