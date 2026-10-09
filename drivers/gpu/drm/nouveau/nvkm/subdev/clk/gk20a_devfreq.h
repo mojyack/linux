@@ -17,7 +17,7 @@ static inline int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq
 	return 0;
 }
 
-static inline int gk20a_devfreq_resume(struct device dev) { return 0; }
+static inline int gk20a_devfreq_resume(struct device *dev) { return 0; }
 static inline int gk20a_devfreq_suspend(struct device *dev) { return 0; }
 #endif /* CONFIG_PM_DEVFREQ */
 
