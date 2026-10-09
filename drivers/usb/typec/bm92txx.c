@@ -23,6 +23,8 @@
 #include <linux/usb/pd_vdo.h>
 #include <linux/usb/role.h>
 #include <linux/usb/typec.h>
+#include <linux/usb/typec_altmode.h>
+#include <linux/usb/typec_dp.h>
 #include <linux/workqueue.h>
 
 /* Registers */
@@ -85,6 +87,10 @@
 #define STATUS2_EM_CABLE	BIT(12)
 #define STATUS2_OTG_INSERT	BIT(13)
 
+/* DP_STATUS_REG */
+#define DP_STATUS_SIGNAL_ON	BIT(7)
+#define DP_STATUS_DP_EN		BIT(15)
+
 /* CONFIG1_REG */
 #define CONFIG1_SPDSRC		GENMASK(15, 14)
 #define SPDSRC12_ON		0
@@ -103,6 +109,8 @@
 #define SEND_VDM_CMD		0x1111
 #define ACCEPT_VDM_CMD		0x1616
 #define DR_SWAP_CMD		0x1818
+#define DP_ENTER_MODE_CMD	0x3131
+#define DP_CFG_AND_START_HPD_CMD 0x3636
 
 #define BM92T_PD_REVISION	0x0200
 #define BM92T_CMD_TIMEOUT_MS	1000
@@ -112,10 +120,18 @@
 #define BM92T_PLUG_SETTLE_MS	500
 #define BM92T_RAISE_DELAY_MS	2000
 #define BM92T_REQ_TIMEOUT_MS	3000
+#define BM92T_DP_CFG_RETRIES	3
 #define BM92T_RDO_RETRIES	2
 #define BM92T_SUBMIT_TRIES	3
 #define BM92T_ABORT_TRIES	3
 #define BM92T_STUCK_POLL_MS	1000
+#define BM92T_DP_POLL_MS	1000
+#define BM92T_DP_REPLY_RETRY_MS	20
+#define BM92T_DP_REPLY_SLOTS	4
+
+#define BM92T_DP_ACK(cmd)	(VDO(USB_TYPEC_DP_SID, 1, SVDM_VER_1_0, \
+				     VDO_OPOS(USB_TYPEC_DP_MODE) | \
+				     VDO_CMDT(CMDT_RSP_ACK) | (cmd)))
 
 enum bm92t_state {
 	BM92T_IDLE,
@@ -130,6 +146,14 @@ enum bm92t_state {
 	BM92T_DR_SWAP_SENT,
 	BM92T_DISC_ID_SENT,
 	BM92T_DISC_ID_ACCEPT,
+	BM92T_DISC_SVID_SENT,
+	BM92T_DISC_SVID_ACCEPT,
+	BM92T_DISC_MODE_SENT,
+	BM92T_DISC_MODE_ACCEPT,
+	BM92T_DP_ENTER_SENT,
+	BM92T_DP_QUERY_SENT,
+	BM92T_DP_QUERY_ACCEPT,
+	BM92T_DP_CFG_SENT,
 	BM92T_NUM_STATES
 };
 
@@ -146,13 +170,22 @@ static const char * const bm92t_state_names[] = {
 	[BM92T_DR_SWAP_SENT]	= "dr-swap-sent",
 	[BM92T_DISC_ID_SENT]	= "disc-id-sent",
 	[BM92T_DISC_ID_ACCEPT]	= "disc-id-accept",
+	[BM92T_DISC_SVID_SENT]	= "disc-svid-sent",
+	[BM92T_DISC_SVID_ACCEPT] = "disc-svid-accept",
+	[BM92T_DISC_MODE_SENT]	= "disc-mode-sent",
+	[BM92T_DISC_MODE_ACCEPT] = "disc-mode-accept",
+	[BM92T_DP_ENTER_SENT]	= "dp-enter-sent",
+	[BM92T_DP_QUERY_SENT]	= "dp-query-sent",
+	[BM92T_DP_QUERY_ACCEPT]	= "dp-query-accept",
+	[BM92T_DP_CFG_SENT]	= "dp-cfg-sent",
 };
 
 static_assert(ARRAY_SIZE(bm92t_state_names) == BM92T_NUM_STATES);
 
 /* States waiting for the partner's reply to a VDM of ours */
 static const unsigned long bm92t_vdm_states =
-	BIT(BM92T_DISC_ID_SENT);
+	BIT(BM92T_DISC_ID_SENT) | BIT(BM92T_DISC_SVID_SENT) |
+	BIT(BM92T_DISC_MODE_SENT) | BIT(BM92T_DP_QUERY_SENT);
 
 static_assert(BM92T_NUM_STATES <= BITS_PER_LONG);
 
@@ -199,6 +232,14 @@ struct bm92t_attachment {
 	bool discovered;
 	bool partner_drd;
 	bool vdm_pending;		/* an unsolicited partner VDM */
+
+	u32 dp_vdo;
+	u32 dp_conf;
+	unsigned int dp_cfg_retries;
+	bool dp_tried;
+	bool dp_live;
+	bool dp_exited;
+	bool dp_hpd;
 };
 
 struct bm92t_info {
@@ -220,6 +261,7 @@ struct bm92t_info {
 	u16 alert;
 	u16 status1;
 	u16 status2;
+	u16 dp_status;
 	bool irq_pending;		/* the hard handler masked the IRQ */
 	bool poll;
 	unsigned long poll_at;
@@ -242,6 +284,18 @@ struct bm92t_info {
 	int dump_status;
 	u8 dump[ARRAY_SIZE(bm92t_dump_regs)][5];
 	struct completion dump_done;
+	bool dp_enter_wanted;
+	bool dp_reply_ok;
+	bool dp_told;			/* the DP alt mode driver has the Enter */
+	struct {
+		u32 hdr;
+		u32 vdo;
+		int count;
+	} dp_replies[BM92T_DP_REPLY_SLOTS];
+	unsigned int dp_nr_replies;
+	u32 dp_status_vdo;
+	u32 dp_pin;
+	struct delayed_work dp_work;
 	struct mutex req_mutex;		/* one synchronous caller at a time */
 
 	struct typec_port *port;
@@ -249,6 +303,9 @@ struct bm92t_info {
 	struct usb_pd_identity partner_ident;
 	struct typec_cable *cable;
 	struct typec_plug *plug;
+	struct typec_altmode *port_altmode[2];
+	struct typec_altmode *port_dp;
+	struct typec_altmode *partner_dp;
 	struct fwnode_handle *connector;
 
 	struct usb_role_switch *role_sw;
@@ -816,6 +873,19 @@ static void bm92t_reset(struct bm92t_info *info)
 	bm92t_retry_at(info, BM92T_RESET_SETTLE_MS);
 }
 
+static void bm92t_altmode_set_active(struct typec_altmode *alt, bool active)
+{
+	if (alt && alt->active != active)
+		typec_altmode_update_active(alt, active);
+}
+
+static void bm92t_unregister_altmode(struct typec_altmode **alt)
+{
+	if (*alt)
+		typec_unregister_altmode(*alt);
+	*alt = NULL;
+}
+
 /* Register what the port shows of this attachment, as far as it can */
 static void bm92t_register_partner(struct bm92t_info *info, u16 status2)
 {
@@ -881,6 +951,9 @@ static void bm92t_attach(struct bm92t_info *info, u16 status1, u16 status2,
 	}
 }
 
+static void bm92t_dp_reply(struct bm92t_info *info, u32 hdr, u32 vdo,
+			   int count);
+
 static void bm92t_detach(struct bm92t_info *info)
 {
 	/* A wedged mailbox stays wedged across partners */
@@ -888,6 +961,16 @@ static void bm92t_detach(struct bm92t_info *info)
 	    info->state != BM92T_ABORT_SENT && info->state != BM92T_ABORT_WRITE)
 		bm92t_abort(info);
 
+	/* No DP alt mode driver call may reach the objects going away */
+	mutex_lock(&info->lock);
+	info->dp_reply_ok = false;
+	info->dp_enter_wanted = false;
+	info->dp_nr_replies = 0;
+	info->dp_told = false;
+	mutex_unlock(&info->lock);
+	cancel_delayed_work_sync(&info->dp_work);
+
+	bm92t_unregister_altmode(&info->partner_dp);
 	if (info->plug)
 		typec_unregister_plug(info->plug);
 	if (info->cable)
@@ -1039,6 +1122,269 @@ static void bm92t_discover(struct bm92t_info *info)
 		att->discovered = true;
 }
 
+/* What a Status Update answers: our DP_STATUS seen from the partner */
+static u32 bm92t_dp_status_vdo(struct bm92t_info *info)
+{
+	struct bm92t_attachment *att = &info->att;
+	u32 vdo;
+
+	if (!att->dp_live)
+		return 0;
+
+	vdo = DP_STATUS_ENABLED | DP_STATUS_CON_UFP_D;
+	if (DP_CONF_GET_PIN_ASSIGN(att->dp_conf) & BIT(DP_PIN_ASSIGN_D))
+		vdo |= DP_STATUS_PREFER_MULTI_FUNC;
+	if (att->dp_hpd)
+		vdo |= DP_STATUS_HPD_STATE;
+
+	return vdo;
+}
+
+static bool bm92t_dp_told(struct bm92t_info *info)
+{
+	bool told;
+
+	mutex_lock(&info->lock);
+	told = info->dp_told;
+	mutex_unlock(&info->lock);
+
+	return told;
+}
+
+/* Tell a bound DP alt mode driver what the controller did by itself */
+static void bm92t_dp_sync(struct bm92t_info *info)
+{
+	struct bm92t_attachment *att = &info->att;
+	struct typec_altmode *alt = info->partner_dp;
+	bool wanted, told, queued = false;
+	unsigned int i;
+	u32 vdo, hdr;
+
+	if (!alt)
+		return;
+
+	vdo = bm92t_dp_status_vdo(info);
+
+	mutex_lock(&info->lock);
+	info->dp_status_vdo = vdo;
+	info->dp_pin = DP_CONF_GET_PIN_ASSIGN(att->dp_conf);
+	wanted = info->dp_enter_wanted;
+	if (att->dp_live)
+		info->dp_enter_wanted = false;
+	told = info->dp_told;
+	for (i = 0; i < info->dp_nr_replies; i++) {
+		hdr = info->dp_replies[i].hdr;
+		queued |= hdr == BM92T_DP_ACK(CMD_ENTER_MODE) ||
+			  hdr == BM92T_DP_ACK(CMD_EXIT_MODE);
+	}
+	mutex_unlock(&info->lock);
+
+	/* A driver binds by setting its ops; without one we own "active" */
+	if (!READ_ONCE(alt->ops)) {
+		bm92t_altmode_set_active(alt, att->dp_live);
+		return;
+	}
+
+	/* What it was told last has not reached it yet */
+	if (queued)
+		return;
+
+	if (att->dp_live) {
+		if (!alt->active && (wanted || !told)) {
+			/* As if the partner acked the Enter Mode */
+			bm92t_dp_reply(info, BM92T_DP_ACK(CMD_ENTER_MODE), 0, 0);
+		} else if (alt->active && !told) {
+			/* Bound after we marked the mode active */
+			if (typec_altmode_attention(info->port_dp, vdo)) {
+				bm92t_retry_soon(info);
+			} else {
+				mutex_lock(&info->lock);
+				info->dp_told = true;
+				mutex_unlock(&info->lock);
+			}
+		}
+	} else if (alt->active && told) {
+		bm92t_dp_reply(info, BM92T_DP_ACK(CMD_EXIT_MODE), 0, 0);
+	}
+}
+
+/* DP_STATUS changes the partner made or the controller saw */
+static void bm92t_dp_update(struct bm92t_info *info, u16 dp_status)
+{
+	struct bm92t_attachment *att = &info->att;
+	bool hpd = dp_status & DP_STATUS_SIGNAL_ON;
+
+	if (!info->partner_dp)
+		return;
+
+	if (att->dp_live && !(dp_status & DP_STATUS_DP_EN)) {
+		dev_info(info->dev, "DP alt mode exited (%04x)\n", dp_status);
+		att->dp_live = false;
+		att->dp_exited = true;
+	} else if (att->dp_exited && (dp_status & DP_STATUS_DP_EN) &&
+		   info->state == BM92T_IDLE) {
+		dev_info(info->dev, "DP alt mode entered again (%04x)\n",
+			 dp_status);
+		att->dp_live = true;
+		att->dp_exited = false;
+		att->dp_hpd = hpd;
+	}
+
+	if (att->dp_live && hpd != att->dp_hpd) {
+		att->dp_hpd = hpd;
+		if (READ_ONCE(info->partner_dp->ops) && bm92t_dp_told(info))
+			typec_altmode_attention(info->port_dp,
+						bm92t_dp_status_vdo(info));
+	}
+
+	/* No DP alert is enabled: DP_STATUS is polled while DP is up */
+	if (att->dp_live || att->dp_exited)
+		bm92t_retry_at(info, BM92T_DP_POLL_MS);
+}
+
+static void bm92t_dp_active(struct bm92t_info *info)
+{
+	struct bm92t_attachment *att = &info->att;
+
+	att->dp_live = true;
+	att->dp_hpd = info->dp_status & DP_STATUS_SIGNAL_ON;
+	bm92t_set_state(info, BM92T_IDLE);
+}
+
+static void bm92t_dp_done(struct bm92t_info *info)
+{
+	bm92t_set_state(info, BM92T_IDLE);
+}
+
+/* Pin assignments both ends support, preferring D, which keeps USB */
+static int bm92t_dp_pin(struct bm92t_info *info, u32 vdo)
+{
+	unsigned long pins = DP_CAP_PIN_ASSIGN_DFP_D(info->port_dp->vdo) &
+			     DP_CAP_PIN_ASSIGN_UFP_D(vdo);
+
+	if (pins & BIT(DP_PIN_ASSIGN_D))
+		return DP_PIN_ASSIGN_D;
+	if (pins & BIT(DP_PIN_ASSIGN_C))
+		return DP_PIN_ASSIGN_C;
+	if (pins & BIT(DP_PIN_ASSIGN_E))
+		return DP_PIN_ASSIGN_E;
+
+	return -ENODEV;
+}
+
+static int bm92t_dp_register(struct bm92t_info *info, u32 vdo)
+{
+	struct bm92t_attachment *att = &info->att;
+	struct typec_altmode_desc desc = {
+		.svid = USB_TYPEC_DP_SID,
+		.mode = USB_TYPEC_DP_MODE,
+		.vdo = vdo,
+	};
+	struct typec_altmode *alt;
+	u32 signal;
+	int pin;
+
+	if (!(DP_CAP_CAPABILITY(vdo) & DP_CAP_UFP_D))
+		return -ENODEV;
+
+	pin = bm92t_dp_pin(info, vdo);
+	if (pin < 0) {
+		dev_info(info->dev, "no common DP pin assignment (%08x)\n", vdo);
+		return pin;
+	}
+
+	signal = DP_CAP_DP_SIGNALLING(info->port_dp->vdo) &
+		 DP_CAP_DP_SIGNALLING(vdo);
+
+	/* Set up only with the mode registered: a cached VDO means both */
+	if (!info->partner_dp) {
+		alt = typec_partner_register_altmode(info->partner, &desc);
+		if (IS_ERR(alt)) {
+			dev_err(info->dev, "failed to register DP mode: %pe\n",
+				alt);
+			return PTR_ERR(alt);
+		}
+
+		info->partner_dp = alt;
+		mutex_lock(&info->lock);
+		info->dp_reply_ok = true;
+		mutex_unlock(&info->lock);
+	}
+
+	att->dp_vdo = vdo;
+	att->dp_conf = DP_CONF_UFP_U_AS_UFP_D |
+		       FIELD_PREP(DP_CONF_SIGNALLING_MASK, signal) |
+		       DP_CONF_SET_PIN_ASSIGN(BIT(pin));
+	att->dp_cfg_retries = BM92T_DP_CFG_RETRIES;
+
+	return 0;
+}
+
+static int bm92t_dp_configure(struct bm92t_info *info)
+{
+	u8 buf[6] = { OUTGOING_VDM_REG, 4 };
+
+	put_unaligned_le32(info->att.dp_conf, &buf[2]);
+
+	return bm92t_mailbox_free(info) ?:
+	       bm92t_write(info, buf, sizeof(buf)) ?:
+	       __bm92t_send_cmd(info, DP_CFG_AND_START_HPD_CMD,
+				BM92T_DP_CFG_SENT);
+}
+
+/* DP alt mode is entered: adopt a live link, configure a dark one */
+static int bm92t_dp_entered(struct bm92t_info *info, u16 dp_status)
+{
+	if (!(dp_status & DP_STATUS_SIGNAL_ON))
+		return bm92t_dp_configure(info);
+
+	dev_info(info->dev, "DP link already up, adopting it\n");
+	bm92t_dp_active(info);
+
+	return 0;
+}
+
+/* Role bits tell the bare mode VDO from a stale Enter Mode reply */
+static int bm92t_dp_mailbox_vdo(struct bm92t_info *info, u32 *vdo)
+{
+	u8 buf[5];
+	int ret;
+
+	ret = bm92t_read(info, INCOMING_VDM_REG, buf, sizeof(buf));
+	if (ret)
+		return ret;
+
+	*vdo = get_unaligned_le32(&buf[1]);
+	if (buf[0] != 4 || !DP_CAP_CAPABILITY(*vdo))
+		return -EPROTO;
+
+	return 0;
+}
+
+static int bm92t_dp_query(struct bm92t_info *info)
+{
+	return bm92t_send_vdm(info, VDO(USB_TYPEC_DP_SID, 1, SVDM_VER_1_0,
+					CMD_DISCOVER_MODES),
+			      NULL, 0, BM92T_DP_QUERY_SENT);
+}
+
+static int bm92t_dp_enter(struct bm92t_info *info)
+{
+	info->att.dp_tried = true;
+
+	return bm92t_send_cmd(info, DP_ENTER_MODE_CMD, BM92T_DP_ENTER_SENT);
+}
+
+/* A live link nobody identified: the controller's record may describe it */
+static bool bm92t_dp_adopt_due(struct bm92t_info *info)
+{
+	struct bm92t_attachment *att = &info->att;
+
+	return info->port_dp && att->discovered && !att->dp_tried &&
+	       (info->dp_status & DP_STATUS_DP_EN) &&
+	       FIELD_GET(STATUS1_DR, info->status1) == DATA_ROLE_DFP;
+}
+
 /* A submission inside a transaction failed: true to give up on it */
 static bool bm92t_step_failed(struct bm92t_info *info, u16 alert, int ret,
 			      const char *what)
@@ -1100,10 +1446,12 @@ static bool bm92t_try(struct bm92t_info *info, u16 alert, int ret,
 	return ret && bm92t_step_failed(info, alert, ret, what);
 }
 
-static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1)
+static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1,
+		       u16 dp_status)
 {
 	struct bm92t_attachment *att = &info->att;
 	u8 vdm[29];
+	u32 vdo;
 	int i, n, ret;
 
 	switch (info->state) {
@@ -1231,7 +1579,144 @@ static void bm92t_step(struct bm92t_info *info, u16 alert, u16 status1)
 			 PD_PRODUCT_PID(info->partner_ident.product),
 			 PD_IDH_PTYPE(info->partner_ident.id_header));
 
-		bm92t_set_state(info, BM92T_IDLE);
+		if (info->port_dp)
+			ret = bm92t_send_vdm(info, VDO(USB_SID_PD, 1, SVDM_VER_1_0,
+						       CMD_DISCOVER_SVID),
+					     NULL, 0, BM92T_DISC_SVID_SENT);
+		else
+			ret = -ENODEV;
+		if (bm92t_try(info, alert, ret, "discovery"))
+			bm92t_set_state(info, BM92T_IDLE);
+		break;
+
+	case BM92T_DISC_SVID_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_DISC_SVID_ACCEPT);
+		break;
+
+	case BM92T_DISC_SVID_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		n = bm92t_read_vdm(info, vdm, sizeof(vdm), USB_SID_PD,
+				   CMD_DISCOVER_SVID);
+		/* Two SVIDs per object, the first in the upper half */
+		for (i = 0; i < n; i++) {
+			vdo = get_unaligned_le32(&vdm[5 + 4 * i]);
+			if (vdo >> 16 == USB_TYPEC_DP_SID ||
+			    (vdo & 0xffff) == USB_TYPEC_DP_SID)
+				break;
+		}
+
+		if (n < 0)
+			ret = n;
+		else if (!n || i == n)
+			ret = -ENODEV;
+		else
+			ret = bm92t_send_vdm(info, VDO(USB_TYPEC_DP_SID, 1,
+						       SVDM_VER_1_0,
+						       CMD_DISCOVER_MODES),
+					     NULL, 0, BM92T_DISC_MODE_SENT);
+		if (bm92t_try(info, alert, ret, "Discover Modes"))
+			bm92t_set_state(info, BM92T_IDLE);
+		break;
+
+	case BM92T_DISC_MODE_SENT:
+		bm92t_vdm_sent(info, alert, status1, BM92T_DISC_MODE_ACCEPT);
+		break;
+
+	case BM92T_DISC_MODE_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1))
+			break;
+
+		n = bm92t_read_vdm(info, vdm, sizeof(vdm), USB_TYPEC_DP_SID,
+				   CMD_DISCOVER_MODES);
+		if (n < 0)
+			ret = n;
+		else if (!n)
+			ret = -ENODEV;
+		else
+			ret = bm92t_dp_register(info,
+						get_unaligned_le32(&vdm[5])) ?:
+			      bm92t_dp_enter(info);
+		if (bm92t_try(info, alert, ret, "DP entry"))
+			bm92t_set_state(info, BM92T_IDLE);
+		break;
+
+	case BM92T_DP_ENTER_SENT:
+		if (!(alert & ALERT_CMD_DONE))
+			break;
+
+		/* Refused when DP is entered already */
+		if (!bm92t_lastcmd_ok(info, status1) &&
+		    !(dp_status & DP_STATUS_DP_EN)) {
+			bm92t_dp_done(info);
+			break;
+		}
+
+		if (att->dp_vdo) {
+			ret = bm92t_dp_entered(info, dp_status);
+		} else {
+			ret = bm92t_dp_mailbox_vdo(info, &vdo);
+			if (!ret)
+				ret = bm92t_dp_register(info, vdo) ?:
+				      bm92t_dp_entered(info, dp_status);
+			else if (ret == -EPROTO)
+				/* Ask the partner when the mailbox holds no VDO */
+				ret = bm92t_dp_query(info);
+		}
+		if (bm92t_try(info, alert, ret, "DP setup"))
+			bm92t_dp_done(info);
+		break;
+
+	case BM92T_DP_QUERY_SENT:
+		if (bm92t_vdm_sent(info, alert, status1, BM92T_DP_QUERY_ACCEPT))
+			bm92t_dp_done(info);
+		break;
+
+	case BM92T_DP_QUERY_ACCEPT:
+		if (!bm92t_step_done(info, alert, status1)) {
+			if (info->state == BM92T_IDLE)
+				bm92t_dp_done(info);
+			break;
+		}
+
+		n = bm92t_read_vdm(info, vdm, sizeof(vdm), USB_TYPEC_DP_SID,
+				   CMD_DISCOVER_MODES);
+		if (n < 0)
+			ret = n;
+		else if (!n)
+			ret = -ENODEV;
+		else
+			ret = bm92t_dp_register(info,
+						get_unaligned_le32(&vdm[5]));
+		/* The link may have come up while we asked */
+		if (!ret)
+			ret = bm92t_read16(info, DP_STATUS_REG, &dp_status);
+		if (!ret) {
+			info->dp_status = dp_status;
+			ret = bm92t_dp_entered(info, dp_status);
+		}
+		if (bm92t_try(info, alert, ret, "DP setup")) {
+			dev_info(info->dev, "no DP mode VDO: %d\n", ret);
+			bm92t_dp_done(info);
+		}
+		break;
+
+	case BM92T_DP_CFG_SENT:
+		if (!(alert & ALERT_CMD_DONE))
+			break;
+
+		if (bm92t_lastcmd_ok(info, status1)) {
+			bm92t_dp_active(info);
+		} else if (!att->dp_cfg_retries) {
+			bm92t_dp_done(info);
+		} else {
+			ret = bm92t_dp_configure(info);
+			if (!ret)
+				att->dp_cfg_retries--;
+			else if (bm92t_try(info, alert, ret, "DP configure"))
+				bm92t_dp_done(info);
+		}
 		break;
 
 	case BM92T_NUM_STATES:
@@ -1368,7 +1853,7 @@ static u16 bm92t_fresh(struct bm92t_info *info, u16 alert)
 static int bm92t_service(struct bm92t_info *info)
 {
 	struct bm92t_attachment *att = &info->att;
-	u16 alert, status1, status2;
+	u16 alert, status1, status2, dp_status;
 	u32 pdo = 0, rdo = 0;
 	bool source, replaced;
 	int ret;
@@ -1383,7 +1868,8 @@ static int bm92t_service(struct bm92t_info *info)
 	info->alert |= alert;
 
 	ret = bm92t_read16(info, STATUS1_REG, &status1) ?:
-	      bm92t_read16(info, STATUS2_REG, &status2);
+	      bm92t_read16(info, STATUS2_REG, &status2) ?:
+	      bm92t_read16(info, DP_STATUS_REG, &dp_status);
 	/* Every read that can fail comes before anything acts on the alert */
 	if (!ret && (status1 & STATUS1_INSERT) &&
 	    !FIELD_GET(STATUS1_FAULT, status1))
@@ -1394,10 +1880,12 @@ static int bm92t_service(struct bm92t_info *info)
 	alert = info->alert;
 	info->status1 = status1;
 	info->status2 = status2;
+	info->dp_status = dp_status;
 	WRITE_ONCE(info->last_alert, alert);
 
-	dev_dbg(info->dev, "alert %04x status1 %04x status2 %04x %s\n",
-		alert, status1, status2, bm92t_state_names[info->state]);
+	dev_dbg(info->dev, "alert %04x status1 %04x status2 %04x dp %04x %s\n",
+		alert, status1, status2, dp_status,
+		bm92t_state_names[info->state]);
 
 	if (alert & ALERT_SNK_FAULT)
 		dev_err(info->dev, "sink fault\n");
@@ -1429,7 +1917,8 @@ static int bm92t_service(struct bm92t_info *info)
 		if (info->state == BM92T_STUCK)
 			bm92t_reset(info);	/* only ever on an empty port */
 		else if (info->state == BM92T_ABORT_SENT)
-			bm92t_step(info, bm92t_fresh(info, alert), status1);
+			bm92t_step(info, bm92t_fresh(info, alert), status1,
+				   dp_status);
 		bm92t_release_port(info);
 		return 0;
 	}
@@ -1484,7 +1973,8 @@ static int bm92t_service(struct bm92t_info *info)
 	if (att->replay && att->replay_state == info->state)
 		alert |= att->replay;
 	att->replay = 0;
-	bm92t_step(info, alert, status1);
+	bm92t_step(info, alert, status1, dp_status);
+	bm92t_dp_update(info, dp_status);
 
 	return 0;
 }
@@ -1535,6 +2025,15 @@ static void bm92t_idle(struct bm92t_info *info)
 	if (bm92t_discovery_wanted(info) &&
 	    !time_before(jiffies, att->discover_at)) {
 		bm92t_discover(info);
+		if (info->state != BM92T_IDLE || !att->discovered)
+			return;
+	}
+
+	if (bm92t_dp_adopt_due(info)) {
+		dev_info(info->dev, "DP up without discovery, adopting it\n");
+		ret = bm92t_dp_enter(info);
+		if (ret && !bm92t_submit_failed(info, ret, "DP adoption"))
+			att->dp_tried = false;
 	}
 }
 
@@ -1629,6 +2128,8 @@ static void bm92t_run(struct bm92t_info *info)
 
 		if (info->state == BM92T_IDLE)
 			bm92t_idle(info);
+
+		bm92t_dp_sync(info);
 	}
 
 	bm92t_dump(info);
@@ -1662,6 +2163,140 @@ static irqreturn_t bm92t_irq(int irq, void *data)
 
 	return IRQ_HANDLED;
 }
+
+/* Replies to the DP alt mode driver, which calls back into us, in order */
+static void bm92t_dp_reply_work(struct work_struct *work)
+{
+	struct bm92t_info *info = container_of(to_delayed_work(work),
+					       struct bm92t_info, dp_work);
+	u32 hdr, vdo;
+	int count, ret;
+
+	mutex_lock(&info->lock);
+	if (!info->dp_reply_ok || !info->dp_nr_replies) {
+		mutex_unlock(&info->lock);
+		return;
+	}
+	hdr = info->dp_replies[0].hdr;
+	vdo = info->dp_replies[0].vdo;
+	count = info->dp_replies[0].count;
+	mutex_unlock(&info->lock);
+
+	ret = typec_altmode_vdm(info->port_dp, hdr, &vdo, count);
+
+	mutex_lock(&info->lock);
+	if (!info->dp_reply_ok) {
+		mutex_unlock(&info->lock);
+		return;
+	}
+
+	/* Busy with its own work: the same reply again shortly */
+	if (ret == -EBUSY) {
+		schedule_delayed_work(&info->dp_work,
+				      msecs_to_jiffies(BM92T_DP_REPLY_RETRY_MS));
+		mutex_unlock(&info->lock);
+		return;
+	}
+
+	if (ret)
+		dev_dbg(info->dev, "DP reply %08x not taken: %d\n", hdr, ret);
+	else if (hdr == BM92T_DP_ACK(CMD_ENTER_MODE))
+		info->dp_told = true;
+	else if (hdr == BM92T_DP_ACK(CMD_EXIT_MODE))
+		info->dp_told = false;
+
+	info->dp_nr_replies--;
+	memmove(&info->dp_replies[0], &info->dp_replies[1],
+		info->dp_nr_replies * sizeof(info->dp_replies[0]));
+	if (info->dp_nr_replies)
+		schedule_delayed_work(&info->dp_work, 0);
+	mutex_unlock(&info->lock);
+
+	/* What the driver now knows may call for the next notification */
+	bm92t_kick(info);
+}
+
+static void bm92t_dp_reply(struct bm92t_info *info, u32 hdr, u32 vdo,
+			   int count)
+{
+	unsigned int n;
+
+	mutex_lock(&info->lock);
+	n = info->dp_nr_replies;
+	if (info->dp_reply_ok && n < BM92T_DP_REPLY_SLOTS) {
+		info->dp_replies[n].hdr = hdr;
+		info->dp_replies[n].vdo = vdo;
+		info->dp_replies[n].count = count;
+		info->dp_nr_replies++;
+		if (!n)
+			schedule_delayed_work(&info->dp_work, 0);
+	} else if (info->dp_reply_ok) {
+		dev_warn(info->dev, "DP reply %08x dropped\n", hdr);
+	}
+	mutex_unlock(&info->lock);
+}
+
+static int bm92t_dp_op_enter(struct typec_altmode *alt, u32 *vdo)
+{
+	struct bm92t_info *info = typec_altmode_get_drvdata(alt);
+
+	mutex_lock(&info->lock);
+	info->dp_enter_wanted = true;
+	mutex_unlock(&info->lock);
+	bm92t_kick(info);
+
+	return 0;
+}
+
+static int bm92t_dp_op_exit(struct typec_altmode *alt)
+{
+	return -EOPNOTSUPP;
+}
+
+static int bm92t_dp_op_vdm(struct typec_altmode *alt, u32 header,
+			   const u32 *data, int count)
+{
+	struct bm92t_info *info = typec_altmode_get_drvdata(alt);
+	u32 hdr = VDO(USB_TYPEC_DP_SID, 1, SVDM_VER_1_0,
+		      VDO_OPOS(USB_TYPEC_DP_MODE) | PD_VDO_CMD(header));
+	u32 vdo = 0;
+	int n = 1;
+
+	if (PD_VDO_CMDT(header) != CMDT_INIT)
+		return 0;
+
+	mutex_lock(&info->lock);
+	switch (PD_VDO_CMD(header)) {
+	case DP_CMD_STATUS_UPDATE:
+		vdo = info->dp_status_vdo;
+		hdr |= VDO_CMDT(vdo ? CMDT_RSP_ACK : CMDT_RSP_NAK);
+		n = 2;
+		break;
+	case DP_CMD_CONFIGURE:
+		/* The controller runs the pin assignment it picked */
+		if (count > 1 && (!DP_CONF_GET_PIN_ASSIGN(data[0]) ||
+				  (info->dp_status_vdo &&
+				   DP_CONF_GET_PIN_ASSIGN(data[0]) & info->dp_pin)))
+			hdr |= VDO_CMDT(CMDT_RSP_ACK);
+		else
+			hdr |= VDO_CMDT(CMDT_RSP_NAK);
+		break;
+	default:
+		hdr |= VDO_CMDT(CMDT_RSP_NAK);
+		break;
+	}
+	mutex_unlock(&info->lock);
+
+	bm92t_dp_reply(info, hdr, vdo, n);
+
+	return 0;
+}
+
+static const struct typec_altmode_ops bm92t_dp_ops = {
+	.enter = bm92t_dp_op_enter,
+	.exit = bm92t_dp_op_exit,
+	.vdm = bm92t_dp_op_vdm,
+};
 
 /* Stop the work item and keep it stopped: nothing touches the chip after */
 static void bm92t_stop(struct bm92t_info *info)
@@ -1769,6 +2404,13 @@ static int bm92t_check_caps(struct bm92t_info *info,
 		return -EINVAL;
 	}
 
+	if (info->port_dp && !(DP_CAP_CAPABILITY(info->port_dp->vdo) &
+			       DP_CAP_DFP_D)) {
+		dev_err(info->dev, "DisplayPort mode %08x is not DFP_D\n",
+			info->port_dp->vdo);
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -1781,6 +2423,7 @@ static int bm92t_register_port(struct bm92t_info *info)
 		.no_mode_control = true,
 		.driver_data = info,
 	};
+	unsigned int i;
 	int ret;
 
 	ret = typec_get_fw_cap(&cap, info->connector);
@@ -1791,11 +2434,23 @@ static int bm92t_register_port(struct bm92t_info *info)
 	if (IS_ERR(info->port))
 		return PTR_ERR(info->port);
 
+	typec_port_register_altmodes(info->port, &bm92t_dp_ops, info,
+				     info->port_altmode,
+				     ARRAY_SIZE(info->port_altmode));
+	for (i = 0; i < ARRAY_SIZE(info->port_altmode); i++)
+		if (info->port_altmode[i] &&
+		    info->port_altmode[i]->svid == USB_TYPEC_DP_SID)
+			info->port_dp = info->port_altmode[i];
+
 	return bm92t_check_caps(info, &cap);
 }
 
 static void bm92t_unregister_port(struct bm92t_info *info)
 {
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(info->port_altmode); i++)
+		bm92t_unregister_altmode(&info->port_altmode[i]);
 	typec_unregister_port(info->port);
 }
 
@@ -1930,6 +2585,7 @@ static int bm92t_probe(struct i2c_client *client)
 	mutex_init(&info->req_mutex);
 	init_completion(&info->dump_done);
 	INIT_WORK(&info->work, bm92t_work);
+	INIT_DELAYED_WORK(&info->dp_work, bm92t_dp_reply_work);
 	INIT_DELAYED_WORK(&info->timer, bm92t_timer);
 	i2c_set_clientdata(client, info);
 
