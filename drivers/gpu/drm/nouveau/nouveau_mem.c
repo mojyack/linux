@@ -58,7 +58,8 @@ nouveau_mem_map(struct nouveau_mem *mem,
 	case NVIF_CLASS_VMM_GM200:
 	case NVIF_CLASS_VMM_GP100:
 		args.gf100.version = 0;
-		if (mem->mem.type & NVIF_MEM_VRAM)
+		/* A compressed mapping cannot bypass the L2. */
+		if (mem->mem.type & NVIF_MEM_VRAM || mem->comp)
 			args.gf100.vol = 0;
 		else
 			args.gf100.vol = 1;
