@@ -9,6 +9,7 @@
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
  */
 
+#include <linux/bits.h>
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -45,6 +46,10 @@
 #define TEGRA_UART_LSR_ANY			(UART_LSR_OE | UART_LSR_BI | \
 						UART_LSR_PE | UART_LSR_FE)
 #define TEGRA_UART_IRDA_CSR			0x08
+#define TEGRA_UART_IRDA_CSR_INVERT_RXD		BIT(0)
+#define TEGRA_UART_IRDA_CSR_INVERT_TXD		BIT(1)
+#define TEGRA_UART_IRDA_CSR_INVERT_CTS		BIT(2)
+#define TEGRA_UART_IRDA_CSR_INVERT_RTS		BIT(3)
 #define TEGRA_UART_SIR_ENABLED			0x80
 
 #define TEGRA_UART_TX_PIO			1
@@ -122,6 +127,7 @@ struct tegra_uart_port {
 	unsigned int				tx_bytes;
 
 	bool					enable_modem_interrupt;
+	u32					irda_csr;
 
 	bool					rx_timeout;
 	int					rx_in_progress;
@@ -1029,6 +1035,9 @@ static int tegra_uart_hw_init(struct tegra_uart_port *tup)
 	udelay(10);
 	reset_control_deassert(tup->rst);
 
+	if (tup->irda_csr)
+		tegra_uart_write(tup, tup->irda_csr, TEGRA_UART_IRDA_CSR);
+
 	tup->rx_in_progress = 0;
 	tup->tx_in_progress = 0;
 
@@ -1460,6 +1469,14 @@ static int tegra_uart_parse_dt(struct platform_device *pdev,
 
 	tup->enable_modem_interrupt = of_property_read_bool(np,
 					"nvidia,enable-modem-interrupt");
+	if (of_property_read_bool(np, "nvidia,invert-rxd"))
+		tup->irda_csr |= TEGRA_UART_IRDA_CSR_INVERT_RXD;
+	if (of_property_read_bool(np, "nvidia,invert-txd"))
+		tup->irda_csr |= TEGRA_UART_IRDA_CSR_INVERT_TXD;
+	if (of_property_read_bool(np, "nvidia,invert-cts"))
+		tup->irda_csr |= TEGRA_UART_IRDA_CSR_INVERT_CTS;
+	if (of_property_read_bool(np, "nvidia,invert-rts"))
+		tup->irda_csr |= TEGRA_UART_IRDA_CSR_INVERT_RTS;
 
 	index = of_property_match_string(np, "dma-names", "rx");
 	if (index < 0) {
