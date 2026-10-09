@@ -1256,7 +1256,7 @@ static int tegra_pmc_grouper_power_off_handler(struct sys_off_data *data)
 
 static int powergate_show(struct seq_file *s, void *data)
 {
-	struct tegra_pmc *pmc = data;
+	struct tegra_pmc *pmc = s->private;
 	unsigned int i;
 	int status;
 
