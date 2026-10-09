@@ -262,6 +262,18 @@ config INPUT_MAX7360_ROTARY
 	  To compile this driver as a module, choose M here: the module will be
 	  called max7360_rotary.
 
+config INPUT_MAX77620_ONKEY
+	tristate "Maxim MAX77620 ONKEY support"
+	depends on MFD_MAX77620 || COMPILE_TEST
+	help
+	  Support the ON/OFF key of the MAX77620 PMIC as an input device
+	  reporting KEY_POWER. Boards that wire their power button to the
+	  PMIC's EN0 input rather than to a SoC GPIO need this both to see
+	  button presses and to wake from suspend.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called max77620-onkey.
+
 config INPUT_MAX77650_ONKEY
 	tristate "Maxim MAX77650 ONKEY support"
 	depends on MFD_MAX77650
