@@ -110,6 +110,22 @@ config TYPEC_WUSB3801
 	  If you choose to build this driver as a dynamically linked module, the
 	  module will be called wusb3801.ko.
 
+config TYPEC_BM92TXX
+	tristate "ROHM BM92T36 USB Type-C controller"
+	depends on I2C
+	depends on POWER_SUPPLY
+	depends on USB_ROLE_SWITCH
+	help
+	  Say yes here to support the ROHM BM92T36 USB Type-C and USB Power
+	  Delivery controller, as found in the Nintendo Switch. The
+	  controller negotiates power and enters alternate modes by itself;
+	  the driver reports the port, the partner and the alternate modes
+	  to the USB Type-C class, follows the data role, and offers the
+	  contract's current to the charger as a power supply.
+
+	  If you choose to build this driver as a dynamically linked module,
+	  the module will be called bm92txx.ko.
+
 source "drivers/usb/typec/mux/Kconfig"
 
 source "drivers/usb/typec/altmodes/Kconfig"
