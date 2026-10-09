@@ -9,11 +9,13 @@
 struct gk20a_devfreq;
 
 #if defined(CONFIG_PM_DEVFREQ)
-int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **devfreq);
+int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **devfreq,
+		       bool icc);
 void gk20a_devfreq_fini(struct nvkm_clk *base, struct gk20a_devfreq **devfreq,
 			enum nvkm_suspend_state suspend);
 #else
-static inline int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **devfreq)
+static inline int gk20a_devfreq_init(struct nvkm_clk *base, struct gk20a_devfreq **devfreq,
+				     bool icc)
 {
 	return 0;
 }

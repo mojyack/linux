@@ -592,7 +592,7 @@ gk20a_clk_init(struct nvkm_clk *base)
 		return ret;
 	}
 
-	ret = gk20a_devfreq_init(base, &clk->devfreq);
+	ret = gk20a_devfreq_init(base, &clk->devfreq, false);
 	if (ret)
 		return ret;
 
