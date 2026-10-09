@@ -7,6 +7,7 @@
 struct nvkm_clk_func {
 	int (*init)(struct nvkm_clk *);
 	void (*fini)(struct nvkm_clk *);
+	void (*dtor)(struct nvkm_clk *);
 	int (*read)(struct nvkm_clk *, enum nv_clk_src);
 	int (*calc)(struct nvkm_clk *, struct nvkm_cstate *);
 	int (*prog)(struct nvkm_clk *);

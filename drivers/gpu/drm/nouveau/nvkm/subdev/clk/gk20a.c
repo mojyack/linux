@@ -546,6 +546,8 @@ gk20a_clk_fini(struct nvkm_clk *base)
 	struct nvkm_device *device = base->subdev.device;
 	struct gk20a_clk *clk = gk20a_clk(base);
 
+	gk20a_devfreq_fini(base, clk->devfreq);
+
 	/* slide to VCO min */
 	if (gk20a_pllg_is_enabled(clk)) {
 		struct gk20a_pll pll;
@@ -560,6 +562,12 @@ gk20a_clk_fini(struct nvkm_clk *base)
 
 	/* set IDDQ */
 	nvkm_mask(device, GPCPLL_CFG, GPCPLL_CFG_IDDQ, GPCPLL_CFG_IDDQ);
+}
+
+void
+gk20a_clk_dtor(struct nvkm_clk *base)
+{
+	gk20a_devfreq_dtor(base, &gk20a_clk(base)->devfreq);
 }
 
 static int
@@ -601,6 +609,7 @@ static const struct nvkm_clk_func
 gk20a_clk = {
 	.init = gk20a_clk_init,
 	.fini = gk20a_clk_fini,
+	.dtor = gk20a_clk_dtor,
 	.read = gk20a_clk_read,
 	.calc = gk20a_clk_calc,
 	.prog = gk20a_clk_prog,

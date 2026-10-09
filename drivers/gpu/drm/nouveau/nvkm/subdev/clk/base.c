@@ -639,6 +639,9 @@ nvkm_clk_dtor(struct nvkm_subdev *subdev)
 	struct nvkm_clk *clk = nvkm_clk(subdev);
 	struct nvkm_pstate *pstate, *temp;
 
+	if (clk->func->dtor)
+		clk->func->dtor(clk);
+
 	/* Early return if the pstates have been provided statically */
 	if (clk->func->pstates)
 		return clk;

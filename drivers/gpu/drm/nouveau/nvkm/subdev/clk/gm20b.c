@@ -723,6 +723,8 @@ gm20b_clk_fini(struct nvkm_clk *base)
 	struct nvkm_device *device = base->subdev.device;
 	struct gm20b_clk *clk = gm20b_clk(base);
 
+	gk20a_devfreq_fini(base, clk->base.devfreq);
+
 	/* slide to VCO min */
 	if (gk20a_pllg_is_enabled(&clk->base)) {
 		struct gk20a_pll pll;
@@ -884,6 +886,7 @@ static const struct nvkm_clk_func
 gm20b_clk_speedo0 = {
 	.init = gm20b_clk_init,
 	.fini = gk20a_clk_fini,
+	.dtor = gk20a_clk_dtor,
 	.read = gk20a_clk_read,
 	.calc = gk20a_clk_calc,
 	.prog = gk20a_clk_prog,
@@ -902,6 +905,7 @@ static const struct nvkm_clk_func
 gm20b_clk = {
 	.init = gm20b_clk_init,
 	.fini = gm20b_clk_fini,
+	.dtor = gk20a_clk_dtor,
 	.read = gk20a_clk_read,
 	.calc = gm20b_clk_calc,
 	.prog = gm20b_clk_prog,
