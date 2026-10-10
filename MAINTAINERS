@@ -27574,6 +27574,15 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/mtd/nvidia,tegra20-nand.yaml
 F:	drivers/mtd/nand/raw/tegra_nand.c
 
+TEGRA NVDEC VIDEO DECODER DRIVER
+M:	mojyack <mojyack@gmail.com>
+L:	linux-media@vger.kernel.org
+L:	linux-tegra@vger.kernel.org
+S:	Maintained
+F:	drivers/gpu/drm/tegra/nvdec-decode.*
+F:	drivers/gpu/drm/tegra/nvdec-v4l2.c
+F:	drivers/gpu/drm/tegra/nvdec.h
+
 TEGRA PWM DRIVER
 M:	Thierry Reding <thierry.reding@kernel.org>
 S:	Supported
