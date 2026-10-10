@@ -2,10 +2,12 @@
 /*
  * Copyright © 2023 Intel Corporation
  */
+#include <linux/highmem.h>
 #include <linux/shmem_fs.h>
 #include <drm/ttm/ttm_tt.h>
 
 #include "ttm_kunit_helpers.h"
+#include "../ttm_pool_internal.h"
 
 #define BO_SIZE		SZ_4K
 
@@ -334,40 +336,118 @@ static void ttm_tt_unpopulate_empty_ttm(struct kunit *test)
 	/* Expect graceful handling of unpopulated TTs */
 }
 
+struct ttm_tt_swap_case {
+	const char *description;
+	unsigned int alloc_flags;
+	enum ttm_caching caching;
+};
+
+static const struct ttm_tt_swap_case ttm_tt_swapin_basic_cases[] = {
+	{
+		.description = "Pages from the page allocator",
+		.caching = ttm_cached,
+	},
+	{
+		.description = "Cached pages from dma_alloc_attrs()",
+		.alloc_flags = TTM_ALLOCATION_POOL_USE_DMA_ALLOC,
+		.caching = ttm_cached,
+	},
+	{
+		.description = "Write-combined pages from dma_alloc_attrs()",
+		.alloc_flags = TTM_ALLOCATION_POOL_USE_DMA_ALLOC,
+		.caching = ttm_write_combined,
+	},
+};
+
+static void ttm_tt_swap_case_desc(const struct ttm_tt_swap_case *t, char *desc)
+{
+	strscpy(desc, t->description, KUNIT_PARAM_DESC_SIZE);
+}
+
+KUNIT_ARRAY_PARAM(ttm_tt_swapin_basic, ttm_tt_swapin_basic_cases,
+		  ttm_tt_swap_case_desc);
+
+/*
+ * Write or check a per-page pattern through the CPU address the tt is
+ * accessed with: the allocation's for TTM_TT_FLAG_PRIV_DMA_ALLOC.
+ */
+static void ttm_tt_swap_pattern(struct kunit *test, struct ttm_tt *tt,
+				bool check)
+{
+	unsigned int i, j = 0, order = 0;
+	void *vaddr = NULL;
+	u32 *p;
+
+	for (i = 0; i < tt->num_pages; i++) {
+		if ((tt->page_flags & TTM_TT_FLAG_PRIV_DMA_ALLOC) &&
+		    (!vaddr || ++j == (1 << order))) {
+			vaddr = ttm_pool_dma_alloc_vaddr(tt->pages[i], &order);
+			j = 0;
+		}
+
+		p = vaddr ? vaddr + j * PAGE_SIZE : kmap_local_page(tt->pages[i]);
+		if (check) {
+			KUNIT_EXPECT_EQ(test, p[0], 0x5a5a0000 | i);
+			KUNIT_EXPECT_EQ(test, p[PAGE_SIZE / sizeof(*p) - 1],
+					0x5a5a0000 | i);
+		} else {
+			memset32(p, 0x5a5a0000 | i, PAGE_SIZE / sizeof(*p));
+		}
+		if (!vaddr)
+			kunmap_local(p);
+	}
+}
+
 static void ttm_tt_swapin_basic(struct kunit *test)
 {
-	const struct ttm_test_devices *devs = test->priv;
-	int expected_num_pages = BO_SIZE >> PAGE_SHIFT;
+	const struct ttm_tt_swap_case *params = test->param_value;
+	struct ttm_test_devices *devs = test->priv;
+	/* Three allocations of different orders. */
+	int expected_num_pages = 7;
 	struct ttm_operation_ctx ctx = { };
 	struct ttm_buffer_object *bo;
+	struct ttm_device *ttm_dev;
 	struct ttm_tt *tt;
 	int err, num_pages;
 
-	bo = ttm_bo_kunit_init(test, test->priv, BO_SIZE, NULL);
+	ttm_dev = kunit_kzalloc(test, sizeof(*ttm_dev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ttm_dev);
+	err = ttm_device_kunit_init(devs, ttm_dev, params->alloc_flags);
+	KUNIT_ASSERT_EQ(test, err, 0);
+
+	bo = ttm_bo_kunit_init(test, devs, expected_num_pages << PAGE_SHIFT,
+			       NULL);
 
 	tt = kunit_kzalloc(test, sizeof(*tt), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, tt);
 
-	err = ttm_tt_init(tt, bo, 0, ttm_cached, 0);
+	err = ttm_tt_init(tt, bo, 0, params->caching, 0);
 	KUNIT_ASSERT_EQ(test, err, 0);
 
-	err = ttm_tt_populate(devs->ttm_dev, tt, &ctx);
+	err = ttm_tt_populate(ttm_dev, tt, &ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	KUNIT_ASSERT_TRUE(test, ttm_tt_is_populated(tt));
+	KUNIT_EXPECT_EQ(test, !!(tt->page_flags & TTM_TT_FLAG_PRIV_DMA_ALLOC),
+			params->alloc_flags && params->caching != ttm_cached);
 
-	num_pages = ttm_tt_swapout(devs->ttm_dev, tt, GFP_KERNEL);
+	ttm_tt_swap_pattern(test, tt, false);
+
+	num_pages = ttm_tt_swapout(ttm_dev, tt, GFP_KERNEL);
 	KUNIT_ASSERT_EQ(test, num_pages, expected_num_pages);
 	KUNIT_ASSERT_NOT_NULL(test, tt->swap_storage);
 	KUNIT_ASSERT_TRUE(test, tt->page_flags & TTM_TT_FLAG_SWAPPED);
 
-	/* Swapout depopulates TT, allocate pages and then swap them in */
-	err = ttm_pool_alloc(&devs->ttm_dev->pool, tt, &ctx);
-	KUNIT_ASSERT_EQ(test, err, 0);
-
-	err = ttm_tt_swapin(tt);
+	/* Swapout depopulates the TT; the pool swaps it back in. */
+	err = ttm_pool_alloc(&ttm_dev->pool, tt, &ctx);
 	KUNIT_ASSERT_EQ(test, err, 0);
 	KUNIT_ASSERT_NULL(test, tt->swap_storage);
 	KUNIT_ASSERT_FALSE(test, tt->page_flags & TTM_TT_FLAG_SWAPPED);
+
+	ttm_tt_swap_pattern(test, tt, true);
+
+	ttm_pool_free(&ttm_dev->pool, tt);
+	ttm_tt_fini(tt);
+	ttm_device_fini(ttm_dev);
 }
 
 static struct kunit_case ttm_tt_test_cases[] = {
@@ -385,7 +465,7 @@ static struct kunit_case ttm_tt_test_cases[] = {
 	KUNIT_CASE(ttm_tt_populate_populated_ttm),
 	KUNIT_CASE(ttm_tt_unpopulate_basic),
 	KUNIT_CASE(ttm_tt_unpopulate_empty_ttm),
-	KUNIT_CASE(ttm_tt_swapin_basic),
+	KUNIT_CASE_PARAM(ttm_tt_swapin_basic, ttm_tt_swapin_basic_gen_params),
 	{}
 };
 

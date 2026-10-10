@@ -36,12 +36,15 @@
 #include <linux/dma-mapping.h>
 #include <linux/debugfs.h>
 #include <linux/highmem.h>
+#include <linux/file.h>
+#include <linux/shmem_fs.h>
 #include <linux/sched/mm.h>
 
 #ifdef CONFIG_X86
 #include <asm/set_memory.h>
 #endif
 
+#include <drm/drm_util.h>
 #include <drm/ttm/ttm_backup.h>
 #include <drm/ttm/ttm_pool.h>
 #include <drm/ttm/ttm_tt.h>
@@ -322,20 +325,27 @@ static void ttm_pool_unmap(struct ttm_pool *pool, dma_addr_t dma_addr,
 		       DMA_BIDIRECTIONAL);
 }
 
+void *ttm_pool_dma_alloc_vaddr(struct page *p, unsigned int *order)
+{
+	struct ttm_pool_dma *dma = (void *)p->private;
+
+	*order = dma->vaddr & ~PAGE_MASK;
+	return (void *)(dma->vaddr & PAGE_MASK);
+}
+EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_pool_dma_alloc_vaddr);
+
 /* Give pages into a specific pool_type */
 static void ttm_pool_type_give(struct ttm_pool_type *pt, struct page *p)
 {
 	unsigned int i, num_pages = 1 << pt->order;
 	int nid = page_to_nid(p);
+	unsigned int order;
 	void *vaddr = NULL;
 
 	/* Not through the cached linear map of write-combined DMA memory. */
 	if (pt->pool && ttm_pool_uses_dma_alloc(pt->pool) &&
-	    pt->caching != ttm_cached) {
-		struct ttm_pool_dma *dma = (void *)p->private;
-
-		vaddr = (void *)(dma->vaddr & PAGE_MASK);
-	}
+	    pt->caching != ttm_cached)
+		vaddr = ttm_pool_dma_alloc_vaddr(p, &order);
 
 	for (i = 0; i < num_pages; ++i) {
 		if (vaddr)
@@ -501,6 +511,36 @@ static unsigned int ttm_pool_page_order(struct ttm_pool *pool, struct page *p)
  * as it has been backed up, in order to avoid memory pressure during
  * reclaim.
  */
+/* Copy swapped-out content into a new page before it is DMA-mapped. */
+static int ttm_pool_swapin_page(struct ttm_pool *pool, struct ttm_tt *tt,
+				struct page *p, unsigned int order,
+				pgoff_t first)
+{
+	struct address_space *swap = tt->swap_storage->f_mapping;
+	struct page *from;
+	void *vaddr = NULL;
+	pgoff_t i;
+
+	if (ttm_pool_uses_dma_alloc(pool) && tt->caching != ttm_cached)
+		vaddr = ttm_pool_dma_alloc_vaddr(p, &order);
+
+	for (i = 0; i < (1UL << order); ++i) {
+		from = shmem_read_mapping_page_gfp(swap, first + i,
+						   mapping_gfp_mask(swap));
+		if (IS_ERR(from))
+			return PTR_ERR(from);
+
+		if (vaddr)
+			memcpy_from_page(vaddr + i * PAGE_SIZE, from, 0,
+					 PAGE_SIZE);
+		else
+			copy_highpage(p + i, from);
+		put_page(from);
+	}
+
+	return 0;
+}
+
 static void ttm_pool_split_for_swap(struct ttm_pool *pool, struct page *p)
 {
 	unsigned int order = ttm_pool_page_order(pool, p);
@@ -853,6 +893,13 @@ static int __ttm_pool_alloc(struct ttm_pool *pool, struct ttm_tt *tt,
 			r = -ENOMEM;
 			goto error_free_all;
 		}
+		if (!restore && (tt->page_flags & TTM_TT_FLAG_SWAPPED)) {
+			r = ttm_pool_swapin_page(pool, tt, p, order,
+						 alloc->pages - tt->pages);
+			if (r)
+				goto error_free_page;
+		}
+
 		r = ttm_pool_page_allocated(pool, order, p, page_caching, alloc,
 					    restore);
 		if (r)
@@ -868,6 +915,15 @@ static int __ttm_pool_alloc(struct ttm_pool *pool, struct ttm_tt *tt,
 	r = ttm_pool_apply_caching(alloc);
 	if (r)
 		goto error_free_all;
+
+	if (ttm_pool_uses_dma_alloc(pool) && tt->caching != ttm_cached)
+		tt->page_flags |= TTM_TT_FLAG_PRIV_DMA_ALLOC;
+
+	if (!restore && (tt->page_flags & TTM_TT_FLAG_SWAPPED)) {
+		fput(tt->swap_storage);
+		tt->swap_storage = NULL;
+		tt->page_flags &= ~TTM_TT_FLAG_SWAPPED;
+	}
 
 	kfree(tt->restore);
 	tt->restore = NULL;
@@ -897,7 +953,9 @@ error_free_all:
  * @ctx: operation context
  *
  * Fill the ttm_tt object with pages and also make sure to DMA map them when
- * necessary.
+ * necessary. If the ttm_tt was swapped out, its content is copied into each
+ * page before the page is DMA mapped, through the CPU address the pool
+ * allocated it with.
  *
  * Returns: 0 on successe, negative error code otherwise.
  */
@@ -991,6 +1049,7 @@ void ttm_pool_free(struct ttm_pool *pool, struct ttm_tt *tt)
 	int nid = ttm_pool_nid(pool);
 
 	ttm_pool_free_range(pool, tt, tt->caching, 0, tt->num_pages);
+	tt->page_flags &= ~TTM_TT_FLAG_PRIV_DMA_ALLOC;
 
 	while (atomic_long_read(&allocated_pages[nid]) > pool_node_limit[nid]) {
 		unsigned long diff = atomic_long_read(&allocated_pages[nid]) - pool_node_limit[nid];

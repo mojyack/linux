@@ -93,6 +93,11 @@ struct ttm_tt {
 	 * set by TTM after ttm_tt_populate() has successfully returned, and is
 	 * then unset when TTM calls ttm_tt_unpopulate().
 	 *
+	 * TTM_TT_FLAG_PRIV_DMA_ALLOC: TTM internal only. DO NOT USE. Set by
+	 * the pool while the pages of a write-combined or uncached ttm_tt come
+	 * from dma_alloc_attrs(). The kernel then accesses them through the
+	 * address the allocation returned, not through the linear map.
+	 *
 	 */
 #define TTM_TT_FLAG_SWAPPED		BIT(0)
 #define TTM_TT_FLAG_ZERO_ALLOC		BIT(1)
@@ -102,6 +107,7 @@ struct ttm_tt {
 #define TTM_TT_FLAG_BACKED_UP	        BIT(5)
 
 #define TTM_TT_FLAG_PRIV_POPULATED	BIT(6)
+#define TTM_TT_FLAG_PRIV_DMA_ALLOC	BIT(7)
 	uint32_t page_flags;
 	/** @num_pages: Number of pages in the page array. */
 	uint32_t num_pages;

@@ -325,9 +325,11 @@ int ttm_tt_swapout(struct ttm_device *bdev, struct ttm_tt *ttm,
 	loff_t size = (loff_t)ttm->num_pages << PAGE_SHIFT;
 	struct address_space *swap_space;
 	struct file *swap_storage;
+	unsigned int order = 0;
 	struct page *from_page;
 	struct page *to_page;
-	int i, ret;
+	void *vaddr = NULL;
+	int i, j = 0, ret;
 
 	swap_storage = shmem_file_setup("ttm swap", size, EMPTY_VMA_FLAGS);
 	if (IS_ERR(swap_storage)) {
@@ -343,12 +345,23 @@ int ttm_tt_swapout(struct ttm_device *bdev, struct ttm_tt *ttm,
 		if (unlikely(from_page == NULL))
 			continue;
 
+		/* Read dma_alloc_attrs() pages through the allocation. */
+		if ((ttm->page_flags & TTM_TT_FLAG_PRIV_DMA_ALLOC) &&
+		    (!vaddr || ++j == (1 << order))) {
+			vaddr = ttm_pool_dma_alloc_vaddr(from_page, &order);
+			j = 0;
+		}
+
 		to_page = shmem_read_mapping_page_gfp(swap_space, i, gfp_flags);
 		if (IS_ERR(to_page)) {
 			ret = PTR_ERR(to_page);
 			goto out_err;
 		}
-		copy_highpage(to_page, from_page);
+		if (vaddr)
+			memcpy_to_page(to_page, 0, vaddr + j * PAGE_SIZE,
+				       PAGE_SIZE);
+		else
+			copy_highpage(to_page, from_page);
 		set_page_dirty(to_page);
 		mark_page_accessed(to_page);
 		put_page(to_page);
@@ -405,6 +418,7 @@ int ttm_tt_populate(struct ttm_device *bdev,
 
 	ttm->page_flags |= TTM_TT_FLAG_PRIV_POPULATED;
 	ttm->page_flags &= ~TTM_TT_FLAG_BACKED_UP;
+	/* ttm_pool_alloc() swaps in; this is for pages from elsewhere. */
 	if (unlikely(ttm->page_flags & TTM_TT_FLAG_SWAPPED)) {
 		ret = ttm_tt_swapin(ttm);
 		if (unlikely(ret != 0)) {

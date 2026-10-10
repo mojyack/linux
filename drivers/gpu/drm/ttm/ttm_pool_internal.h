@@ -23,6 +23,12 @@ static inline unsigned int ttm_pool_beneficial_order(struct ttm_pool *pool)
 }
 
 /*
+ * The kernel address and order of the dma_alloc_attrs() allocation that
+ * starts at @p.
+ */
+void *ttm_pool_dma_alloc_vaddr(struct page *p, unsigned int *order);
+
+/*
  * Implemented in ttm_pool.c, used by ttm_backup.c. Returns true if a fault
  * should be injected mid-compound to test the reactive split-and-retry
  * fallback in ttm_pool_backup(). Always returns false when
