@@ -205,9 +205,6 @@ static int vic_exit(struct host1x_client *client)
 	if (err < 0)
 		return err;
 
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
-
 	/* Before detaching, which forgets the group the firmware was allocated for. */
 	if (vic->falcon.firmware.virt) {
 		if (client->group) {
@@ -419,12 +416,32 @@ static int vic_can_use_memory_ctx(struct tegra_drm_client *client, bool *support
 	return 0;
 }
 
+/* Firmware may only be loaded once the IOMMU carveout exists. */
+static void vic_late_init(struct tegra_drm_client *client)
+{
+	struct vic *vic = to_vic(client);
+
+	pm_runtime_enable(vic->dev);
+	pm_runtime_use_autosuspend(vic->dev);
+	pm_runtime_set_autosuspend_delay(vic->dev, 500);
+}
+
+static void vic_early_exit(struct tegra_drm_client *client)
+{
+	struct vic *vic = to_vic(client);
+
+	pm_runtime_dont_use_autosuspend(vic->dev);
+	pm_runtime_force_suspend(vic->dev);
+}
+
 static const struct tegra_drm_client_ops vic_ops = {
 	.open_channel = vic_open_channel,
 	.close_channel = vic_close_channel,
 	.submit = tegra_drm_submit,
 	.get_streamid_offset = tegra_drm_get_streamid_offset_thi,
 	.can_use_memory_ctx = vic_can_use_memory_ctx,
+	.late_init = vic_late_init,
+	.early_exit = vic_early_exit,
 };
 
 #define NVIDIA_TEGRA_124_VIC_FIRMWARE "nvidia/tegra124/vic03_ucode.bin"
@@ -568,10 +585,6 @@ static int vic_probe(struct platform_device *pdev)
 		goto exit_falcon;
 	}
 
-	pm_runtime_enable(dev);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_set_autosuspend_delay(dev, 500);
-
 	return 0;
 
 exit_falcon:
@@ -584,7 +597,6 @@ static void vic_remove(struct platform_device *pdev)
 {
 	struct vic *vic = platform_get_drvdata(pdev);
 
-	pm_runtime_disable(&pdev->dev);
 	host1x_client_unregister(&vic->client.base);
 	falcon_exit(&vic->falcon);
 }
