@@ -212,9 +212,6 @@ static int nvdec_exit(struct host1x_client *client)
 	if (err < 0)
 		return err;
 
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
-
 	/* Before detaching, which forgets the group the firmware was allocated for. */
 	if (nvdec->falcon.firmware.virt) {
 		if (client->group) {
@@ -351,6 +348,24 @@ static __maybe_unused int nvdec_runtime_suspend(struct device *dev)
 	return 0;
 }
 
+/* Firmware may only be loaded once the IOMMU carveout exists. */
+static void nvdec_late_init(struct tegra_drm_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(client);
+
+	pm_runtime_enable(nvdec->dev);
+	pm_runtime_use_autosuspend(nvdec->dev);
+	pm_runtime_set_autosuspend_delay(nvdec->dev, 500);
+}
+
+static void nvdec_early_exit(struct tegra_drm_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(client);
+
+	pm_runtime_dont_use_autosuspend(nvdec->dev);
+	pm_runtime_force_suspend(nvdec->dev);
+}
+
 static int nvdec_open_channel(struct tegra_drm_client *client,
 			    struct tegra_drm_context *context)
 {
@@ -381,6 +396,8 @@ static const struct tegra_drm_client_ops nvdec_ops = {
 	.submit = tegra_drm_submit,
 	.get_streamid_offset = tegra_drm_get_streamid_offset_thi,
 	.can_use_memory_ctx = nvdec_can_use_memory_ctx,
+	.late_init = nvdec_late_init,
+	.early_exit = nvdec_early_exit,
 };
 
 #define NVIDIA_TEGRA_210_NVDEC_FIRMWARE "nvidia/tegra210/nvdec.bin"
@@ -534,10 +551,6 @@ static int nvdec_probe(struct platform_device *pdev)
 		goto exit_falcon;
 	}
 
-	pm_runtime_enable(dev);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_set_autosuspend_delay(dev, 500);
-
 	return 0;
 
 exit_falcon:
@@ -550,7 +563,6 @@ static void nvdec_remove(struct platform_device *pdev)
 {
 	struct nvdec *nvdec = platform_get_drvdata(pdev);
 
-	pm_runtime_disable(&pdev->dev);
 	host1x_client_unregister(&nvdec->client.base);
 	falcon_exit(&nvdec->falcon);
 }
