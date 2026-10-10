@@ -42,6 +42,10 @@ struct vic {
 	struct device *dev;
 	struct clk *clk;
 	struct reset_control *rst;
+	/* Between late_init() and early_exit(): firmware may be loaded. */
+	bool ready;
+	/* Active when early_exit() suspended it: resumed again by late_init(). */
+	bool resume_at_init;
 
 	bool can_use_context;
 
@@ -205,9 +209,6 @@ static int vic_exit(struct host1x_client *client)
 	if (err < 0)
 		return err;
 
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
-
 	/* Before detaching, which forgets the group the firmware was allocated for. */
 	if (vic->falcon.firmware.virt) {
 		if (client->group) {
@@ -340,6 +341,10 @@ static int __maybe_unused vic_runtime_resume(struct device *dev)
 	struct vic *vic = dev_get_drvdata(dev);
 	int err;
 
+	/* Not without the IOMMU domain, which a system resume may try. */
+	if (!vic->ready)
+		return -ENODEV;
+
 	err = clk_prepare_enable(vic->clk);
 	if (err < 0)
 		return err;
@@ -369,6 +374,13 @@ disable:
 	return err;
 }
 
+static void vic_power_off(struct vic *vic)
+{
+	usleep_range(2000, 4000);
+
+	clk_disable_unprepare(vic->clk);
+}
+
 static int __maybe_unused vic_runtime_suspend(struct device *dev)
 {
 	struct vic *vic = dev_get_drvdata(dev);
@@ -380,9 +392,7 @@ static int __maybe_unused vic_runtime_suspend(struct device *dev)
 	if (err < 0)
 		return err;
 
-	usleep_range(2000, 4000);
-
-	clk_disable_unprepare(vic->clk);
+	vic_power_off(vic);
 
 	return 0;
 }
@@ -419,12 +429,54 @@ static int vic_can_use_memory_ctx(struct tegra_drm_client *client, bool *support
 	return 0;
 }
 
+/* Firmware may only be loaded once the IOMMU carveout exists. */
+static void vic_late_init(struct tegra_drm_client *client)
+{
+	struct vic *vic = to_vic(client);
+	int err;
+
+	vic->ready = true;
+	pm_runtime_use_autosuspend(vic->dev);
+	pm_runtime_set_autosuspend_delay(vic->dev, 500);
+	pm_runtime_enable(vic->dev);
+
+	if (vic->resume_at_init) {
+		vic->resume_at_init = false;
+		err = pm_runtime_resume(vic->dev);
+		if (err < 0)
+			dev_err(vic->dev, "failed to resume: %d\n", err);
+	}
+}
+
+/* Leaves the engine off and runtime PM disabled, whoever holds a reference. */
+static void vic_early_exit(struct tegra_drm_client *client)
+{
+	struct vic *vic = to_vic(client);
+	int err;
+
+	vic->ready = false;
+	pm_runtime_dont_use_autosuspend(vic->dev);
+	pm_runtime_disable(vic->dev);
+	if (pm_runtime_status_suspended(vic->dev))
+		return;
+
+	err = vic_runtime_suspend(vic->dev);
+	if (err < 0) {
+		dev_err(vic->dev, "failed to suspend: %d\n", err);
+		vic_power_off(vic);
+	}
+	pm_runtime_set_suspended(vic->dev);
+	vic->resume_at_init = true;
+}
+
 static const struct tegra_drm_client_ops vic_ops = {
 	.open_channel = vic_open_channel,
 	.close_channel = vic_close_channel,
 	.submit = tegra_drm_submit,
 	.get_streamid_offset = tegra_drm_get_streamid_offset_thi,
 	.can_use_memory_ctx = vic_can_use_memory_ctx,
+	.late_init = vic_late_init,
+	.early_exit = vic_early_exit,
 };
 
 #define NVIDIA_TEGRA_124_VIC_FIRMWARE "nvidia/tegra124/vic03_ucode.bin"
@@ -568,10 +620,6 @@ static int vic_probe(struct platform_device *pdev)
 		goto exit_falcon;
 	}
 
-	pm_runtime_enable(dev);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_set_autosuspend_delay(dev, 500);
-
 	return 0;
 
 exit_falcon:
@@ -584,7 +632,6 @@ static void vic_remove(struct platform_device *pdev)
 {
 	struct vic *vic = platform_get_drvdata(pdev);
 
-	pm_runtime_disable(&pdev->dev);
 	host1x_client_unregister(&vic->client.base);
 	falcon_exit(&vic->falcon);
 }
