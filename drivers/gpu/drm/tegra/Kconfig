@@ -43,4 +43,25 @@ config DRM_TEGRA_STAGING
 
 	  If unsure, choose N.
 
+config DRM_TEGRA_NVDEC_V4L2
+	bool "Tegra210 NVDEC stateless video decoder (V4L2)"
+	depends on VIDEO_DEV
+	depends on DRM_TEGRA=m || VIDEO_DEV=y
+	select MEDIA_CONTROLLER
+	select MEDIA_CONTROLLER_REQUEST_API
+	select V4L2_MEM2MEM_DEV
+	select VIDEOBUF2_DMA_SG
+	help
+	  Expose the Tegra210 NVDEC engine as a stateless V4L2 memory-to-memory
+	  decoder. VIC detiles every picture into linear NV12. Coded formats:
+
+	    - H.264 up to High, including interlaced pictures
+
+	  It needs NVIDIA's firmware, nvidia/tegra210/vic04_ucode.bin and
+	  nvidia/tegra210/nvdec.bin. The latter is not in linux-firmware; it
+	  was tested with nvhost_nvdec020_ns.fw from the L4T R32.7 BSP, sha256
+	  7b5ac5ad66dad47e77f2a056991e422dd2630fa17e0a57a5874af492efa0f909.
+
+	  If unsure, choose N.
+
 endif

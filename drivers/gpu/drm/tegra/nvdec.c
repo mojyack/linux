@@ -19,6 +19,7 @@
 
 #include "drm.h"
 #include "falcon.h"
+#include "nvdec.h"
 #include "riscv.h"
 #include "vic.h"
 
@@ -31,6 +32,7 @@ struct nvdec_config {
 	bool supports_sid;
 	bool has_riscv;
 	bool has_extra_clocks;
+	bool has_v4l2;
 };
 
 struct nvdec {
@@ -50,6 +52,8 @@ struct nvdec {
 	/* RISC-V specific data */
 	struct tegra_drm_riscv riscv;
 	phys_addr_t carveout_base;
+
+	struct nvdec_v4l2 *v4l2;
 };
 
 static inline struct nvdec *to_nvdec(struct tegra_drm_client *client)
@@ -356,14 +360,63 @@ static void nvdec_late_init(struct tegra_drm_client *client)
 	pm_runtime_enable(nvdec->dev);
 	pm_runtime_use_autosuspend(nvdec->dev);
 	pm_runtime_set_autosuspend_delay(nvdec->dev, 500);
+
+	if (nvdec->config->has_v4l2) {
+		nvdec->v4l2 = nvdec_v4l2_register(client, nvdec->channel);
+		if (IS_ERR(nvdec->v4l2)) {
+			dev_warn(nvdec->dev, "failed to register V4L2 decoder: %pe\n",
+				 nvdec->v4l2);
+			nvdec->v4l2 = NULL;
+		}
+	}
 }
 
 static void nvdec_early_exit(struct tegra_drm_client *client)
 {
 	struct nvdec *nvdec = to_nvdec(client);
 
+	nvdec_v4l2_unregister(nvdec->v4l2);
+	nvdec->v4l2 = NULL;
+
 	pm_runtime_dont_use_autosuspend(nvdec->dev);
 	pm_runtime_force_suspend(nvdec->dev);
+}
+
+/* Brings a hung engine back without relying on who holds a PM reference. */
+int nvdec_reset(struct tegra_drm_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(client);
+	int err;
+
+	if (nvdec->config->has_riscv || !nvdec->reset)
+		return -EOPNOTSUPP;
+
+	err = pm_runtime_resume_and_get(nvdec->dev);
+	if (err < 0)
+		return err;
+
+	host1x_channel_stop(nvdec->channel);
+
+	err = reset_control_acquire(nvdec->reset);
+	if (err < 0)
+		goto put;
+
+	err = reset_control_assert(nvdec->reset);
+	if (!err) {
+		usleep_range(10, 20);
+		err = reset_control_deassert(nvdec->reset);
+	}
+	reset_control_release(nvdec->reset);
+	if (!err) {
+		usleep_range(10, 20);
+		err = nvdec_boot_falcon(nvdec);
+	}
+
+put:
+	pm_runtime_mark_last_busy(nvdec->dev);
+	pm_runtime_put_autosuspend(nvdec->dev);
+
+	return err;
 }
 
 static int nvdec_open_channel(struct tegra_drm_client *client,
@@ -406,6 +459,7 @@ static const struct nvdec_config nvdec_t210_config = {
 	.firmware = NVIDIA_TEGRA_210_NVDEC_FIRMWARE,
 	.version = 0x21,
 	.supports_sid = false,
+	.has_v4l2 = true,
 };
 
 #define NVIDIA_TEGRA_186_NVDEC_FIRMWARE "nvidia/tegra186/nvdec.bin"
@@ -529,6 +583,15 @@ static int nvdec_probe(struct platform_device *pdev)
 		err = falcon_init(&nvdec->falcon);
 		if (err < 0)
 			return err;
+
+		if (nvdec->config->has_v4l2) {
+			nvdec->reset = devm_reset_control_get_exclusive_released(dev, "nvdec");
+			if (IS_ERR(nvdec->reset)) {
+				err = dev_err_probe(dev, PTR_ERR(nvdec->reset),
+						    "failed to get reset\n");
+				goto exit_falcon;
+			}
+		}
 	}
 
 	platform_set_drvdata(pdev, nvdec);
