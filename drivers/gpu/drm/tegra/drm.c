@@ -1137,6 +1137,25 @@ static bool host1x_drm_wants_iommu(struct host1x_device *dev)
 	return domain != NULL;
 }
 
+/* Clients only join and leave the list in their init and exit, so no lock. */
+static void tegra_drm_clients_late_init(struct tegra_drm *tegra)
+{
+	struct tegra_drm_client *client;
+
+	list_for_each_entry(client, &tegra->clients, list)
+		if (client->ops && client->ops->late_init)
+			client->ops->late_init(client);
+}
+
+static void tegra_drm_clients_early_exit(struct tegra_drm *tegra)
+{
+	struct tegra_drm_client *client;
+
+	list_for_each_entry_reverse(client, &tegra->clients, list)
+		if (client->ops && client->ops->early_exit)
+			client->ops->early_exit(client);
+}
+
 static int host1x_drm_probe(struct host1x_device *dev)
 {
 	struct device *dma_dev = dev->dev.parent;
@@ -1233,6 +1252,8 @@ static int host1x_drm_probe(struct host1x_device *dev)
 		iova_cache_put();
 	}
 
+	tegra_drm_clients_late_init(tegra);
+
 	if (tegra->hub) {
 		err = tegra_display_hub_prepare(tegra->hub);
 		if (err < 0)
@@ -1281,14 +1302,15 @@ hub:
 	if (tegra->hub)
 		tegra_display_hub_cleanup(tegra->hub);
 device:
+	tegra_drm_clients_early_exit(tegra);
+	host1x_device_exit(dev);
+
 	if (tegra->domain) {
 		mutex_destroy(&tegra->mm_lock);
 		drm_mm_takedown(&tegra->mm);
 		put_iova_domain(&tegra->carveout.domain);
 		iova_cache_put();
 	}
-
-	host1x_device_exit(dev);
 poll:
 	drm_kms_helper_poll_fini(drm);
 	drm_mode_config_cleanup(drm);
@@ -1308,6 +1330,7 @@ static void host1x_drm_remove(struct host1x_device *dev)
 	struct tegra_drm *tegra = drm->dev_private;
 	int err;
 
+	tegra_drm_clients_early_exit(tegra);
 	drm_dev_unregister(drm);
 
 	drm_kms_helper_poll_fini(drm);
