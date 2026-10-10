@@ -1245,11 +1245,12 @@ nouveau_bo_move(struct ttm_buffer_object *bo, bool evict,
 			return ret;
 	}
 
-	drm_gpuvm_bo_gem_evict(obj, evict);
-	nouveau_bo_move_ntfy(bo, new_reg);
 	ret = ttm_bo_wait_ctx(bo, ctx);
 	if (ret)
-		goto out_ntfy;
+		return ret;
+
+	drm_gpuvm_bo_gem_evict(obj, evict);
+	nouveau_bo_move_ntfy(bo, new_reg);
 
 	if (drm->client.device.info.family < NV_DEVICE_INFO_V0_TESLA) {
 		ret = nouveau_bo_vm_bind(bo, new_reg, &new_tile);
