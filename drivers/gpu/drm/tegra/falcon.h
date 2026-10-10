@@ -6,7 +6,12 @@
 #ifndef _FALCON_H_
 #define _FALCON_H_
 
+#include <linux/align.h>
+#include <linux/bits.h>
+#include <linux/errno.h>
+#include <linux/sizes.h>
 #include <linux/types.h>
+#include <linux/wordpart.h>
 
 #define FALCON_UCLASS_METHOD_OFFSET		0x00000040
 
@@ -135,5 +140,52 @@ int falcon_load_firmware(struct falcon *falcon);
 int falcon_boot(struct falcon *falcon);
 void falcon_execute_method(struct falcon *falcon, u32 method, u32 data);
 int falcon_wait_idle(struct falcon *falcon);
+
+/* A host1x command buffer of falcon methods, built by the kernel. */
+struct falcon_gather {
+	u32 *words;
+	unsigned int count;
+	unsigned int size;
+	int err;
+};
+
+/* One host1x INCR writing METHOD_OFFSET and METHOD_DATA. */
+#define FALCON_GATHER_METHOD	(0x10000000 | \
+				 (FALCON_UCLASS_METHOD_OFFSET >> 2) << 16 | 2)
+
+static inline void falcon_gather_method(struct falcon_gather *g, u32 method,
+					u32 value)
+{
+	if (g->count + 3 > g->size) {
+		g->err = -ENOSPC;
+		return;
+	}
+
+	g->words[g->count++] = FALCON_GATHER_METHOD;
+	g->words[g->count++] = method;
+	g->words[g->count++] = value;
+}
+
+/* Address methods carry the IOVA shifted right by 8. */
+static inline void falcon_gather_address(struct falcon_gather *g, u32 method,
+					 dma_addr_t iova)
+{
+	if (!IS_ALIGNED(iova, SZ_256) || upper_32_bits(iova >> 8))
+		g->err = -EINVAL;
+
+	falcon_gather_method(g, method, lower_32_bits(iova >> 8));
+}
+
+/* A host1x NONINCR to INCR_SYNCPT, incrementing @syncpt on OP_DONE. */
+static inline void falcon_gather_op_done(struct falcon_gather *g, u32 syncpt)
+{
+	if (g->count + 2 > g->size) {
+		g->err = -ENOSPC;
+		return;
+	}
+
+	g->words[g->count++] = 0x20000001;
+	g->words[g->count++] = syncpt | BIT(8);
+}
 
 #endif /* _FALCON_H_ */
