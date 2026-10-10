@@ -818,6 +818,27 @@ nouveau_bo_sync_for_cpu(struct nouveau_bo *nvbo)
 	return 0;
 }
 
+static void
+nouveau_bo_swap_notify(struct ttm_buffer_object *bo)
+{
+	struct nouveau_bo *nvbo = nouveau_bo(bo);
+	struct ttm_tt *ttm = bo->ttm;
+	pgoff_t i;
+
+	if (!nvbo->force_coherent || !ttm || !ttm->dma_address)
+		return;
+
+	/* TTM reads dma_alloc_attrs() pages through their own mapping. */
+	if (bo->bdev->pool.alloc_flags & TTM_ALLOCATION_POOL_USE_DMA_ALLOC)
+		return;
+
+	/* Swapout copies via the cached linear map: drop its stale lines. */
+	for (i = 0; i < ttm->num_pages; i++)
+		dma_sync_single_for_cpu(nouveau_bdev(bo->bdev)->dev->dev,
+					ttm->dma_address[i], PAGE_SIZE,
+					DMA_FROM_DEVICE);
+}
+
 void nouveau_bo_add_io_reserve_lru(struct ttm_buffer_object *bo)
 {
 	struct nouveau_drm *drm = nouveau_bdev(bo->bdev);
@@ -1586,6 +1607,7 @@ struct ttm_device_funcs nouveau_bo_driver = {
 	.evict_flags = nouveau_bo_evict_flags,
 	.delete_mem_notify = nouveau_bo_delete_mem_notify,
 	.move = nouveau_bo_move,
+	.swap_notify = nouveau_bo_swap_notify,
 	.io_mem_reserve = &nouveau_ttm_io_mem_reserve,
 	.io_mem_free = &nouveau_ttm_io_mem_free,
 };
