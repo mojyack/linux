@@ -89,6 +89,10 @@ struct tegra_drm_client_ops {
 		      struct drm_file *file);
 	int (*get_streamid_offset)(struct tegra_drm_client *client, u32 *offset);
 	int (*can_use_memory_ctx)(struct tegra_drm_client *client, bool *supported);
+	/* Every client is initialized and the IOMMU domain is set up. */
+	void (*late_init)(struct tegra_drm_client *client);
+	/* Undoes late_init() before any client exits. */
+	void (*early_exit)(struct tegra_drm_client *client);
 };
 
 int tegra_drm_submit(struct tegra_drm_context *context,
