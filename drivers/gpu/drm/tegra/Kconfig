@@ -50,6 +50,7 @@ config DRM_TEGRA_NVDEC_V4L2
 	select MEDIA_CONTROLLER
 	select MEDIA_CONTROLLER_REQUEST_API
 	select V4L2_MEM2MEM_DEV
+	select V4L2_VP9
 	select VIDEOBUF2_DMA_SG
 	help
 	  Expose the Tegra210 NVDEC engine as a stateless V4L2 memory-to-memory
@@ -58,6 +59,7 @@ config DRM_TEGRA_NVDEC_V4L2
 
 	    - H.264 up to High, including interlaced pictures
 	    - HEVC Main and Main10
+	    - VP9 Profile 0
 
 	  It needs NVIDIA's firmware, nvidia/tegra210/vic04_ucode.bin and
 	  nvidia/tegra210/nvdec.bin. The latter is not in linux-firmware; it

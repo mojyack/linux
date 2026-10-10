@@ -21,6 +21,7 @@
 #include <media/v4l2-hevc.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
+#include <media/v4l2-vp9.h>
 #include <media/videobuf2-dma-sg.h>
 
 #include "drm.h"
@@ -62,6 +63,19 @@ struct nvdec_field {
 	u32 frame_num;
 };
 
+/* VP9 owns its probability model and what 6.1.2 needs of the last frame. */
+struct nvdec_vp9_state {
+	struct v4l2_vp9_frame_context frame_context[4];
+	struct v4l2_vp9_frame_context probs;
+	u32 cur_flags;
+	u32 last_flags;
+	u16 cur_width;
+	u16 cur_height;
+	u8 frame_context_idx;
+	bool cur_valid;
+	bool last_valid;
+};
+
 struct nvdec_v4l2_ctx {
 	struct nvdec_v4l2 *nvdec;
 	struct list_head list;
@@ -79,11 +93,19 @@ struct nvdec_v4l2_ctx {
 	/* NULL once the engine has gone away underneath an open file. */
 	struct nvdec_decode_context *decode;
 	struct list_head surfaces;
-	/* Picture being decoded. */
+	/* Picture being decoded, and where its data starts in the OUTPUT buffer. */
 	union nvdec_request request;
+	u32 bitstream_offset;
 	/* A decoded first field the next picture may complete, and the candidate. */
 	struct nvdec_field first_field;
 	struct nvdec_field next_first_field;
+	/* The surface being decoded into; its size is recorded once it decodes. */
+	struct nvdec_v4l2_surface *run_surface;
+	/* VP9 stream state, and what the picture in flight turns it into. */
+	struct nvdec_vp9_state vp9;
+	struct nvdec_vp9_state vp9_next;
+	/* 14 KiB of pointers into the firmware's count buffer; not a stack type. */
+	struct v4l2_vp9_frame_symbol_counts vp9_counts;
 };
 
 struct nvdec_v4l2_surface {
@@ -93,6 +115,9 @@ struct nvdec_v4l2_surface {
 	/* The capture buffer's own mapping, kept for as long as it is queued. */
 	struct nvdec_decode_map *capture;
 	struct dma_buf *dbuf;
+	/* Size of the VP9 frame last decoded into it; inter frames must match it. */
+	u16 width;
+	u16 height;
 };
 
 static int nvdec_try_ctrl(struct v4l2_ctrl *ctrl);
@@ -176,12 +201,34 @@ static const u32 nvdec_hevc_required[] = {
 	V4L2_CID_STATELESS_HEVC_DECODE_PARAMS,
 };
 
+static const struct v4l2_ctrl_config nvdec_vp9_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_VP9_FRAME, .ops = &nvdec_ctrl_ops },
+	{ .id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR },
+};
+
+/* Without the deltas no inter frame can be decoded. */
+static const u32 nvdec_vp9_required[] = {
+	V4L2_CID_STATELESS_VP9_FRAME,
+	V4L2_CID_STATELESS_VP9_COMPRESSED_HDR,
+};
+
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
 {
 	return container_of(file_to_v4l2_fh(file), struct nvdec_v4l2_ctx, fh);
 }
 
 static void nvdec_release_surfaces(struct nvdec_v4l2_ctx *ctx);
+
+/* A VP9 stream begins with the four frame contexts at the spec's defaults. */
+static void nvdec_reset_vp9_contexts(struct nvdec_v4l2_ctx *ctx)
+{
+	unsigned int i;
+
+	memset(&ctx->vp9, 0, sizeof(ctx->vp9));
+	for (i = 0; i < ARRAY_SIZE(ctx->vp9.frame_context); i++)
+		ctx->vp9.frame_context[i] = v4l2_vp9_default_probs;
+	ctx->vp9.probs = v4l2_vp9_default_probs;
+}
 
 /* NV12 holds one byte per sample, P010 two; nothing else is advertised. */
 static u32 nvdec_sample_bytes(u32 pixelformat)
@@ -334,6 +381,7 @@ static void nvdec_stop_streaming(struct vb2_queue *vq)
 		if (ctx->decode)
 			nvdec_decode_context_reset(ctx->decode);
 		nvdec_release_surfaces(ctx);
+		nvdec_reset_vp9_contexts(ctx);
 	}
 }
 
@@ -497,6 +545,16 @@ static int nvdec_try_ctrl(struct v4l2_ctrl *ctrl)
 			return -EINVAL;
 		return 0;
 	}
+	case V4L2_CID_STATELESS_VP9_FRAME: {
+		const struct v4l2_ctrl_vp9_frame *frame = ctrl->p_new.p_vp9_frame;
+		u32 subsampling = V4L2_VP9_FRAME_FLAG_X_SUBSAMPLING |
+				  V4L2_VP9_FRAME_FLAG_Y_SUBSAMPLING;
+
+		if (frame->profile || frame->bit_depth != 8 ||
+		    (frame->flags & subsampling) != subsampling)
+			return -EINVAL;
+		return 0;
+	}
 	}
 
 	return 0;
@@ -654,6 +712,7 @@ static void nvdec_snapshot_frame(struct nvdec_v4l2_ctx *ctx)
 	struct nvdec_frame *f = &ctx->request.frame;
 
 	memset(&ctx->request, 0, sizeof(ctx->request));
+	ctx->bitstream_offset = 0;
 	f->coded_width = ctx->coded_width;
 	f->coded_height = ctx->coded_height;
 	f->crop_width = pix->width;
@@ -1178,6 +1237,235 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_validate_vp9_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_ctrl_vp9_compressed_hdr *hdr;
+	const struct v4l2_ctrl_vp9_frame *frame;
+	u32 width, height, headers;
+	const char *why;
+	unsigned int i;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+	hdr = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_COMPRESSED_HDR);
+
+	width = frame->frame_width_minus_1 + 1;
+	height = frame->frame_height_minus_1 + 1;
+	/* Also on a resize: the negotiated format only bounds it from above. */
+	if (width < NVDEC_VP9_MIN_SIZE || height < NVDEC_VP9_MIN_SIZE) {
+		why = "frame smaller than the engine decodes";
+		goto reject;
+	}
+	if (ALIGN(width, NVDEC_VP9_SB_SIZE) > ctx->coded_width ||
+	    ALIGN(height, NVDEC_VP9_SB_SIZE) > ctx->coded_height) {
+		why = "frame dimensions exceed the negotiated coded format";
+		goto reject;
+	}
+
+	if (frame->tile_cols_log2 > 6 || frame->tile_rows_log2 > 2) {
+		why = "too many tiles";
+		goto reject;
+	}
+
+	if (check_add_overflow(frame->uncompressed_header_size,
+			       frame->compressed_header_size, &headers) ||
+	    !frame->uncompressed_header_size || !frame->compressed_header_size) {
+		why = "header sizes";
+		goto reject;
+	}
+
+	if (hdr->tx_mode > V4L2_VP9_TX_MODE_SELECT ||
+	    frame->reference_mode > V4L2_VP9_REFERENCE_MODE_SELECT ||
+	    frame->interpolation_filter > V4L2_VP9_INTERP_FILTER_SWITCHABLE ||
+	    frame->reset_frame_context > 3 || frame->frame_context_idx > 3) {
+		why = "frame parameters";
+		goto reject;
+	}
+
+	for (i = 0; i < 8; i++) {
+		if (frame->seg.feature_enabled[i] & ~0xf) {
+			why = "unknown segmentation feature";
+			goto reject;
+		}
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "vp9 reject: %s\n", why);
+	return -EINVAL;
+}
+
+/* 6.1 frame(sz): the driver owns the frame contexts and forward-updates them. */
+static int nvdec_snapshot_vp9_request(struct nvdec_v4l2_ctx *ctx,
+				      struct vb2_v4l2_buffer *src,
+				      struct vb2_v4l2_buffer *dst)
+{
+	struct nvdec_vp9_request *request = &ctx->request.vp9;
+	struct nvdec_vp9_state *st = &ctx->vp9_next;
+	const struct v4l2_ctrl_vp9_compressed_hdr *hdr;
+	const struct v4l2_ctrl_vp9_frame *frame;
+	unsigned int i, j;
+
+	if (nvdec_validate_vp9_request(ctx))
+		return -EINVAL;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+	hdr = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_COMPRESSED_HDR);
+
+	/* Committed by nvdec_vp9_refresh_probs() once the frame has decoded. */
+	*st = ctx->vp9;
+	st->frame_context_idx = v4l2_vp9_reset_frame_ctx(frame,
+							 st->frame_context);
+	st->probs = st->frame_context[st->frame_context_idx];
+	v4l2_vp9_fw_update_probs(&st->probs, hdr, frame);
+
+	nvdec_snapshot_frame(ctx);
+	ctx->bitstream_offset = frame->uncompressed_header_size +
+				frame->compressed_header_size;
+	request->width = frame->frame_width_minus_1 + 1;
+	request->height = frame->frame_height_minus_1 + 1;
+	request->tile_cols_log2 = frame->tile_cols_log2;
+	request->tile_rows_log2 = frame->tile_rows_log2;
+	request->base_q_idx = frame->quant.base_q_idx;
+	request->delta_q_y_dc = frame->quant.delta_q_y_dc;
+	request->delta_q_uv_dc = frame->quant.delta_q_uv_dc;
+	request->delta_q_uv_ac = frame->quant.delta_q_uv_ac;
+	request->lf_level = frame->lf.level;
+	request->lf_sharpness = frame->lf.sharpness;
+	memcpy(request->lf_ref_deltas, frame->lf.ref_deltas,
+	       sizeof(request->lf_ref_deltas));
+	memcpy(request->lf_mode_deltas, frame->lf.mode_deltas,
+	       sizeof(request->lf_mode_deltas));
+	request->tx_mode = hdr->tx_mode;
+	request->reference_mode = frame->reference_mode;
+	request->interpolation_filter = frame->interpolation_filter;
+	request->sign_bias[0] =
+		!!(frame->ref_frame_sign_bias & V4L2_VP9_SIGN_BIAS_LAST);
+	request->sign_bias[1] =
+		!!(frame->ref_frame_sign_bias & V4L2_VP9_SIGN_BIAS_GOLDEN);
+	request->sign_bias[2] =
+		!!(frame->ref_frame_sign_bias & V4L2_VP9_SIGN_BIAS_ALT);
+
+	for (i = 0; i < 8; i++) {
+		request->seg_feature_enabled[i] = frame->seg.feature_enabled[i];
+		for (j = 0; j < 3; j++)
+			request->seg_feature_data[i][j] =
+				frame->seg.feature_data[i][j];
+	}
+	memcpy(request->seg_tree_probs, frame->seg.tree_probs,
+	       sizeof(request->seg_tree_probs));
+	memcpy(request->seg_pred_probs, frame->seg.pred_probs,
+	       sizeof(request->seg_pred_probs));
+
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_KEY_FRAME)
+		request->flags |= NVDEC_VP9_REQ_KEY_FRAME;
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_ERROR_RESILIENT)
+		request->flags |= NVDEC_VP9_REQ_ERROR_RESILIENT;
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_INTRA_ONLY)
+		request->flags |= NVDEC_VP9_REQ_INTRA_ONLY;
+	if (frame->flags & V4L2_VP9_FRAME_FLAG_ALLOW_HIGH_PREC_MV)
+		request->flags |= NVDEC_VP9_REQ_HIGH_PREC_MV;
+	if (!frame->quant.base_q_idx && !frame->quant.delta_q_y_dc &&
+	    !frame->quant.delta_q_uv_dc && !frame->quant.delta_q_uv_ac)
+		request->flags |= NVDEC_VP9_REQ_LOSSLESS;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_ENABLED)
+		request->flags |= NVDEC_VP9_REQ_SEG_ENABLED;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_UPDATE_MAP)
+		request->flags |= NVDEC_VP9_REQ_SEG_UPDATE_MAP;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_TEMPORAL_UPDATE)
+		request->flags |= NVDEC_VP9_REQ_SEG_TEMPORAL;
+	if (frame->seg.flags & V4L2_VP9_SEGMENTATION_FLAG_ABS_OR_DELTA_UPDATE)
+		request->flags |= NVDEC_VP9_REQ_SEG_ABS_DELTA;
+	if (frame->lf.flags & V4L2_VP9_LOOP_FILTER_FLAG_DELTA_ENABLED)
+		request->flags |= NVDEC_VP9_REQ_LF_DELTA_ENABLED;
+	if (st->cur_valid) {
+		if (st->cur_flags & V4L2_VP9_FRAME_FLAG_KEY_FRAME)
+			request->flags |= NVDEC_VP9_REQ_PREV_KEY_FRAME;
+		/* No previous-size field; a resize reads as unshown. */
+		if ((st->cur_flags & V4L2_VP9_FRAME_FLAG_SHOW_FRAME) &&
+		    st->cur_width == request->width &&
+		    st->cur_height == request->height)
+			request->flags |= NVDEC_VP9_REQ_PREV_SHOW_FRAME;
+	}
+
+	request->probs = st->probs;
+	st->last_flags = st->cur_flags;
+	st->last_valid = st->cur_valid;
+	st->cur_flags = frame->flags;
+	st->cur_width = request->width;
+	st->cur_height = request->height;
+	st->cur_valid = true;
+	return 0;
+}
+
+struct nvdec_vp9_tx_and_skip {
+	u8 tx8[2][1];
+	u8 tx16[2][2];
+	u8 tx32[2][3];
+	u8 skip[3];
+};
+
+static void nvdec_vp9_save_tx_skip(struct nvdec_vp9_tx_and_skip *to,
+				   const struct v4l2_vp9_frame_context *from)
+{
+	memcpy(to->tx8, from->tx8, sizeof(to->tx8));
+	memcpy(to->tx16, from->tx16, sizeof(to->tx16));
+	memcpy(to->tx32, from->tx32, sizeof(to->tx32));
+	memcpy(to->skip, from->skip, sizeof(to->skip));
+}
+
+static void nvdec_vp9_restore_tx_skip(struct v4l2_vp9_frame_context *to,
+				      const struct nvdec_vp9_tx_and_skip *from)
+{
+	memcpy(to->tx8, from->tx8, sizeof(from->tx8));
+	memcpy(to->tx16, from->tx16, sizeof(from->tx16));
+	memcpy(to->tx32, from->tx32, sizeof(from->tx32));
+	memcpy(to->skip, from->skip, sizeof(from->skip));
+}
+
+/* 6.1.2 refresh_probs(), once the firmware has decoded the frame and counted. */
+static void nvdec_vp9_refresh_probs(struct nvdec_v4l2_ctx *ctx)
+{
+	struct nvdec_vp9_state *st = &ctx->vp9_next;
+	struct v4l2_vp9_frame_context *probs = &st->probs;
+	struct v4l2_vp9_frame_symbol_counts *counts = &ctx->vp9_counts;
+	bool intra;
+
+	if (!(st->cur_flags & V4L2_VP9_FRAME_FLAG_REFRESH_FRAME_CTX))
+		goto commit;
+
+	if (!(st->cur_flags & V4L2_VP9_FRAME_FLAG_PARALLEL_DEC_MODE) &&
+	    !nvdec_decode_vp9_counts(ctx->decode, counts)) {
+		struct nvdec_vp9_tx_and_skip tx_skip;
+
+		intra = st->cur_flags & (V4L2_VP9_FRAME_FLAG_KEY_FRAME |
+					 V4L2_VP9_FRAME_FLAG_INTRA_ONLY);
+
+		/* load_probs() and load_probs2() undo the forward update... */
+		if (intra)
+			nvdec_vp9_save_tx_skip(&tx_skip, probs);
+		*probs = st->frame_context[st->frame_context_idx];
+		/* ...except for TX and skip on an intra frame. */
+		if (intra)
+			nvdec_vp9_restore_tx_skip(probs, &tx_skip);
+
+		v4l2_vp9_adapt_coef_probs(probs, counts,
+					  !st->last_valid ||
+					  st->last_flags &
+					  V4L2_VP9_FRAME_FLAG_KEY_FRAME, intra);
+		if (!intra)
+			v4l2_vp9_adapt_noncoef_probs(probs, counts,
+						     ctx->request.vp9.reference_mode,
+						     ctx->request.vp9.interpolation_filter,
+						     ctx->request.vp9.tx_mode,
+						     st->cur_flags);
+	}
+
+	st->frame_context[st->frame_context_idx] = *probs;
+commit:
+	ctx->vp9 = *st;
+}
+
 /* The picture being decoded: its surface, and the surfaces it predicts from. */
 struct nvdec_v4l2_job {
 	struct nvdec_v4l2_surface *surface;
@@ -1236,9 +1524,47 @@ static int nvdec_resolve_hevc(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+/* VP9 slots are roles too, in the order last, golden, altref. */
+static int nvdec_resolve_vp9(struct nvdec_v4l2_ctx *ctx,
+			     struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_vp9_frame *frame =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP9_FRAME);
+	const u64 timestamps[NVDEC_VP9_REFS] = {
+		frame->last_frame_ts, frame->golden_frame_ts,
+		frame->alt_frame_ts,
+	};
+	struct nvdec_vp9_request *request = &ctx->request.vp9;
+	bool inter = !(request->flags & (NVDEC_VP9_REQ_KEY_FRAME |
+					 NVDEC_VP9_REQ_INTRA_ONLY));
+	unsigned int i;
+
+	for (i = 0; i < NVDEC_VP9_REFS; i++) {
+		struct nvdec_v4l2_surface *ref;
+
+		/* An intra frame names stale roles; it predicts from none of them. */
+		request->ref_width[i] = request->width;
+		request->ref_height[i] = request->height;
+		if (!inter)
+			continue;
+
+		/* An inter frame predicts from all three, at whatever size. */
+		ref = nvdec_pin_reference(ctx, job, i, timestamps[i]);
+		if (!ref || !ref->width) {
+			dev_dbg(ctx->nvdec->dev, "vp9 reject: reference %u\n", i);
+			return -EINVAL;
+		}
+		request->ref_width[i] = ref->width;
+		request->ref_height[i] = ref->height;
+	}
+
+	return 0;
+}
+
 /* Everything that differs between the coded formats on the OUTPUT queue. */
 struct nvdec_codec_desc {
 	u32 pixelformat;
+	u32 fmt_flags;
 	/* Smallest picture the engine decodes correctly; surfaces are aligned. */
 	u16 min_width;
 	u16 min_height;
@@ -1277,6 +1603,20 @@ static const struct nvdec_codec_desc nvdec_codecs[] = {
 		.num_required = ARRAY_SIZE(nvdec_hevc_required),
 		.snapshot = nvdec_snapshot_hevc_request,
 		.resolve = nvdec_resolve_hevc,
+	},
+	[NVDEC_CODEC_VP9] = {
+		.pixelformat = V4L2_PIX_FMT_VP9_FRAME,
+		/* A smaller frame is decoded and scales its references. */
+		.fmt_flags = V4L2_FMT_FLAG_DYN_RESOLUTION,
+		.min_width = NVDEC_VP9_MIN_SIZE,
+		.min_height = NVDEC_VP9_MIN_SIZE,
+		.align = NVDEC_VP9_SB_SIZE,
+		.ctrls = nvdec_vp9_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_vp9_ctrls),
+		.required = nvdec_vp9_required,
+		.num_required = ARRAY_SIZE(nvdec_vp9_required),
+		.snapshot = nvdec_snapshot_vp9_request,
+		.resolve = nvdec_resolve_vp9,
 	},
 };
 
@@ -1345,9 +1685,10 @@ static int nvdec_stage(struct nvdec_v4l2_ctx *ctx, struct vb2_v4l2_buffer *src)
 	long ret;
 	int err;
 
-	/* bytesused counts data_offset. */
-	if (offset >= payload)
+	/* bytesused counts data_offset; the codec's own header skip follows it. */
+	if (offset >= payload || payload - offset <= ctx->bitstream_offset)
 		return -EINVAL;
+	offset += ctx->bitstream_offset;
 
 	if (vb->memory == VB2_MEMORY_DMABUF) {
 		dbuf = vb->planes[0].dbuf;
@@ -1423,6 +1764,7 @@ static int nvdec_run(struct nvdec_v4l2_ctx *ctx)
 	err = nvdec_capture_surface(ctx, &dst->vb2_buf, &job.surface);
 	if (!err)
 		err = nvdec_capture_map(ctx, job.surface, &dst->vb2_buf);
+	ctx->run_surface = job.surface;
 	if (!err)
 		err = desc->resolve(ctx, &job);
 	if (err)
@@ -1462,6 +1804,12 @@ static void nvdec_done_work(struct work_struct *work)
 	int err;
 
 	err = nvdec_decode_finish(ctx->decode);
+	/* Decoded, if with concealed errors: the stream state moves on. */
+	if ((!err || err == -EBADMSG) && ctx->codec == NVDEC_CODEC_VP9) {
+		ctx->run_surface->width = ctx->request.vp9.width;
+		ctx->run_surface->height = ctx->request.vp9.height;
+		nvdec_vp9_refresh_probs(ctx);
+	}
 	nvdec_job_done(ctx, err);
 }
 
@@ -1534,6 +1882,7 @@ static int nvdec_enum_fmt(struct file *file, void *priv,
 		if (f->index >= ARRAY_SIZE(nvdec_codecs))
 			return -EINVAL;
 		f->pixelformat = nvdec_codecs[f->index].pixelformat;
+		f->flags = nvdec_codecs[f->index].fmt_flags;
 		return 0;
 	}
 
@@ -1725,6 +2074,7 @@ static int nvdec_open(struct file *file)
 	}
 	nvdec_reset_coded_fmt(ctx);
 	nvdec_reset_capture_fmt(ctx);
+	nvdec_reset_vp9_contexts(ctx);
 
 	list_add_tail(&ctx->list, &nvdec->contexts);
 	mutex_unlock(&nvdec->lock);
