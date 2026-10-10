@@ -61,8 +61,9 @@ struct nvdec_v4l2_ctx {
 	/* NULL once the engine has gone away underneath an open file. */
 	struct nvdec_decode_context *decode;
 	struct list_head surfaces;
-	/* Picture being decoded. */
+	/* Picture being decoded, and where its data starts in the OUTPUT buffer. */
 	union nvdec_request request;
+	u32 bitstream_offset;
 	/* Capture buffer whose first field the next picture may complete. */
 	struct vb2_buffer *first_field;
 	bool first_field_bottom;
@@ -150,6 +151,14 @@ static const u32 nvdec_hevc_required[] = {
 	V4L2_CID_STATELESS_HEVC_SPS,
 	V4L2_CID_STATELESS_HEVC_PPS,
 	V4L2_CID_STATELESS_HEVC_DECODE_PARAMS,
+};
+
+static const struct v4l2_ctrl_config nvdec_vp8_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_VP8_FRAME, .ops = &nvdec_ctrl_ops },
+};
+
+static const u32 nvdec_vp8_required[] = {
+	V4L2_CID_STATELESS_VP8_FRAME,
 };
 
 static inline struct nvdec_v4l2_ctx *file_to_nvdec_ctx(struct file *file)
@@ -426,6 +435,15 @@ static int nvdec_try_ctrl(struct v4l2_ctrl *ctrl)
 			return -EINVAL;
 		return 0;
 	}
+	case V4L2_CID_STATELESS_VP8_FRAME: {
+		const struct v4l2_ctrl_vp8_frame *frame = ctrl->p_new.p_vp8_frame;
+
+		/* The decoded picture is the coded size; there is no upscaler. */
+		if (frame->version > 3 || frame->horizontal_scale ||
+		    frame->vertical_scale)
+			return -EINVAL;
+		return 0;
+	}
 	}
 
 	return 0;
@@ -577,6 +595,7 @@ static void nvdec_snapshot_frame(struct nvdec_v4l2_ctx *ctx)
 	struct nvdec_frame *f = &ctx->request.frame;
 
 	memset(&ctx->request, 0, sizeof(ctx->request));
+	ctx->bitstream_offset = 0;
 	f->coded_width = coded->width;
 	f->coded_height = coded->height;
 	f->crop_width = pix->width;
@@ -1042,6 +1061,58 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_validate_vp8_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_pix_format_mplane *coded = &ctx->coded_fmt.fmt.pix_mp;
+	const struct v4l2_ctrl_vp8_frame *frame;
+	const char *why;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	if (ALIGN(frame->width, 16) != coded->width ||
+	    ALIGN(frame->height, 16) != coded->height) {
+		why = "frame dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	if (!frame->first_part_size) {
+		why = "empty first partition";
+		goto reject;
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "vp8 reject: %s\n", why);
+	return -EINVAL;
+}
+
+/* The firmware parses the frame header itself, so little of the control is used. */
+static int nvdec_snapshot_vp8_request(struct nvdec_v4l2_ctx *ctx,
+				      struct vb2_v4l2_buffer *src,
+				      struct vb2_v4l2_buffer *dst)
+{
+	struct nvdec_vp8_request *request = &ctx->request.vp8;
+	const struct v4l2_ctrl_vp8_frame *frame;
+
+	if (nvdec_validate_vp8_request(ctx))
+		return -EINVAL;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+
+	nvdec_snapshot_frame(ctx);
+	/* The frame tag, and on a key frame the start code and dimensions. */
+	ctx->bitstream_offset = frame->flags & V4L2_VP8_FRAME_FLAG_KEY_FRAME ? 10 : 3;
+	request->version = frame->version;
+	request->first_part_size = frame->first_part_size;
+	if (frame->flags & V4L2_VP8_FRAME_FLAG_KEY_FRAME)
+		request->flags |= NVDEC_VP8_REQ_KEY_FRAME;
+	if ((frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_ENABLED) &&
+	    (frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_UPDATE_FEATURE_DATA))
+		request->flags |= NVDEC_VP8_REQ_SEGMENT_UPDATE;
+
+	return 0;
+}
+
 /* The picture being decoded: its surface, and the surfaces it predicts from. */
 struct nvdec_v4l2_job {
 	struct nvdec_v4l2_surface *surface;
@@ -1096,6 +1167,25 @@ static int nvdec_resolve_hevc(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+/* VP8 slots are roles, not DPB entries: golden, altref, last. */
+static int nvdec_resolve_vp8(struct nvdec_v4l2_ctx *ctx,
+			     struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_vp8_frame *frame =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	const u64 timestamps[NVDEC_VP8_REFS] = {
+		frame->golden_frame_ts, frame->alt_frame_ts,
+		frame->last_frame_ts,
+	};
+	unsigned int i;
+
+	/* A reference the client does not name is the current picture. */
+	for (i = 0; i < NVDEC_VP8_REFS; i++)
+		nvdec_pin_reference(ctx, job, i, timestamps[i]);
+
+	return 0;
+}
+
 /* Everything that differs between the coded formats on the OUTPUT queue. */
 struct nvdec_codec_desc {
 	u32 pixelformat;
@@ -1137,6 +1227,18 @@ static const struct nvdec_codec_desc nvdec_codecs[] = {
 		.num_required = ARRAY_SIZE(nvdec_hevc_required),
 		.snapshot = nvdec_snapshot_hevc_request,
 		.resolve = nvdec_resolve_hevc,
+	},
+	[NVDEC_CODEC_VP8] = {
+		.pixelformat = V4L2_PIX_FMT_VP8_FRAME,
+		.min_width = 48,
+		.min_height = 16,
+		.align = 16,
+		.ctrls = nvdec_vp8_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_vp8_ctrls),
+		.required = nvdec_vp8_required,
+		.num_required = ARRAY_SIZE(nvdec_vp8_required),
+		.snapshot = nvdec_snapshot_vp8_request,
+		.resolve = nvdec_resolve_vp8,
 	},
 };
 
@@ -1197,6 +1299,9 @@ static int nvdec_stage(struct nvdec_v4l2_ctx *ctx, struct vb2_v4l2_buffer *src)
 	long ret;
 	int err;
 
+	if (payload <= ctx->bitstream_offset)
+		return -EINVAL;
+
 	if (vb->memory == VB2_MEMORY_DMABUF) {
 		dbuf = vb->planes[0].dbuf;
 		ret = dma_resv_wait_timeout(dbuf->resv, DMA_RESV_USAGE_WRITE, false,
@@ -1209,7 +1314,8 @@ static int nvdec_stage(struct nvdec_v4l2_ctx *ctx, struct vb2_v4l2_buffer *src)
 	}
 
 	data = vb2_plane_vaddr(vb, 0);
-	err = data ? nvdec_decode_stage(ctx->decode, data, payload) : -ENOMEM;
+	err = data ? nvdec_decode_stage(ctx->decode, data + ctx->bitstream_offset,
+					payload - ctx->bitstream_offset) : -ENOMEM;
 
 	if (dbuf)
 		dma_buf_end_cpu_access(dbuf, DMA_FROM_DEVICE);

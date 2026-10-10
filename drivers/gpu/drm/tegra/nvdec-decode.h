@@ -198,16 +198,32 @@ struct nvdec_hevc_request {
 #define NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION	BIT(19)
 #define NVDEC_HEVC_PPS_UNIFORM_SPACING		BIT(20)
 
+/* Golden, altref and last; the current picture takes the fourth slot. */
+#define NVDEC_VP8_REFS		3
+
+/* Copied, validated VP8 state. This is not a V4L2 control layout. */
+struct nvdec_vp8_request {
+	struct nvdec_frame frame;
+	u8 version;
+	u8 flags;
+	u32 first_part_size;
+};
+
+#define NVDEC_VP8_REQ_KEY_FRAME		BIT(0)
+#define NVDEC_VP8_REQ_SEGMENT_UPDATE	BIT(1)
+
 /* Every member starts with its struct nvdec_frame. */
 union nvdec_request {
 	struct nvdec_frame frame;
 	struct nvdec_h264_request h264;
 	struct nvdec_hevc_request hevc;
+	struct nvdec_vp8_request vp8;
 };
 
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
 	NVDEC_CODEC_HEVC,
+	NVDEC_CODEC_VP8,
 };
 
 /* Called once both jobs are done, from a context that must not sleep. */
