@@ -60,6 +60,7 @@ config DRM_TEGRA_NVDEC_V4L2
 	    - H.264 up to High, including interlaced pictures
 	    - HEVC Main and Main10
 	    - VP9 Profile 0
+	    - MPEG-2 Main
 
 	  It needs NVIDIA's firmware, nvidia/tegra210/vic04_ucode.bin and
 	  nvidia/tegra210/nvdec.bin. The latter is not in linux-firmware; it
