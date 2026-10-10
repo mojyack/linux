@@ -498,6 +498,202 @@ static int vic_can_use_memory_ctx(struct tegra_drm_client *client, bool *support
 	return 0;
 }
 
+/* VicConfigStruct 4.0; only what the detile stage touches is broken out. */
+struct vic_pipe_config {
+	__le32 downsample;		/* horiz | vert << 16, U9.2 */
+	u8 reserved[0x0c];
+};
+
+struct vic_output_config {
+	__le32 alpha_fill;		/* AlphaFillMode | slot << 3 | background */
+	u8 reserved0[0x04];		/* background, regamma */
+	__le32 target_rect_h;		/* left | right << 16 */
+	__le32 target_rect_v;		/* top | bottom << 16 */
+};
+
+struct vic_surface_config {
+	__le32 format;			/* pixel format, chroma loc, block kind */
+	__le32 size;			/* width | height << 14 */
+	__le32 luma;			/* luma width | height << 14 */
+	__le32 chroma;			/* chroma width | height << 14 */
+};
+
+struct vic_slot_config {
+	__le32 flags;			/* SlotEnable, CurrentFieldEnable */
+	u8 reserved0[0x0c];
+	__le32 clamp;			/* SoftClampLow | SoftClampHigh << 10 */
+	__le32 alpha;			/* PlanarAlpha | ConstantAlpha << 10 */
+	u8 reserved1[0x08];
+	__le32 source_rect[4];		/* left, right, top, bottom, U14.16 */
+	__le32 dest_rect[2];		/* left | right << 16, top | bottom << 16 */
+	u8 reserved2[0x08];
+};
+
+struct vic_slot {
+	struct vic_slot_config config;
+	struct vic_surface_config surface;
+	u8 luma_key[0x10];
+	u8 color_matrix[0x20];
+	u8 gamut_matrix[0x20];
+	u8 blending[0x10];
+};
+
+struct vic_config_struct {
+	struct vic_pipe_config pipe;
+	struct vic_output_config output;
+	struct vic_surface_config out_surface;
+	u8 out_color_matrix[0x20];
+	u8 clear_rect[0x40];
+	struct vic_slot slot[8];
+};
+
+static_assert(sizeof(struct vic_slot_config) == 0x40);
+static_assert(sizeof(struct vic_slot) == 0xb0);
+static_assert(offsetof(struct vic_config_struct, out_surface) == 0x020);
+static_assert(offsetof(struct vic_config_struct, slot) == 0x090);
+static_assert(offsetof(struct vic_slot, surface) == 0x040);
+static_assert(sizeof(struct vic_config_struct) == VIC_CONFIG_SIZE);
+
+#define VIC_T_R5G6B5			10
+#define VIC_T_A8R8G8B8			32
+#define VIC_T_Y8___U8V8_N420		67
+#define VIC_BLK_KIND_PITCH		0
+#define VIC_BLK_KIND_GENERIC_16BX2	1
+#define VIC_ALPHA_FILL_SOURCE_STREAM	3
+
+#define VIC_SURFACE_FORMAT(fmt, loc_h, loc_v, kind, height, cache)	\
+	((fmt) | ((loc_h) << 7) | ((loc_v) << 9) | ((kind) << 11) |	\
+	 ((height) << 15) | ((cache) << 19))
+#define VIC_SURFACE_DIMS(w, h)		(((w) - 1) | (((h) - 1) << 14))
+#define VIC_SURFACE_DIMS_UNUSED		0x0fffffffu
+#define VIC_RECT(low, high)		((low) | ((high) << 16))
+
+#define VIC_CONTROL_GPTIMER_ON		BIT(0)
+#define VIC_CONTROL_FALCON_CONTROL	BIT(8)
+#define VIC_CONTROL_CONFIG_SIZE(x)	(((x) >> 4) << 16)
+#define VIC_EXECUTE_AWAKEN		BIT(8)
+#define VIC_APPLICATION_COMPOSITOR	1
+
+void vic_fill_detile_config(void *config, const struct vic_detile *params)
+{
+	struct vic_config_struct *c = config;
+	u32 w = params->width, h = ALIGN(params->height, 2);
+	u32 dw = params->out_width, dh = ALIGN(params->out_height, 2);
+	u32 left = params->left, top = params->top;
+	u32 format = VIC_T_Y8___U8V8_N420, step = 1, alpha_fill = 0;
+	u32 chroma_loc_vert = 1;
+	u32 src_rows, dst_rows;
+
+	/* P010 is detiled one plane at a time. */
+	switch (params->pass) {
+	case VIC_DETILE_NV12:
+		break;
+	case VIC_DETILE_P010_LUMA:
+		format = VIC_T_R5G6B5;
+		step = 2;
+		chroma_loc_vert = 0;
+		break;
+	case VIC_DETILE_P010_CHROMA:
+		format = VIC_T_A8R8G8B8;
+		step = 4;
+		chroma_loc_vert = 0;
+		alpha_fill = VIC_ALPHA_FILL_SOURCE_STREAM;
+		w /= 2;
+		h /= 2;
+		dw /= 2;
+		dh /= 2;
+		left /= 2;
+		top /= 2;
+		break;
+	}
+	src_rows = ALIGN(h, 32);
+	dst_rows = dh;
+
+	memset(c, 0, sizeof(*c));
+
+	c->pipe.downsample = cpu_to_le32(VIC_RECT(1 << 2, 1 << 2));
+
+	c->output.alpha_fill = cpu_to_le32(alpha_fill);
+	c->output.target_rect_h = cpu_to_le32(VIC_RECT(0, dw - 1));
+	c->output.target_rect_v = cpu_to_le32(VIC_RECT(0, dh - 1));
+
+	c->out_surface.format = cpu_to_le32(VIC_SURFACE_FORMAT(format, 0, 0,
+							       VIC_BLK_KIND_PITCH, 0, 0));
+	c->out_surface.size = cpu_to_le32(VIC_SURFACE_DIMS(dw, dh));
+	c->out_surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride / step,
+							   dst_rows));
+	c->out_surface.chroma = step > 1 ? cpu_to_le32(VIC_SURFACE_DIMS_UNUSED) :
+			cpu_to_le32(VIC_SURFACE_DIMS(params->dst_stride / 2,
+						     dst_rows / 2));
+
+	c->slot[0].config.flags = cpu_to_le32(BIT(0) | BIT(8));
+	c->slot[0].config.clamp = cpu_to_le32(1023 << 10);
+	c->slot[0].config.alpha = cpu_to_le32(1023 | BIT(10));
+	c->slot[0].config.source_rect[0] = cpu_to_le32(left << 16);
+	c->slot[0].config.source_rect[1] = cpu_to_le32((left + dw - 1) << 16);
+	c->slot[0].config.source_rect[2] = cpu_to_le32(top << 16);
+	c->slot[0].config.source_rect[3] = cpu_to_le32((top + dh - 1) << 16);
+	c->slot[0].config.dest_rect[0] = cpu_to_le32(VIC_RECT(0, dw - 1));
+	c->slot[0].config.dest_rect[1] = cpu_to_le32(VIC_RECT(0, dh - 1));
+
+	/* Chroma sited left, block-linear GOB height 2, 32Bx8 cache width. */
+	c->slot[0].surface.format =
+		cpu_to_le32(VIC_SURFACE_FORMAT(format, 0, chroma_loc_vert,
+					       VIC_BLK_KIND_GENERIC_16BX2, 1, 1));
+	c->slot[0].surface.size = cpu_to_le32(VIC_SURFACE_DIMS(w, h));
+	c->slot[0].surface.luma = cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride / step,
+							       src_rows));
+	c->slot[0].surface.chroma = step > 1 ? cpu_to_le32(VIC_SURFACE_DIMS_UNUSED) :
+			cpu_to_le32(VIC_SURFACE_DIMS(params->src_stride / 2,
+						     src_rows / 2));
+}
+
+#define VIC_METHOD_APPLICATION_ID	0x080
+#define VIC_METHOD_EXECUTE		0x0c0
+#define VIC_METHOD_SURFACE0_LUMA	0x100
+#define VIC_METHOD_SURFACE0_CHROMA_U	0x101
+#define VIC_METHOD_CONTROL_PARAMS	0x1c1
+#define VIC_METHOD_CONFIG_STRUCT	0x1c2
+#define VIC_METHOD_FILTER_STRUCT	0x1c3
+#define VIC_METHOD_OUT_LUMA		0x1c8
+#define VIC_METHOD_OUT_CHROMA_U		0x1c9
+
+void vic_emit_detile(struct falcon_gather *g, dma_addr_t config,
+		     dma_addr_t filter, dma_addr_t src_luma, dma_addr_t src_chroma,
+		     dma_addr_t dst_luma, dma_addr_t dst_chroma)
+{
+	falcon_gather_method(g, VIC_METHOD_APPLICATION_ID,
+			     VIC_APPLICATION_COMPOSITOR);
+	falcon_gather_method(g, VIC_METHOD_CONTROL_PARAMS,
+			     VIC_CONTROL_CONFIG_SIZE(VIC_CONFIG_SIZE) |
+			     VIC_CONTROL_FALCON_CONTROL | VIC_CONTROL_GPTIMER_ON);
+	falcon_gather_address(g, VIC_METHOD_CONFIG_STRUCT, config);
+	falcon_gather_address(g, VIC_METHOD_FILTER_STRUCT, filter);
+	falcon_gather_address(g, VIC_METHOD_SURFACE0_LUMA, src_luma);
+	falcon_gather_address(g, VIC_METHOD_SURFACE0_CHROMA_U, src_chroma);
+	falcon_gather_address(g, VIC_METHOD_OUT_LUMA, dst_luma);
+	falcon_gather_address(g, VIC_METHOD_OUT_CHROMA_U, dst_chroma);
+	falcon_gather_method(g, VIC_METHOD_EXECUTE, VIC_EXECUTE_AWAKEN);
+}
+
+/* The VIC that takes VicConfigStruct 4.0, which is what the helpers above fill. */
+struct tegra_drm_client *vic_find_detiler(struct tegra_drm *tegra)
+{
+	struct tegra_drm_client *client, *found = NULL;
+
+	mutex_lock(&tegra->clients_lock);
+	list_for_each_entry(client, &tegra->clients, list) {
+		if (client->base.class == HOST1X_CLASS_VIC &&
+		    client->version == 0x21) {
+			found = client;
+			break;
+		}
+	}
+	mutex_unlock(&tegra->clients_lock);
+
+	return found;
+}
+
 /* Firmware may only be loaded once the IOMMU carveout exists. */
 static void vic_late_init(struct tegra_drm_client *client)
 {
