@@ -215,23 +215,27 @@ static int nvdec_exit(struct host1x_client *client)
 	pm_runtime_dont_use_autosuspend(client->dev);
 	pm_runtime_force_suspend(client->dev);
 
+	/* Before detaching, which forgets the group the firmware was allocated for. */
+	if (nvdec->falcon.firmware.virt) {
+		if (client->group) {
+			dma_unmap_single(nvdec->dev, nvdec->falcon.firmware.phys,
+					 nvdec->falcon.firmware.size, DMA_TO_DEVICE);
+			tegra_drm_free(tegra, nvdec->falcon.firmware.size,
+				       nvdec->falcon.firmware.virt,
+				       nvdec->falcon.firmware.iova);
+		} else {
+			dma_free_coherent(nvdec->dev, nvdec->falcon.firmware.size,
+					  nvdec->falcon.firmware.virt,
+					  nvdec->falcon.firmware.iova);
+		}
+		nvdec->falcon.firmware.virt = NULL;
+	}
+
 	host1x_syncpt_put(client->syncpts[0]);
 	host1x_channel_put(nvdec->channel);
 	host1x_client_iommu_detach(client);
 
 	nvdec->channel = NULL;
-
-	if (client->group) {
-		dma_unmap_single(nvdec->dev, nvdec->falcon.firmware.phys,
-				 nvdec->falcon.firmware.size, DMA_TO_DEVICE);
-		tegra_drm_free(tegra, nvdec->falcon.firmware.size,
-			       nvdec->falcon.firmware.virt,
-			       nvdec->falcon.firmware.iova);
-	} else {
-		dma_free_coherent(nvdec->dev, nvdec->falcon.firmware.size,
-				  nvdec->falcon.firmware.virt,
-				  nvdec->falcon.firmware.iova);
-	}
 
 	return 0;
 }
