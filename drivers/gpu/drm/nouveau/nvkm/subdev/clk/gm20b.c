@@ -736,7 +736,7 @@ gm20b_clk_fini(struct nvkm_clk *base)
 	gm20b_pllg_disable(clk);
 
 	/* set IDDQ */
-	nvkm_mask(device, GPCPLL_CFG, GPCPLL_CFG_IDDQ, 1);
+	nvkm_mask(device, GPCPLL_CFG, GPCPLL_CFG_IDDQ, GPCPLL_CFG_IDDQ);
 }
 
 static int
