@@ -208,23 +208,27 @@ static int vic_exit(struct host1x_client *client)
 	pm_runtime_dont_use_autosuspend(client->dev);
 	pm_runtime_force_suspend(client->dev);
 
+	/* Before detaching, which forgets the group the firmware was allocated for. */
+	if (vic->falcon.firmware.virt) {
+		if (client->group) {
+			dma_unmap_single(vic->dev, vic->falcon.firmware.phys,
+					 vic->falcon.firmware.size, DMA_TO_DEVICE);
+			tegra_drm_free(tegra, vic->falcon.firmware.size,
+				       vic->falcon.firmware.virt,
+				       vic->falcon.firmware.iova);
+		} else {
+			dma_free_coherent(vic->dev, vic->falcon.firmware.size,
+					  vic->falcon.firmware.virt,
+					  vic->falcon.firmware.iova);
+		}
+		vic->falcon.firmware.virt = NULL;
+	}
+
 	host1x_syncpt_put(client->syncpts[0]);
 	host1x_channel_put(vic->channel);
 	host1x_client_iommu_detach(client);
 
 	vic->channel = NULL;
-
-	if (client->group) {
-		dma_unmap_single(vic->dev, vic->falcon.firmware.phys,
-				 vic->falcon.firmware.size, DMA_TO_DEVICE);
-		tegra_drm_free(tegra, vic->falcon.firmware.size,
-			       vic->falcon.firmware.virt,
-			       vic->falcon.firmware.iova);
-	} else {
-		dma_free_coherent(vic->dev, vic->falcon.firmware.size,
-				  vic->falcon.firmware.virt,
-				  vic->falcon.firmware.iova);
-	}
 
 	return 0;
 }
