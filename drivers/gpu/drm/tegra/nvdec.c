@@ -43,6 +43,10 @@ struct nvdec {
 	struct clk_bulk_data clks[3];
 	unsigned int num_clks;
 	struct reset_control *reset;
+	/* Between late_init() and early_exit(): firmware may be loaded. */
+	bool ready;
+	/* Active when early_exit() suspended it: resumed again by late_init(). */
+	bool resume_at_init;
 
 	/* Platform configuration */
 	const struct nvdec_config *config;
@@ -212,9 +216,6 @@ static int nvdec_exit(struct host1x_client *client)
 	if (err < 0)
 		return err;
 
-	pm_runtime_dont_use_autosuspend(client->dev);
-	pm_runtime_force_suspend(client->dev);
-
 	/* Before detaching, which forgets the group the firmware was allocated for. */
 	if (nvdec->falcon.firmware.virt) {
 		if (client->group) {
@@ -313,6 +314,10 @@ static __maybe_unused int nvdec_runtime_resume(struct device *dev)
 	struct nvdec *nvdec = dev_get_drvdata(dev);
 	int err;
 
+	/* Not without the IOMMU domain, which a system resume may try. */
+	if (!nvdec->ready)
+		return -ENODEV;
+
 	err = clk_bulk_prepare_enable(nvdec->num_clks, nvdec->clks);
 	if (err < 0)
 		return err;
@@ -324,6 +329,16 @@ static __maybe_unused int nvdec_runtime_resume(struct device *dev)
 		if (err < 0)
 			goto disable;
 	} else {
+		/* In reset if it was suspended with its power domain left on. */
+		err = reset_control_acquire(nvdec->reset);
+		if (err < 0)
+			goto disable;
+
+		err = reset_control_deassert(nvdec->reset);
+		reset_control_release(nvdec->reset);
+		if (err < 0)
+			goto disable;
+
 		err = nvdec_load_falcon_firmware(nvdec);
 		if (err < 0)
 			goto disable;
@@ -346,9 +361,51 @@ static __maybe_unused int nvdec_runtime_suspend(struct device *dev)
 
 	host1x_channel_stop(nvdec->channel);
 
+	/* Also when the power domain stays on, see nvdec_early_exit(). */
+	if (!nvdec->config->has_riscv && !reset_control_acquire(nvdec->reset)) {
+		reset_control_assert(nvdec->reset);
+		reset_control_release(nvdec->reset);
+	}
+
 	clk_bulk_disable_unprepare(nvdec->num_clks, nvdec->clks);
 
 	return 0;
+}
+
+/* Firmware may only be loaded once the IOMMU carveout exists. */
+static void nvdec_late_init(struct tegra_drm_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(client);
+	int err;
+
+	nvdec->ready = true;
+	pm_runtime_use_autosuspend(nvdec->dev);
+	pm_runtime_set_autosuspend_delay(nvdec->dev, 500);
+	pm_runtime_enable(nvdec->dev);
+
+	if (nvdec->resume_at_init) {
+		nvdec->resume_at_init = false;
+		err = pm_runtime_resume(nvdec->dev);
+		if (err < 0)
+			dev_err(nvdec->dev, "failed to resume: %d\n", err);
+	}
+}
+
+/* Leaves the engine off and runtime PM disabled, whoever holds a reference. */
+static void nvdec_early_exit(struct tegra_drm_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(client);
+
+	nvdec->ready = false;
+	pm_runtime_dont_use_autosuspend(nvdec->dev);
+	pm_runtime_disable(nvdec->dev);
+	if (pm_runtime_status_suspended(nvdec->dev))
+		return;
+
+	/* Cannot fail. */
+	nvdec_runtime_suspend(nvdec->dev);
+	pm_runtime_set_suspended(nvdec->dev);
+	nvdec->resume_at_init = true;
 }
 
 static int nvdec_open_channel(struct tegra_drm_client *client,
@@ -381,6 +438,8 @@ static const struct tegra_drm_client_ops nvdec_ops = {
 	.submit = tegra_drm_submit,
 	.get_streamid_offset = tegra_drm_get_streamid_offset_thi,
 	.can_use_memory_ctx = nvdec_can_use_memory_ctx,
+	.late_init = nvdec_late_init,
+	.early_exit = nvdec_early_exit,
 };
 
 #define NVIDIA_TEGRA_210_NVDEC_FIRMWARE "nvidia/tegra210/nvdec.bin"
@@ -512,6 +571,13 @@ static int nvdec_probe(struct platform_device *pdev)
 		err = falcon_init(&nvdec->falcon);
 		if (err < 0)
 			return err;
+
+		nvdec->reset = devm_reset_control_get_optional_exclusive_released(dev, "nvdec");
+		if (IS_ERR(nvdec->reset)) {
+			err = dev_err_probe(dev, PTR_ERR(nvdec->reset),
+					    "failed to get reset\n");
+			goto exit_falcon;
+		}
 	}
 
 	platform_set_drvdata(pdev, nvdec);
@@ -534,10 +600,6 @@ static int nvdec_probe(struct platform_device *pdev)
 		goto exit_falcon;
 	}
 
-	pm_runtime_enable(dev);
-	pm_runtime_use_autosuspend(dev);
-	pm_runtime_set_autosuspend_delay(dev, 500);
-
 	return 0;
 
 exit_falcon:
@@ -550,7 +612,6 @@ static void nvdec_remove(struct platform_device *pdev)
 {
 	struct nvdec *nvdec = platform_get_drvdata(pdev);
 
-	pm_runtime_disable(&pdev->dev);
 	host1x_client_unregister(&nvdec->client.base);
 	falcon_exit(&nvdec->falcon);
 }
