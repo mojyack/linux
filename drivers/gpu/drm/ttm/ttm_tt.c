@@ -32,6 +32,7 @@
 #define pr_fmt(fmt) "[TTM] " fmt
 
 #include <linux/cc_platform.h>
+#include <linux/dma-mapping.h>
 #include <linux/debugfs.h>
 #include <linux/export.h>
 #include <linux/file.h>
@@ -370,6 +371,7 @@ EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_tt_swapout);
 int ttm_tt_populate(struct ttm_device *bdev,
 		    struct ttm_tt *ttm, struct ttm_operation_ctx *ctx)
 {
+	pgoff_t i;
 	int ret;
 
 	if (!ttm)
@@ -411,6 +413,13 @@ int ttm_tt_populate(struct ttm_device *bdev,
 			ttm_tt_unpopulate(bdev, ttm);
 			return ret;
 		}
+		/* The pool mapped the pages before the swap-in wrote them. */
+		if (ttm->dma_address && !ttm_pool_uses_dma_alloc(&bdev->pool))
+			for (i = 0; i < ttm->num_pages; ++i)
+				dma_sync_single_for_device(bdev->pool.dev,
+							   ttm->dma_address[i],
+							   PAGE_SIZE,
+							   DMA_BIDIRECTIONAL);
 	}
 
 	return 0;
