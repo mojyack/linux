@@ -35,6 +35,7 @@
 #define STMFTS_FULL_FORCE_CALIBRATION		0xa2
 #define STMFTS_MS_CX_TUNING			0xa3
 #define STMFTS_SS_CX_TUNING			0xa4
+#define STMFTS_WRITE_REGISTER			0xb6
 
 /* events */
 #define STMFTS_EV_NO_EVENT			0x00
@@ -51,6 +52,15 @@
 #define STMFTS_EV_SLEEP_OUT_CONTROLLER_READY	0x11
 #define STMFTS_EV_STATUS			0x16
 #define STMFTS_EV_DEBUG				0xdb
+
+/* FTM4CD60D: what a status event reports done, in its second byte */
+#define STMFTS_STATUS_MS_CX_TUNING_DONE		0x01
+#define STMFTS_STATUS_SS_CX_TUNING_DONE		0x02
+#define STMFTS_STATUS_FORCE_CAL_DONE		0x06
+
+/* FTM4CD60D interrupt control register */
+#define STMFTS_FTM4_REG_INT			0x002c
+#define STMFTS_FTM4_INT_ENABLE			0x48
 
 /* multi touch related event masks */
 #define STMFTS_MASK_EVENT_ID			0x0f
@@ -70,6 +80,11 @@
 #define STMFTS_MAX_FINGERS	10
 #define STMFTS_DEV_NAME		"stmfts"
 
+enum stmfts_chip {
+	STMFTS_FTS,
+	STMFTS_FTM4CD60D,
+};
+
 static const struct regulator_bulk_data stmfts_supplies[] = {
 	{ .supply = "vdd" },
 	{ .supply = "avdd" },
@@ -77,6 +92,7 @@ static const struct regulator_bulk_data stmfts_supplies[] = {
 
 struct stmfts_data {
 	struct i2c_client *client;
+	enum stmfts_chip chip;
 	struct input_dev *input;
 	struct gpio_desc *reset_gpio;
 	struct led_classdev led_cdev;
@@ -196,6 +212,22 @@ static void stmfts_report_contact_event(struct stmfts_data *sdata,
 	input_sync(sdata->input);
 }
 
+static void stmfts_ftm4_report_contact_event(struct stmfts_data *sdata,
+					     const u8 event[])
+{
+	u8 slot_id = (event[0] & STMFTS_MASK_TOUCH_ID) >> 4;
+	u16 x = (event[1] << 4) | (event[3] >> 4);
+	u16 y = (event[2] << 4) | (event[3] & 0x0f);
+
+	input_mt_slot(sdata->input, slot_id);
+
+	input_mt_report_slot_state(sdata->input, MT_TOOL_FINGER, true);
+	touchscreen_report_pos(sdata->input, &sdata->prop, x, y, true);
+
+	input_mt_sync_frame(sdata->input);
+	input_sync(sdata->input);
+}
+
 static void stmfts_report_contact_release(struct stmfts_data *sdata,
 					  const u8 event[])
 {
@@ -247,6 +279,35 @@ static void stmfts_report_key_event(struct stmfts_data *sdata, const u8 event[])
 	input_sync(sdata->input);
 }
 
+static bool stmfts_is_reply(struct stmfts_data *sdata, const u8 event[])
+{
+	u8 status;
+
+	if (!sdata->cmd_pending)
+		return false;
+
+	if (sdata->chip != STMFTS_FTM4CD60D)
+		return true;
+
+	switch (sdata->cmd_pending) {
+	case STMFTS_SYSTEM_RESET:
+		return event[0] == STMFTS_EV_CONTROLLER_READY;
+	case STMFTS_MS_CX_TUNING:
+		status = STMFTS_STATUS_MS_CX_TUNING_DONE;
+		break;
+	case STMFTS_SS_CX_TUNING:
+		status = STMFTS_STATUS_SS_CX_TUNING_DONE;
+		break;
+	case STMFTS_FULL_FORCE_CALIBRATION:
+		status = STMFTS_STATUS_FORCE_CAL_DONE;
+		break;
+	default:
+		return false;
+	}
+
+	return event[0] == STMFTS_EV_STATUS && event[1] == status;
+}
+
 static void stmfts_parse_events(struct stmfts_data *sdata)
 {
 	int i;
@@ -258,7 +319,7 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 		case STMFTS_EV_CONTROLLER_READY:
 		case STMFTS_EV_SLEEP_OUT_CONTROLLER_READY:
 		case STMFTS_EV_STATUS:
-			if (sdata->cmd_pending) {
+			if (stmfts_is_reply(sdata, event)) {
 				sdata->cmd_pending = 0;
 				complete(&sdata->cmd_done);
 			}
@@ -272,7 +333,10 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 		switch (event[0] & STMFTS_MASK_EVENT_ID) {
 		case STMFTS_EV_MULTI_TOUCH_ENTER:
 		case STMFTS_EV_MULTI_TOUCH_MOTION:
-			stmfts_report_contact_event(sdata, event);
+			if (sdata->chip == STMFTS_FTM4CD60D)
+				stmfts_ftm4_report_contact_event(sdata, event);
+			else
+				stmfts_report_contact_event(sdata, event);
 			break;
 
 		case STMFTS_EV_MULTI_TOUCH_LEAVE:
@@ -355,6 +419,32 @@ static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
 	/* Keep the reader out until the command is on its way. */
 	scoped_guard(mutex, &sdata->mutex)
 		err = stmfts_command_send(sdata, cmd);
+
+	return stmfts_command_wait(sdata, err);
+}
+
+static int stmfts_ftm4_reset(struct stmfts_data *sdata)
+{
+	static const u8 int_enable[] = {
+		STMFTS_FTM4_REG_INT >> 8,
+		STMFTS_FTM4_REG_INT & 0xff,
+		STMFTS_FTM4_INT_ENABLE,
+	};
+	int err;
+
+	/* Its interrupt output is masked out of reset, the reply included. */
+	scoped_guard(mutex, &sdata->mutex) {
+		err = stmfts_command_send(sdata, STMFTS_SYSTEM_RESET);
+		if (!err) {
+			usleep_range(10000, 15000);
+			err = i2c_smbus_write_i2c_block_data(sdata->client,
+							     STMFTS_WRITE_REGISTER,
+							     sizeof(int_enable),
+							     int_enable);
+			if (err)
+				sdata->cmd_pending = 0;
+		}
+	}
 
 	return stmfts_command_wait(sdata, err);
 }
@@ -516,6 +606,9 @@ static ssize_t stmfts_sysfs_hover_enable_write(struct device *dev,
 	bool hover;
 	int err;
 
+	if (sdata->chip == STMFTS_FTM4CD60D)
+		return -EOPNOTSUPP;
+
 	if (kstrtoul(buf, 0, &value))
 		return -EINVAL;
 
@@ -593,13 +686,19 @@ static int stmfts_configure(struct stmfts_data *sdata)
 {
 	int err;
 
-	err = stmfts_command(sdata, STMFTS_SYSTEM_RESET);
+	if (sdata->chip == STMFTS_FTM4CD60D)
+		err = stmfts_ftm4_reset(sdata);
+	else
+		err = stmfts_command(sdata, STMFTS_SYSTEM_RESET);
 	if (err)
 		return err;
 
-	err = stmfts_command(sdata, STMFTS_SLEEP_OUT);
-	if (err)
-		return err;
+	/* The FTM4CD60D has no sleep commands; sense on/off gate it. */
+	if (sdata->chip != STMFTS_FTM4CD60D) {
+		err = stmfts_command(sdata, STMFTS_SLEEP_OUT);
+		if (err)
+			return err;
+	}
 
 	/* optional tuning */
 	err = stmfts_command(sdata, STMFTS_MS_CX_TUNING);
@@ -651,7 +750,7 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 		goto err_disable_irq;
 
 	/* Nobody uses it unless resuming an open device; best effort. */
-	if (!sdata->running)
+	if (!sdata->running && sdata->chip != STMFTS_FTM4CD60D)
 		(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 
 	sdata->powered = true;
@@ -724,6 +823,7 @@ static int stmfts_probe(struct i2c_client *client)
 	i2c_set_clientdata(client, sdata);
 
 	sdata->client = client;
+	sdata->chip = (uintptr_t)i2c_get_match_data(client);
 	mutex_init(&sdata->mutex);
 	init_completion(&sdata->cmd_done);
 
@@ -752,11 +852,17 @@ static int stmfts_probe(struct i2c_client *client)
 	input_set_capability(sdata->input, EV_ABS, ABS_MT_POSITION_Y);
 	touchscreen_parse_properties(sdata->input, true, &sdata->prop);
 
-	input_set_abs_params(sdata->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_MT_TOUCH_MINOR, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_MT_ORIENTATION, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_MT_PRESSURE, 0, 255, 0, 0);
-	input_set_abs_params(sdata->input, ABS_DISTANCE, 0, 255, 0, 0);
+	if (sdata->chip != STMFTS_FTM4CD60D) {
+		input_set_abs_params(sdata->input, ABS_MT_TOUCH_MAJOR,
+				     0, 255, 0, 0);
+		input_set_abs_params(sdata->input, ABS_MT_TOUCH_MINOR,
+				     0, 255, 0, 0);
+		input_set_abs_params(sdata->input, ABS_MT_ORIENTATION,
+				     0, 255, 0, 0);
+		input_set_abs_params(sdata->input, ABS_MT_PRESSURE,
+				     0, 255, 0, 0);
+		input_set_abs_params(sdata->input, ABS_DISTANCE, 0, 255, 0, 0);
+	}
 
 	sdata->use_key = device_property_read_bool(dev, "touch-key-connected");
 	if (sdata->use_key) {
@@ -829,6 +935,9 @@ static int stmfts_runtime_suspend(struct device *dev)
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	int ret;
 
+	if (sdata->chip == STMFTS_FTM4CD60D)
+		return 0;
+
 	ret = i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
 	if (ret)
 		dev_warn(dev, "failed to suspend device: %d\n", ret);
@@ -841,6 +950,9 @@ static int stmfts_runtime_resume(struct device *dev)
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 	struct i2c_client *client = sdata->client;
 	int ret;
+
+	if (sdata->chip == STMFTS_FTM4CD60D)
+		return 0;
 
 	ret = i2c_smbus_write_byte(client, STMFTS_SLEEP_OUT);
 	if (ret)
@@ -898,7 +1010,8 @@ static const struct dev_pm_ops stmfts_pm_ops = {
 
 #ifdef CONFIG_OF
 static const struct of_device_id stmfts_of_match[] = {
-	{ .compatible = "st,stmfts", },
+	{ .compatible = "st,ftm4cd60d", .data = (void *)STMFTS_FTM4CD60D },
+	{ .compatible = "st,stmfts", .data = (void *)STMFTS_FTS },
 	{ },
 };
 MODULE_DEVICE_TABLE(of, stmfts_of_match);
