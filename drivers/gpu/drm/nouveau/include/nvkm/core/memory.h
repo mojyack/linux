@@ -12,6 +12,12 @@ struct nvkm_tags {
 	refcount_t refcount;
 };
 
+/* Compression state of contents that outlive their memory object. */
+struct nvkm_memory_keep {
+	struct nvkm_tags *tags;
+	struct nvkm_mm_node *iova; /* the tags are only valid at this address */
+};
+
 enum nvkm_memory_target {
 	NVKM_MEM_TARGET_INST_SR_LOST, /* instance memory - not preserved across suspend */
 	NVKM_MEM_TARGET_INST, /* instance memory */
@@ -25,6 +31,7 @@ struct nvkm_memory {
 	const struct nvkm_memory_ptrs *ptrs;
 	struct kref kref;
 	struct nvkm_tags *tags;
+	struct nvkm_memory_keep *keep; /* outlives this memory */
 };
 
 struct nvkm_memory_func {

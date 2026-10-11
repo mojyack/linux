@@ -127,16 +127,39 @@ nvkm_mem_iommu_usable(struct nvkm_mmu *mmu)
 }
 
 static void
+nvkm_mem_iommu_put(struct nvkm_device_tegra *tdev, struct nvkm_mem *mem)
+{
+	struct nvkm_memory_keep *keep = mem->memory.keep;
+
+	mutex_lock(&tdev->iommu.mutex);
+	if (keep && keep->tags && !keep->iova)
+		swap(keep->iova, mem->iommu);
+	else
+		nvkm_mm_free(&tdev->iommu.mm, &mem->iommu);
+	mutex_unlock(&tdev->iommu.mutex);
+}
+
+static void
 nvkm_mem_iommu_fini(struct nvkm_mem *mem)
 {
 	struct nvkm_device_tegra *tdev = nvkm_mem_tegra(mem->mmu);
 	u64 addr = (u64)mem->iommu->offset << tdev->iommu.pgshift;
 
 	iommu_unmap(tdev->iommu.domain, addr, mem->pages << PAGE_SHIFT);
+	nvkm_mem_iommu_put(tdev, mem);
+}
 
-	mutex_lock(&tdev->iommu.mutex);
-	nvkm_mm_free(&tdev->iommu.mm, &mem->iommu);
-	mutex_unlock(&tdev->iommu.mutex);
+void
+nvkm_mem_keep_fini(struct nvkm_mmu *mmu, struct nvkm_memory_keep *keep)
+{
+	struct nvkm_device_tegra *tdev = nvkm_mem_tegra(mmu);
+
+	if (keep->iova) {
+		mutex_lock(&tdev->iommu.mutex);
+		nvkm_mm_free(&tdev->iommu.mm, &keep->iova);
+		mutex_unlock(&tdev->iommu.mutex);
+	}
+	nvkm_memory_tags_put(&keep->tags);
 }
 
 /* Flatten the scattered PAGE_SIZE pages into one contiguous IOVA range, so
@@ -146,6 +169,7 @@ static int
 nvkm_mem_iommu_init(struct nvkm_mem *mem, u8 page)
 {
 	struct nvkm_device_tegra *tdev = nvkm_mem_tegra(mem->mmu);
+	struct nvkm_memory_keep *keep = mem->memory.keep;
 	u64 addr, i, n;
 	u32 align;
 	int ret;
@@ -157,8 +181,14 @@ nvkm_mem_iommu_init(struct nvkm_mem *mem, u8 page)
 	align = max_t(u32, 1 << (page - PAGE_SHIFT), SZ_128K >> PAGE_SHIFT);
 
 	mutex_lock(&tdev->iommu.mutex);
-	ret = nvkm_mm_head(&tdev->iommu.mm, 0, 1, mem->pages, mem->pages,
-			   align, &mem->iommu);
+	if (keep && keep->iova) {
+		ret = keep->iova->length == mem->pages ? 0 : -EINVAL;
+		if (!ret)
+			swap(mem->iommu, keep->iova);
+	} else {
+		ret = nvkm_mm_head(&tdev->iommu.mm, 0, 1, mem->pages, mem->pages,
+				   align, &mem->iommu);
+	}
 	mutex_unlock(&tdev->iommu.mutex);
 	if (ret)
 		return ret;
@@ -177,9 +207,7 @@ nvkm_mem_iommu_init(struct nvkm_mem *mem, u8 page)
 				IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
 		if (ret) {
 			iommu_unmap(tdev->iommu.domain, addr, i << PAGE_SHIFT);
-			mutex_lock(&tdev->iommu.mutex);
-			nvkm_mm_free(&tdev->iommu.mm, &mem->iommu);
-			mutex_unlock(&tdev->iommu.mutex);
+			nvkm_mem_iommu_put(tdev, mem);
 			return ret;
 		}
 	}
@@ -303,6 +331,7 @@ nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 			nvkm_memory_ctor(&nvkm_mem_sgl, &mem->memory);
 			mem->sgl = args->v0.sgl;
 		}
+		mem->memory.keep = args->v0.keep;
 
 		if (!IS_ALIGNED(size, PAGE_SIZE))
 			return -EINVAL;

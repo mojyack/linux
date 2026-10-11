@@ -10,6 +10,7 @@ struct nouveau_cli;
 struct nouveau_drm;
 struct nouveau_fence;
 struct nouveau_vma;
+struct nvkm_memory_keep;
 
 struct nouveau_bo {
 	struct ttm_buffer_object bo;
@@ -23,6 +24,7 @@ struct nouveau_bo {
 	bool l2_volatile; /* shared with a device that doesn't see the GPU L2 */
 	/* pages dirtied through the CPU mapping, [first, last) */
 	pgoff_t cpu_wb_first, cpu_wb_last;
+	struct nvkm_memory_keep *keep; /* compression state, across placements */
 	struct ttm_bo_kmap_obj kmap;
 	struct list_head head;
 	struct list_head io_reserve_lru;

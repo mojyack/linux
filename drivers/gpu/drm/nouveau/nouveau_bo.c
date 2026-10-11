@@ -44,6 +44,8 @@
 #include <nvif/if500b.h>
 #include <nvif/if900b.h>
 
+#include <subdev/mmu.h>
+
 static int nouveau_ttm_tt_bind(struct ttm_device *bdev, struct ttm_tt *ttm,
 			       struct ttm_resource *reg);
 static void nouveau_ttm_tt_unbind(struct ttm_device *bdev, struct ttm_tt *ttm);
@@ -163,6 +165,10 @@ nouveau_bo_del_ttm(struct ttm_buffer_object *bo)
 		dma_resv_fini(&bo->base._resv);
 	}
 
+	if (nvbo->keep) {
+		nvkm_mem_keep_fini(nvxx_device(drm)->mmu, nvbo->keep);
+		kfree(nvbo->keep);
+	}
 	kfree(nvbo);
 }
 
@@ -1528,18 +1534,6 @@ nouveau_bo_fence(struct nouveau_bo *nvbo, struct nouveau_fence *fence, bool excl
 			   DMA_RESV_USAGE_WRITE : DMA_RESV_USAGE_READ);
 }
 
-static bool
-nouveau_bo_eviction_valuable(struct ttm_buffer_object *bo,
-			     const struct ttm_place *place)
-{
-	/* Nothing decompresses a host buffer on its way out: its tags go. */
-	if (bo->resource->mem_type == TTM_PL_TT &&
-	    nouveau_mem(bo->resource)->comp)
-		return false;
-
-	return ttm_bo_eviction_valuable(bo, place);
-}
-
 static void
 nouveau_bo_delete_mem_notify(struct ttm_buffer_object *bo)
 {
@@ -1551,7 +1545,7 @@ struct ttm_device_funcs nouveau_bo_driver = {
 	.ttm_tt_populate = &nouveau_ttm_tt_populate,
 	.ttm_tt_unpopulate = &nouveau_ttm_tt_unpopulate,
 	.ttm_tt_destroy = &nouveau_ttm_tt_destroy,
-	.eviction_valuable = nouveau_bo_eviction_valuable,
+	.eviction_valuable = ttm_bo_eviction_valuable,
 	.evict_flags = nouveau_bo_evict_flags,
 	.delete_mem_notify = nouveau_bo_delete_mem_notify,
 	.move = nouveau_bo_move,
