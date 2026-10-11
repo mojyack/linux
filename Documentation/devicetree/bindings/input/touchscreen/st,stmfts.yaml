@@ -14,12 +14,18 @@ description:
   functionality. Along with it the user can enable the touchkey which can work
   as a basic HOME and BACK key for phones.
 
+  The FTM4CD60D, found in the Nintendo Switch, is not compatible with
+  st,stmfts, as its firmware packs the contact coordinates differently, comes
+  out of reset with its interrupt output masked and has no sleep commands.
+
 allOf:
   - $ref: touchscreen.yaml#
 
 properties:
   compatible:
-    const: st,stmfts
+    enum:
+      - st,ftm4cd60d
+      - st,stmfts
 
   reg:
     maxItems: 1
