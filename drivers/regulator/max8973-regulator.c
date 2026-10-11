@@ -27,6 +27,7 @@
 #include <linux/thermal.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 
 /* Register definitions */
 #define MAX8973_VOUT					0x0
@@ -110,6 +111,8 @@ struct max8973_chip {
 	int junction_temp_warning;
 	int irq;
 	struct thermal_zone_device *tz_device;
+	struct delayed_work tz_irq_work;
+	bool tz_warning;
 };
 
 /*
@@ -444,6 +447,10 @@ static int max8973_thermal_read_temp(struct thermal_zone_device *tz, int *temp)
 		return ret;
 	}
 
+	/* Only the sample the work hands to the thermal core decides */
+	if (current_work() == &mchip->tz_irq_work.work)
+		mchip->tz_warning = val & MAX77621_CHIPID_TJINT_S;
+
 	/* +1 degC to trigger cool device */
 	if (val & MAX77621_CHIPID_TJINT_S)
 		*temp = mchip->junction_temp_warning + 1000;
@@ -460,7 +467,36 @@ static irqreturn_t max8973_thermal_irq(int irq, void *data)
 	thermal_zone_device_update(mchip->tz_device,
 				   THERMAL_EVENT_UNSPECIFIED);
 
+	/* Keep INTB masked until the thermal core reads TJINT_S clear */
+	disable_irq_nosync(irq);
+	queue_delayed_work(system_freezable_wq, &mchip->tz_irq_work, HZ);
+
 	return IRQ_HANDLED;
+}
+
+static void max8973_thermal_irq_work(struct work_struct *work)
+{
+	struct max8973_chip *mchip = container_of(to_delayed_work(work),
+						  struct max8973_chip,
+						  tz_irq_work);
+
+	mchip->tz_warning = true;
+	thermal_zone_device_update(mchip->tz_device,
+				   THERMAL_EVENT_UNSPECIFIED);
+
+	if (mchip->tz_warning)
+		queue_delayed_work(system_freezable_wq, &mchip->tz_irq_work,
+				   HZ);
+	else
+		enable_irq(mchip->irq);
+}
+
+static void max8973_thermal_irq_stop(void *data)
+{
+	struct max8973_chip *mchip = data;
+
+	disable_irq(mchip->irq);
+	cancel_delayed_work_sync(&mchip->tz_irq_work);
 }
 
 static const struct thermal_zone_device_ops max77621_tz_ops = {
@@ -484,15 +520,17 @@ static int max8973_thermal_init(struct max8973_chip *mchip)
 			ret);
 		return ret;
 	}
+	mchip->tz_device = tzd;
 
 	if (mchip->irq <= 0)
 		return 0;
 
+	INIT_DELAYED_WORK(&mchip->tz_irq_work, max8973_thermal_irq_work);
 	irq_flags = irq_get_trigger_type(mchip->irq);
 
 	ret = devm_request_threaded_irq(mchip->dev, mchip->irq, NULL,
 					max8973_thermal_irq,
-					IRQF_ONESHOT | IRQF_SHARED | irq_flags,
+					IRQF_ONESHOT | irq_flags,
 					dev_name(mchip->dev), mchip);
 	if (ret < 0) {
 		dev_err(mchip->dev, "Failed to request irq %d, %d\n",
@@ -500,7 +538,8 @@ static int max8973_thermal_init(struct max8973_chip *mchip)
 		return ret;
 	}
 
-	return 0;
+	return devm_add_action_or_reset(mchip->dev, max8973_thermal_irq_stop,
+					mchip);
 }
 
 static bool max8973_volatile_reg(struct device *dev, unsigned int reg)
@@ -654,6 +693,7 @@ static int max8973_probe(struct i2c_client *client)
 	i2c_set_clientdata(client, max);
 	max->ops = max8973_dcdc_ops;
 	max->dev = &client->dev;
+	max->irq = client->irq;
 	max->desc.name = id->name;
 	max->desc.id = 0;
 	max->desc.ops = &max->ops;
