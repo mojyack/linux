@@ -191,6 +191,7 @@ static void stmfts_report_contact_event(struct stmfts_data *sdata,
 	input_report_abs(sdata->input, ABS_MT_PRESSURE, area);
 	input_report_abs(sdata->input, ABS_MT_ORIENTATION, orientation);
 
+	input_mt_sync_frame(sdata->input);
 	input_sync(sdata->input);
 }
 
@@ -202,6 +203,7 @@ static void stmfts_report_contact_release(struct stmfts_data *sdata,
 	input_mt_slot(sdata->input, slot_id);
 	input_mt_report_slot_inactive(sdata->input);
 
+	input_mt_sync_frame(sdata->input);
 	input_sync(sdata->input);
 }
 
