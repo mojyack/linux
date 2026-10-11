@@ -291,10 +291,8 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 			break;
 
 		case STMFTS_EV_ERROR:
-			dev_warn(&sdata->client->dev,
-				 "error code: 0x%x%x%x%x%x%x",
-				 event[6], event[5], event[4],
-				 event[3], event[2], event[1]);
+			dev_warn(&sdata->client->dev, "error event: %*ph\n",
+				 STMFTS_EVENT_SIZE - 1, &event[1]);
 			break;
 
 		default:
