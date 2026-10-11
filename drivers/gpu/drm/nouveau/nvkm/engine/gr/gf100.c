@@ -157,47 +157,72 @@ struct gf100_gr_object {
 	struct gf100_gr_chan *chan;
 };
 
+/* What the ROP stores for a clear to ds[] without ZBC, repeated to 128 bits */
+static int
+gf100_gr_zbc_color_l2(struct gf100_gr *gr, u8 format, const u32 ds[4], u32 l2[4])
+{
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		if ((ds[i] & 0x7f800000) == 0x7f800000)
+			return -EINVAL;
+	}
+
+	switch (format) {
+	case FERMI_A_ZBC_COLOR_V0_FMT_RF32_GF32_BF32_AF32:
+		/* Stored as given, as gf100_gr_zbc_init()'s own entries. */
+		memcpy(l2, ds, 4 * sizeof(u32));
+		return 0;
+	case FERMI_A_ZBC_COLOR_V0_FMT_ZERO:
+	case FERMI_A_ZBC_COLOR_V0_FMT_UNORM_ONE:
+	case FERMI_A_ZBC_COLOR_V0_FMT_R16_G16_B16_A16:
+	case FERMI_A_ZBC_COLOR_V0_FMT_RN16_GN16_BN16_AN16:
+	case FERMI_A_ZBC_COLOR_V0_FMT_RS16_GS16_BS16_AS16:
+	case FERMI_A_ZBC_COLOR_V0_FMT_RU16_GU16_BU16_AU16:
+	case FERMI_A_ZBC_COLOR_V0_FMT_RF16_GF16_BF16_AF16:
+	case FERMI_A_ZBC_COLOR_V0_FMT_A8R8G8B8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_A8RL8GL8BL8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_A2B10G10R10:
+	case FERMI_A_ZBC_COLOR_V0_FMT_AU2BU10GU10RU10:
+	case FERMI_A_ZBC_COLOR_V0_FMT_A8B8G8R8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_A8BL8GL8RL8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_AN8BN8GN8RN8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_AS8BS8GS8RS8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_AU8BU8GU8RU8:
+	case FERMI_A_ZBC_COLOR_V0_FMT_A2R10G10B10:
+	case FERMI_A_ZBC_COLOR_V0_FMT_BF10GF11RF11:
+		if (!gr->func->zbc_color_l2)
+			return -EOPNOTSUPP;
+		return gr->func->zbc_color_l2(format, ds, l2);
+	default:
+		return -EINVAL;
+	}
+}
+
 static int
 gf100_fermi_mthd_zbc_color(struct nvkm_object *object, void *data, u32 size)
 {
 	struct gf100_gr *gr = gf100_gr(nvkm_gr(object->engine));
 	union {
-		struct fermi_a_zbc_color_v0 v0;
+		struct fermi_a_zbc_color_v1 v1;
 	} *args = data;
 	int ret = -ENOSYS;
 
-	if (!(ret = nvif_unpack(ret, &data, &size, args->v0, 0, 0, false))) {
-		switch (args->v0.format) {
-		case FERMI_A_ZBC_COLOR_V0_FMT_ZERO:
-		case FERMI_A_ZBC_COLOR_V0_FMT_UNORM_ONE:
-		case FERMI_A_ZBC_COLOR_V0_FMT_RF32_GF32_BF32_AF32:
-		case FERMI_A_ZBC_COLOR_V0_FMT_R16_G16_B16_A16:
-		case FERMI_A_ZBC_COLOR_V0_FMT_RN16_GN16_BN16_AN16:
-		case FERMI_A_ZBC_COLOR_V0_FMT_RS16_GS16_BS16_AS16:
-		case FERMI_A_ZBC_COLOR_V0_FMT_RU16_GU16_BU16_AU16:
-		case FERMI_A_ZBC_COLOR_V0_FMT_RF16_GF16_BF16_AF16:
-		case FERMI_A_ZBC_COLOR_V0_FMT_A8R8G8B8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_A8RL8GL8BL8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_A2B10G10R10:
-		case FERMI_A_ZBC_COLOR_V0_FMT_AU2BU10GU10RU10:
-		case FERMI_A_ZBC_COLOR_V0_FMT_A8B8G8R8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_A8BL8GL8RL8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_AN8BN8GN8RN8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_AS8BS8GS8RS8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_AU8BU8GU8RU8:
-		case FERMI_A_ZBC_COLOR_V0_FMT_A2R10G10B10:
-		case FERMI_A_ZBC_COLOR_V0_FMT_BF10GF11RF11:
-			ret = gf100_gr_zbc_color_get(gr, args->v0.format,
-							   args->v0.ds,
-							   args->v0.l2);
-			if (ret >= 0) {
-				args->v0.index = ret;
-				return 0;
-			}
-			break;
-		default:
-			return -EINVAL;
-		}
+	if (!(ret = nvif_unpack(ret, &data, &size, args->v1, 1, 1, false))) {
+		ret = gf100_gr_zbc_color_l2(gr, args->v1.format, args->v1.ds,
+					    args->v1.l2);
+		if (ret)
+			return ret;
+
+		mutex_lock(&gr->zbc_mutex);
+		ret = gf100_gr_zbc_color_get(gr, args->v1.format, args->v1.ds,
+					     args->v1.l2);
+		mutex_unlock(&gr->zbc_mutex);
+		if (ret < 0)
+			return ret;
+
+		args->v1.index = ret;
+		return 0;
 	}
 
 	return ret;
@@ -208,20 +233,26 @@ gf100_fermi_mthd_zbc_depth(struct nvkm_object *object, void *data, u32 size)
 {
 	struct gf100_gr *gr = gf100_gr(nvkm_gr(object->engine));
 	union {
-		struct fermi_a_zbc_depth_v0 v0;
+		struct fermi_a_zbc_depth_v1 v1;
 	} *args = data;
 	int ret = -ENOSYS;
 
-	if (!(ret = nvif_unpack(ret, &data, &size, args->v0, 0, 0, false))) {
-		switch (args->v0.format) {
-		case FERMI_A_ZBC_DEPTH_V0_FMT_FP32:
-			ret = gf100_gr_zbc_depth_get(gr, args->v0.format,
-							   args->v0.ds,
-							   args->v0.l2);
-			return (ret >= 0) ? 0 : -ENOSPC;
-		default:
+	if (!(ret = nvif_unpack(ret, &data, &size, args->v1, 1, 1, false))) {
+		if (args->v1.format != FERMI_A_ZBC_DEPTH_V0_FMT_FP32 ||
+		    (args->v1.ds & 0x7f800000) == 0x7f800000)
 			return -EINVAL;
-		}
+
+		/* Stored as given, as gf100_gr_zbc_init()'s own entries. */
+		args->v1.l2 = args->v1.ds;
+		mutex_lock(&gr->zbc_mutex);
+		ret = gf100_gr_zbc_depth_get(gr, args->v1.format, args->v1.ds,
+					     args->v1.l2);
+		mutex_unlock(&gr->zbc_mutex);
+		if (ret < 0)
+			return ret;
+
+		args->v1.index = ret;
+		return 0;
 	}
 
 	return ret;
@@ -1016,6 +1047,7 @@ gf100_gr_zbc_init(struct gf100_gr *gr)
 	struct nvkm_ltc *ltc = gr->base.engine.subdev.device->ltc;
 	int index;
 
+	mutex_lock(&gr->zbc_mutex);
 	gf100_gr_zbc_color_get(gr, 1, &zero[0], &zero[4]);
 	gf100_gr_zbc_color_get(gr, 2, &one[0], &one[4]);
 	gf100_gr_zbc_color_get(gr, 4, &f32_0[0], &f32_0[4]);
@@ -1037,6 +1069,7 @@ gf100_gr_zbc_init(struct gf100_gr *gr)
 		for (index = ltc->zbc_depth_min; index <= ltc->zbc_depth_max; index++)
 			gr->func->zbc->clear_stencil(gr, index);
 	}
+	mutex_unlock(&gr->zbc_mutex);
 }
 
 /*
@@ -2642,6 +2675,7 @@ gf100_gr_new_(const struct gf100_gr_fwif *fwif, struct nvkm_device *device,
 		return ret;
 
 	mutex_init(&gr->fecs.mutex);
+	mutex_init(&gr->zbc_mutex);
 
 	ret = nvkm_falcon_ctor(&gf100_gr_flcn, &gr->base.engine.subdev,
 			       "gpccs", 0x41a000, &gr->gpccs.falcon);

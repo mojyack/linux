@@ -101,6 +101,7 @@ struct gf100_gr {
 	struct gf100_gr_zbc_color zbc_color[NVKM_LTC_MAX_ZBC_COLOR_CNT];
 	struct gf100_gr_zbc_depth zbc_depth[NVKM_LTC_MAX_ZBC_DEPTH_CNT];
 	struct gf100_gr_zbc_stencil zbc_stencil[NVKM_LTC_MAX_ZBC_DEPTH_CNT];
+	struct mutex zbc_mutex; /* zbc_color/depth/stencil and their registers */
 
 	u8 rop_nr;
 	u8 gpc_nr;
@@ -197,6 +198,7 @@ struct gf100_gr_func {
 	const struct gf100_grctx_func *grctx;
 	const struct nvkm_therm_clkgate_pack *clkgate_pack;
 	const struct gf100_gr_func_zbc *zbc;
+	int (*zbc_color_l2)(u8 format, const u32 ds[4], u32 l2[4]);
 	struct nvkm_sclass sclass[];
 };
 
