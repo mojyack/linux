@@ -57,6 +57,10 @@ properties:
     maxItems: 1
     description: The CODEC's interrupt output.
 
+  realtek,ldo1-en-gpios:
+    maxItems: 1
+    description: The GPIO that controls the CODEC's LDO1_EN pin.
+
   realtek,in1-differential:
     description:
       Indicate MIC1 input is differential, rather than single-ended.
@@ -152,5 +156,6 @@ examples:
             reg = <0x1a>;
             interrupt-parent = <&gpio>;
             interrupts = <7 IRQ_TYPE_EDGE_FALLING>;
+            realtek,ldo1-en-gpios = <&gpio 3 GPIO_ACTIVE_HIGH>;
         };
     };
