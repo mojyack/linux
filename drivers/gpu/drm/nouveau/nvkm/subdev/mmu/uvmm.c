@@ -396,7 +396,6 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 		.size = args->size,
 		.used = true,
 		.mapref = false,
-		.no_comp = true,
 	};
 	struct nvkm_memory *memory;
 	void *argv = (void *)(uintptr_t)args->argv;
@@ -420,8 +419,11 @@ nvkm_uvmm_mthd_raw_map(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
 		return PTR_ERR(memory);
 	}
 
+	/* Moving VRAM decodes it with the BO's kind, not this one. */
+	vma.no_comp = nvkm_memory_target(memory) == NVKM_MEM_TARGET_VRAM;
 	ret = nvkm_memory_map(memory, args->offset, vmm, &vma, argv, argc);
 
+	nvkm_memory_tags_put(&vma.tags);
 	nvkm_memory_unref(&vma.memory);
 	nvkm_memory_unref(&memory);
 	return ret;
