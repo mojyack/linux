@@ -101,6 +101,7 @@ struct stmfts_data {
 	u8 data[STMFTS_DATA_MAX_SIZE];
 
 	struct completion cmd_done;
+	u8 cmd_pending;		/* awaiting its reply, 0 if none */
 
 	bool use_key;
 	bool led_status;
@@ -248,8 +249,11 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 		case STMFTS_EV_CONTROLLER_READY:
 		case STMFTS_EV_SLEEP_OUT_CONTROLLER_READY:
 		case STMFTS_EV_STATUS:
-			complete(&sdata->cmd_done);
-			fallthrough;
+			if (sdata->cmd_pending) {
+				sdata->cmd_pending = 0;
+				complete(&sdata->cmd_done);
+			}
+			continue;
 
 		case STMFTS_EV_NO_EVENT:
 		case STMFTS_EV_DEBUG:
@@ -315,17 +319,21 @@ static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
 {
 	int err;
 
-	reinit_completion(&sdata->cmd_done);
+	scoped_guard(mutex, &sdata->mutex) {
+		reinit_completion(&sdata->cmd_done);
+		sdata->cmd_pending = cmd;
+	}
 
 	err = i2c_smbus_write_byte(sdata->client, cmd);
-	if (err)
-		return err;
+	if (!err && !wait_for_completion_timeout(&sdata->cmd_done,
+						 msecs_to_jiffies(1000)))
+		err = -ETIMEDOUT;
 
-	if (!wait_for_completion_timeout(&sdata->cmd_done,
-					 msecs_to_jiffies(1000)))
-		return -ETIMEDOUT;
+	/* A reply arriving from now on answers nothing. */
+	scoped_guard(mutex, &sdata->mutex)
+		sdata->cmd_pending = 0;
 
-	return 0;
+	return err;
 }
 
 static int stmfts_sense_on(struct stmfts_data *sdata)
