@@ -190,8 +190,6 @@ static void stmfts_report_contact_event(struct stmfts_data *sdata,
 	input_report_abs(sdata->input, ABS_MT_TOUCH_MINOR, min);
 	input_report_abs(sdata->input, ABS_MT_PRESSURE, area);
 	input_report_abs(sdata->input, ABS_MT_ORIENTATION, orientation);
-
-	input_sync(sdata->input);
 }
 
 static void stmfts_report_contact_release(struct stmfts_data *sdata,
@@ -201,8 +199,6 @@ static void stmfts_report_contact_release(struct stmfts_data *sdata,
 
 	input_mt_slot(sdata->input, slot_id);
 	input_mt_report_slot_inactive(sdata->input);
-
-	input_sync(sdata->input);
 }
 
 static void stmfts_report_hover_event(struct stmfts_data *sdata,
@@ -215,8 +211,6 @@ static void stmfts_report_hover_event(struct stmfts_data *sdata,
 	input_report_abs(sdata->input, ABS_X, x);
 	input_report_abs(sdata->input, ABS_Y, y);
 	input_report_abs(sdata->input, ABS_DISTANCE, z);
-
-	input_sync(sdata->input);
 }
 
 static void stmfts_report_key_event(struct stmfts_data *sdata, const u8 event[])
@@ -240,8 +234,6 @@ static void stmfts_report_key_event(struct stmfts_data *sdata, const u8 event[])
 			 "unknown key event: %#02x\n", event[2]);
 		break;
 	}
-
-	input_sync(sdata->input);
 }
 
 static void stmfts_parse_events(struct stmfts_data *sdata)
@@ -260,7 +252,7 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 
 		case STMFTS_EV_NO_EVENT:
 		case STMFTS_EV_DEBUG:
-			return;
+			goto sync;
 		}
 
 		switch (event[0] & STMFTS_MASK_EVENT_ID) {
@@ -295,6 +287,10 @@ static void stmfts_parse_events(struct stmfts_data *sdata)
 				"unknown event %#02x\n", event[0]);
 		}
 	}
+
+sync:
+	input_mt_sync_frame(sdata->input);
+	input_sync(sdata->input);
 }
 
 static irqreturn_t stmfts_irq_handler(int irq, void *dev)
