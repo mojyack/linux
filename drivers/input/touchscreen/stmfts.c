@@ -106,6 +106,7 @@ struct stmfts_data {
 	bool led_status;
 	bool hover_enabled;
 	bool running;
+	bool powered;
 };
 
 static int stmfts_brightness_set(struct led_classdev *led_cdev,
@@ -333,20 +334,13 @@ static int stmfts_command(struct stmfts_data *sdata, const u8 cmd)
 	return 0;
 }
 
-static int stmfts_input_open(struct input_dev *dev)
+static int stmfts_sense_on(struct stmfts_data *sdata)
 {
-	struct stmfts_data *sdata = input_get_drvdata(dev);
 	int err;
 
-	err = pm_runtime_resume_and_get(&sdata->client->dev);
+	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_ON);
 	if (err)
 		return err;
-
-	err = i2c_smbus_write_byte(sdata->client, STMFTS_MS_MT_SENSE_ON);
-	if (err) {
-		pm_runtime_put_sync(&sdata->client->dev);
-		return err;
-	}
 
 	scoped_guard(mutex, &sdata->mutex) {
 		sdata->running = true;
@@ -370,6 +364,22 @@ static int stmfts_input_open(struct input_dev *dev)
 	}
 
 	return 0;
+}
+
+static int stmfts_input_open(struct input_dev *dev)
+{
+	struct stmfts_data *sdata = input_get_drvdata(dev);
+	int err;
+
+	err = pm_runtime_resume_and_get(&sdata->client->dev);
+	if (err)
+		return err;
+
+	err = stmfts_sense_on(sdata);
+	if (err)
+		pm_runtime_put_sync(&sdata->client->dev);
+
+	return err;
 }
 
 static void stmfts_input_close(struct input_dev *dev)
@@ -615,11 +625,11 @@ static int stmfts_power_on(struct stmfts_data *sdata)
 	if (err)
 		goto err_disable_irq;
 
-	/*
-	 * At this point no one is using the touchscreen
-	 * and I don't really care about the return value
-	 */
-	(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
+	/* Nobody uses it unless resuming an open device; best effort. */
+	if (!sdata->running)
+		(void)i2c_smbus_write_byte(sdata->client, STMFTS_SLEEP_IN);
+
+	sdata->powered = true;
 
 	return 0;
 
@@ -633,6 +643,11 @@ err_disable_regulators:
 static void stmfts_power_off(void *data)
 {
 	struct stmfts_data *sdata = data;
+
+	if (!sdata->powered)
+		return;
+
+	sdata->powered = false;
 
 	disable_irq(sdata->client->irq);
 
@@ -837,8 +852,18 @@ static int stmfts_suspend(struct device *dev)
 static int stmfts_resume(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
+	int err;
 
-	return stmfts_power_on(sdata);
+	err = stmfts_power_on(sdata);
+	if (err || !sdata->running)
+		return err;
+
+	/* The reset left sensing off, and open() is not called again. */
+	err = stmfts_sense_on(sdata);
+	if (err)
+		stmfts_power_off(sdata);
+
+	return err;
 }
 
 static const struct dev_pm_ops stmfts_pm_ops = {
