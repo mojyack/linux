@@ -1,5 +1,7 @@
 #ifndef __NVIF_IF000A_H__
 #define __NVIF_IF000A_H__
+struct nvkm_memory_keep;
+
 struct nvif_mem_v0 {
 	__u8  version;
 	__u8  type;
@@ -18,5 +20,6 @@ struct nvif_mem_ram_v0 {
 	__u8  pad01[7];
 	dma_addr_t *dma;
 	struct scatterlist *sgl;
+	struct nvkm_memory_keep *keep;
 };
 #endif

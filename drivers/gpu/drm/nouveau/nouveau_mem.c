@@ -114,6 +114,18 @@ nouveau_mem_host(struct ttm_resource *reg, struct ttm_tt *tt)
 	else
 		args.dma = tt->dma_address;
 
+	if ((mmu->type[type].type & NVIF_MEM_COMP) && reg->bo) {
+		struct nouveau_bo *nvbo = nouveau_bo(reg->bo);
+
+		if (!nvbo->keep) {
+			nvbo->keep = kzalloc_obj(*nvbo->keep);
+			if (!nvbo->keep)
+				return -ENOMEM;
+			refcount_set(&nvbo->keep->refcount, 1);
+		}
+		args.keep = nvbo->keep;
+	}
+
 	mutex_lock(&drm->client_mutex);
 	ret = nvif_mem_ctor_type(mmu, "ttmHostMem", mmu->mem, type, PAGE_SHIFT,
 				 reg->size,

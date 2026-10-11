@@ -10,6 +10,7 @@ struct nouveau_cli;
 struct nouveau_drm;
 struct nouveau_fence;
 struct nouveau_vma;
+struct nvkm_memory_keep;
 
 struct nouveau_bo {
 	struct ttm_buffer_object bo;
@@ -26,6 +27,7 @@ struct nouveau_bo {
 	struct ttm_bo_kmap_obj kmap;
 	struct list_head head;
 	struct list_head io_reserve_lru;
+	struct nvkm_memory_keep *keep; /* compression state, across placements */
 
 	/* protected by ttm_bo_reserve() */
 	struct drm_file *reserved_by;

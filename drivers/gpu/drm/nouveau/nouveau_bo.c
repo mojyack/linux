@@ -44,6 +44,8 @@
 #include <nvif/if500b.h>
 #include <nvif/if900b.h>
 
+#include <subdev/mmu.h>
+
 static int nouveau_ttm_tt_bind(struct ttm_device *bdev, struct ttm_tt *ttm,
 			       struct ttm_resource *reg);
 static void nouveau_ttm_tt_unbind(struct ttm_device *bdev, struct ttm_tt *ttm);
@@ -163,6 +165,7 @@ nouveau_bo_del_ttm(struct ttm_buffer_object *bo)
 		dma_resv_fini(&bo->base._resv);
 	}
 
+	nvkm_mem_keep_put(&nvbo->keep);
 	kfree(nvbo);
 }
 

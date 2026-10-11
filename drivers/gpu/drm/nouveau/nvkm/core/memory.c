@@ -52,6 +52,11 @@ nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
 	struct nvkm_tags *tags;
 
 	mutex_lock(&fb->tags.mutex);
+	if (!memory->tags && memory->keep && memory->keep->tags) {
+		memory->tags = memory->keep->tags;
+		refcount_inc(&memory->tags->refcount);
+	}
+
 	if ((tags = memory->tags)) {
 		/* If comptags exist for the memory, but a different amount
 		 * than requested, the buffer is being mapped with settings
@@ -99,6 +104,10 @@ nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
 	tags->device = device;
 	/* One reference for the memory, one for the caller. */
 	refcount_set(&tags->refcount, 2);
+	if (memory->keep && tags->mn) {
+		memory->keep->tags = tags;
+		refcount_inc(&tags->refcount);
+	}
 	*ptags = memory->tags = tags;
 	mutex_unlock(&fb->tags.mutex);
 	return 0;
@@ -113,7 +122,7 @@ nvkm_memory_tags_live(struct nvkm_memory *memory, struct nvkm_device *device)
 	bool live;
 
 	mutex_lock(&fb->tags.mutex);
-	tags = memory->tags;
+	tags = memory->tags ?: (memory->keep ? memory->keep->tags : NULL);
 	live = tags && tags->mn;
 	mutex_unlock(&fb->tags.mutex);
 	return live;

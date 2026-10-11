@@ -151,6 +151,8 @@ struct nvkm_mmu {
 	struct nvkm_device_oclass user;
 };
 
+void nvkm_mem_keep_put(struct nvkm_memory_keep **);
+
 int nv04_mmu_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_mmu **);
 int nv41_mmu_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_mmu **);
 int nv44_mmu_new(struct nvkm_device *, enum nvkm_subdev_type, int inst, struct nvkm_mmu **);

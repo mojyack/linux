@@ -130,17 +130,59 @@ nvkm_mem_iommu_usable(struct nvkm_mmu *mmu)
 	return !!nvkm_mem_tegra(mmu);
 }
 
+/* Called with iommu.mutex held; the first "mapped" pages are translated. */
+static void
+nvkm_mem_iommu_put(struct nvkm_device_tegra *tdev, struct nvkm_mem *mem,
+		   u64 mapped)
+{
+	struct nvkm_memory_keep *keep = mem->memory.keep;
+	struct nvkm_mm_node **piova = keep ? &keep->iova : &mem->iommu;
+
+	/* Unless a newer memory object of the buffer has taken the range over. */
+	if (!keep || keep->user == mem) {
+		iommu_unmap(tdev->iommu.domain,
+			    (u64)(*piova)->offset << tdev->iommu.pgshift,
+			    mapped << PAGE_SHIFT);
+		if (keep)
+			keep->user = NULL;
+	}
+
+	/* The tags are only valid at this address: keep it with them. */
+	if (!keep || (!keep->tags && !keep->user))
+		nvkm_mm_free(&tdev->iommu.mm, piova);
+	mem->iommu = NULL;
+}
+
 static void
 nvkm_mem_iommu_fini(struct nvkm_mem *mem)
 {
 	struct nvkm_device_tegra *tdev = nvkm_mem_tegra(mem->mmu);
-	u64 addr = (u64)mem->iommu->offset << tdev->iommu.pgshift;
-
-	iommu_unmap(tdev->iommu.domain, addr, mem->pages << PAGE_SHIFT);
 
 	mutex_lock(&tdev->iommu.mutex);
-	nvkm_mm_free(&tdev->iommu.mm, &mem->iommu);
+	nvkm_mem_iommu_put(tdev, mem, mem->pages);
 	mutex_unlock(&tdev->iommu.mutex);
+}
+
+void
+nvkm_mem_keep_put(struct nvkm_memory_keep **pkeep)
+{
+	struct nvkm_memory_keep *keep = *pkeep;
+
+	*pkeep = NULL;
+	if (!keep || !refcount_dec_and_test(&keep->refcount))
+		return;
+
+	/* An IOVA is only parked with tags, which know their device. */
+	if (keep->iova) {
+		struct nvkm_device_tegra *tdev =
+			nvkm_mem_tegra(keep->tags->device->mmu);
+
+		mutex_lock(&tdev->iommu.mutex);
+		nvkm_mm_free(&tdev->iommu.mm, &keep->iova);
+		mutex_unlock(&tdev->iommu.mutex);
+	}
+	nvkm_memory_tags_put(&keep->tags);
+	kfree(keep);
 }
 
 /* Flatten the scattered PAGE_SIZE pages into one contiguous IOVA range, so
@@ -150,6 +192,7 @@ static int
 nvkm_mem_iommu_init(struct nvkm_mem *mem, u8 page)
 {
 	struct nvkm_device_tegra *tdev = nvkm_mem_tegra(mem->mmu);
+	struct nvkm_memory_keep *keep = mem->memory.keep;
 	u64 addr, i, n;
 	u32 align;
 	int ret;
@@ -161,11 +204,28 @@ nvkm_mem_iommu_init(struct nvkm_mem *mem, u8 page)
 	align = max_t(u32, 1 << (page - PAGE_SHIFT), SZ_128K >> PAGE_SHIFT);
 
 	mutex_lock(&tdev->iommu.mutex);
-	ret = nvkm_mm_head(&tdev->iommu.mm, 0, 1, mem->pages, mem->pages,
-			   align, &mem->iommu);
-	mutex_unlock(&tdev->iommu.mutex);
-	if (ret)
-		return ret;
+	if (keep && keep->iova) {
+		ret = keep->iova->length == mem->pages ? 0 : -EINVAL;
+		if (ret)
+			goto unlock;
+
+		/* An older memory object of the buffer may still translate it. */
+		if (keep->user) {
+			addr = (u64)keep->iova->offset << tdev->iommu.pgshift;
+			iommu_unmap(tdev->iommu.domain, addr,
+				    mem->pages << PAGE_SHIFT);
+		}
+		mem->iommu = keep->iova;
+	} else {
+		ret = nvkm_mm_head(&tdev->iommu.mm, 0, 1, mem->pages, mem->pages,
+				   align, &mem->iommu);
+		if (ret)
+			goto unlock;
+		if (keep)
+			keep->iova = mem->iommu;
+	}
+	if (keep)
+		keep->user = mem;
 
 	addr = (u64)mem->iommu->offset << tdev->iommu.pgshift;
 
@@ -180,13 +240,14 @@ nvkm_mem_iommu_init(struct nvkm_mem *mem, u8 page)
 				mem->dma[i], n << PAGE_SHIFT,
 				IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
 		if (ret) {
-			iommu_unmap(tdev->iommu.domain, addr, i << PAGE_SHIFT);
-			mutex_lock(&tdev->iommu.mutex);
-			nvkm_mm_free(&tdev->iommu.mm, &mem->iommu);
-			mutex_unlock(&tdev->iommu.mutex);
-			return ret;
+			nvkm_mem_iommu_put(tdev, mem, i);
+			goto unlock;
 		}
 	}
+unlock:
+	mutex_unlock(&tdev->iommu.mutex);
+	if (ret)
+		return ret;
 
 	mem->node.offset = (addr >> NVKM_RAM_MM_SHIFT) |
 			   BIT_ULL(tdev->func->iommu_bit - NVKM_RAM_MM_SHIFT);
@@ -202,6 +263,7 @@ nvkm_mem_dtor(struct nvkm_memory *memory)
 	struct nvkm_mem *mem = nvkm_mem(memory);
 	if (mem->iommu)
 		nvkm_mem_iommu_fini(mem);
+	nvkm_mem_keep_put(&mem->memory.keep);
 	if (mem->mem) {
 		while (mem->pages--) {
 			dma_unmap_page(mem->mmu->subdev.device->dev,
@@ -307,6 +369,9 @@ nvkm_mem_new_host(struct nvkm_mmu *mmu, int type, u8 page, u64 size,
 			nvkm_memory_ctor(&nvkm_mem_sgl, &mem->memory);
 			mem->sgl = args->v0.sgl;
 		}
+		mem->memory.keep = args->v0.keep;
+		if (mem->memory.keep)
+			refcount_inc(&mem->memory.keep->refcount);
 
 		if (!IS_ALIGNED(size, PAGE_SIZE))
 			return -EINVAL;
