@@ -503,10 +503,16 @@ static int max8973_thermal_init(struct max8973_chip *mchip)
 	return 0;
 }
 
+static bool max8973_volatile_reg(struct device *dev, unsigned int reg)
+{
+	return reg == MAX8973_CHIPID1;
+}
+
 static const struct regmap_config max8973_regmap_config = {
 	.reg_bits		= 8,
 	.val_bits		= 8,
 	.max_register		= MAX8973_CHIPID2,
+	.volatile_reg		= max8973_volatile_reg,
 	.cache_type		= REGCACHE_MAPLE,
 };
 
