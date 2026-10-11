@@ -809,11 +809,27 @@ static int stmfts_runtime_resume(struct device *dev)
 	return ret;
 }
 
+static void stmfts_release_contacts(struct stmfts_data *sdata)
+{
+	int i;
+
+	for (i = 0; i < STMFTS_MAX_FINGERS; i++) {
+		input_mt_slot(sdata->input, i);
+		input_mt_report_slot_inactive(sdata->input);
+	}
+
+	input_mt_sync_frame(sdata->input);
+	input_sync(sdata->input);
+}
+
 static int stmfts_suspend(struct device *dev)
 {
 	struct stmfts_data *sdata = dev_get_drvdata(dev);
 
 	stmfts_power_off(sdata);
+
+	/* Resume resets the controller, which forgets these without a word. */
+	stmfts_release_contacts(sdata);
 
 	return 0;
 }
