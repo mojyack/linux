@@ -42,4 +42,23 @@ struct fermi_a_zbc_depth_v0 {
 	__u32 ds;
 	__u32 l2;
 };
+
+/* v1: the kernel derives l2 from format and ds; v0 is refused */
+struct fermi_a_zbc_color_v1 {
+	__u8  version;
+	__u8  format;	/* FERMI_A_ZBC_COLOR_V0_FMT_* */
+	__u8  index;	/* out */
+	__u8  pad03[5];
+	__u32 ds[4];
+	__u32 l2[4];	/* out */
+};
+
+struct fermi_a_zbc_depth_v1 {
+	__u8  version;
+	__u8  format;	/* FERMI_A_ZBC_DEPTH_V0_FMT_* */
+	__u8  index;	/* out */
+	__u8  pad03[5];
+	__u32 ds;
+	__u32 l2;	/* out */
+};
 #endif
