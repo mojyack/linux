@@ -7,6 +7,7 @@ struct nvkm_vma;
 struct nvkm_vmm;
 
 struct nvkm_tags {
+	struct nvkm_device *device;
 	struct nvkm_mm_node *mn;
 	refcount_t refcount;
 };
@@ -54,8 +55,7 @@ void nvkm_memory_unref(struct nvkm_memory **);
 int nvkm_memory_tags_get(struct nvkm_memory *, struct nvkm_device *, u32 tags,
 			 int (*clear)(struct nvkm_device *, u32, u32),
 			 struct nvkm_tags **);
-void nvkm_memory_tags_put(struct nvkm_memory *, struct nvkm_device *,
-			  struct nvkm_tags **);
+void nvkm_memory_tags_put(struct nvkm_tags **);
 bool nvkm_memory_tags_live(struct nvkm_memory *, struct nvkm_device *);
 
 #define nvkm_memory_target(p) (p)->func->target(p)

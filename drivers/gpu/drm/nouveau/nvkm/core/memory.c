@@ -27,17 +27,16 @@
 #include <subdev/instmem.h>
 
 void
-nvkm_memory_tags_put(struct nvkm_memory *memory, struct nvkm_device *device,
-		     struct nvkm_tags **ptags)
+nvkm_memory_tags_put(struct nvkm_tags **ptags)
 {
-	struct nvkm_fb *fb = device->fb;
 	struct nvkm_tags *tags = *ptags;
 	if (tags) {
+		struct nvkm_fb *fb = tags->device->fb;
+
 		mutex_lock(&fb->tags.mutex);
 		if (refcount_dec_and_test(&tags->refcount)) {
 			nvkm_mm_free(&fb->tags.mm, &tags->mn);
-			kfree(memory->tags);
-			memory->tags = NULL;
+			kfree(tags);
 		}
 		mutex_unlock(&fb->tags.mutex);
 		*ptags = NULL;
@@ -97,7 +96,9 @@ nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
 		tags->mn = NULL;
 	}
 
-	refcount_set(&tags->refcount, 1);
+	tags->device = device;
+	/* One reference for the memory, one for the caller. */
+	refcount_set(&tags->refcount, 2);
 	*ptags = memory->tags = tags;
 	mutex_unlock(&fb->tags.mutex);
 	return 0;
@@ -130,6 +131,8 @@ static void
 nvkm_memory_del(struct kref *kref)
 {
 	struct nvkm_memory *memory = container_of(kref, typeof(*memory), kref);
+
+	nvkm_memory_tags_put(&memory->tags);
 	if (!WARN_ON(!memory->func)) {
 		if (memory->func->dtor)
 			memory = memory->func->dtor(memory);
