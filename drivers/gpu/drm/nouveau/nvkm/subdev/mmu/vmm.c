@@ -1433,7 +1433,7 @@ nvkm_vmm_unmap_region(struct nvkm_vmm *vmm, struct nvkm_vma *vma)
 	if (vma->memory)
 		nvkm_vmm_unmap_flush(vmm);
 
-	nvkm_memory_tags_put(vma->memory, vmm->mmu->subdev.device, &vma->tags);
+	nvkm_memory_tags_put(&vma->tags);
 	nvkm_memory_unref(&vma->memory);
 	vma->mapped = false;
 
@@ -1589,15 +1589,17 @@ nvkm_vmm_map_locked(struct nvkm_vmm *vmm, struct nvkm_vma *vma,
 	/* Perform the map. */
 	if (vma->refd == NVKM_VMA_PAGE_NONE) {
 		ret = nvkm_vmm_ptes_get_map(vmm, map->page, vma->addr, vma->size, map, func);
-		if (ret)
+		if (ret) {
+			nvkm_memory_tags_put(&map->tags);
 			return ret;
+		}
 
 		vma->refd = map->page - vmm->func->page;
 	} else {
 		nvkm_vmm_ptes_map(vmm, map->page, vma->addr, vma->size, map, func);
 	}
 
-	nvkm_memory_tags_put(vma->memory, vmm->mmu->subdev.device, &vma->tags);
+	nvkm_memory_tags_put(&vma->tags);
 	nvkm_memory_unref(&vma->memory);
 	vma->memory = nvkm_memory_ref(map->memory);
 	vma->mapped = true;
