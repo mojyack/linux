@@ -2398,9 +2398,12 @@ static __maybe_unused int tegra_xusb_suspend(struct device *dev)
 
 	synchronize_irq(tegra->mbox_irq);
 
+	/* tegra_xusb_runtime_resume() takes tegra->lock */
+	pm_runtime_disable(dev);
+
 	mutex_lock(&tegra->lock);
 
-	if (pm_runtime_suspended(dev)) {
+	if (pm_runtime_status_suspended(dev)) {
 		err = tegra_xusb_exit_elpg(tegra, true);
 		if (err < 0)
 			goto out;
@@ -2408,11 +2411,8 @@ static __maybe_unused int tegra_xusb_suspend(struct device *dev)
 
 	err = tegra_xusb_enter_elpg(tegra, false);
 	if (err < 0) {
-		if (pm_runtime_suspended(dev)) {
-			pm_runtime_disable(dev);
+		if (pm_runtime_status_suspended(dev))
 			pm_runtime_set_active(dev);
-			pm_runtime_enable(dev);
-		}
 
 		goto out;
 	}
@@ -2420,7 +2420,6 @@ static __maybe_unused int tegra_xusb_suspend(struct device *dev)
 out:
 	if (!err) {
 		tegra->suspended = true;
-		pm_runtime_disable(dev);
 
 		if (device_may_wakeup(dev)) {
 			unsigned int i;
@@ -2434,6 +2433,9 @@ out:
 	}
 
 	mutex_unlock(&tegra->lock);
+
+	if (err < 0)
+		pm_runtime_enable(dev);
 
 	return err;
 }
