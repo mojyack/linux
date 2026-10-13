@@ -886,8 +886,8 @@
 		compatible = "regulator-fixed";
 
 		regulator-name = "VDD_5V_USB";
-		regulator-min-microvolt = <50000000>;
-		regulator-max-microvolt = <50000000>;
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
 
 		vin-supply = <&vdd_5v0_sys>;
 	};
