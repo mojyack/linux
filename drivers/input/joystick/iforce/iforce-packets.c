@@ -95,10 +95,7 @@ static int mark_core_as_ready(struct iforce *iforce, unsigned short addr)
 {
 	int i;
 
-	if (!iforce->dev->ff)
-		return 0;
-
-	for (i = 0; i < iforce->dev->ff->max_effects; ++i) {
+	for (i = 0; i < IFORCE_EFFECTS_MAX; ++i) {
 		if (test_bit(FF_CORE_IS_USED, iforce->core_effects[i].flags) &&
 		    (iforce->core_effects[i].mod1_chunk.start == addr ||
 		     iforce->core_effects[i].mod2_chunk.start == addr)) {
