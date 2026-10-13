@@ -91,6 +91,8 @@ struct cs40l50_work {
 	struct work_struct work;
 	s16 *custom_data;
 	int custom_len;
+	int effect_id;
+	u16 length;
 	int count;
 	int error;
 };
@@ -362,12 +364,11 @@ static void cs40l50_start_worker(struct work_struct *work)
 	if (pm_runtime_resume_and_get(vib->dev) < 0)
 		goto err_free;
 
-	start_effect = cs40l50_find_effect(work_data->effect->id, &vib->effect_head);
+	start_effect = cs40l50_find_effect(work_data->effect_id, &vib->effect_head);
 	if (start_effect) {
 		while (--work_data->count >= 0) {
 			vib->dsp.write(vib->dev, vib->regmap, start_effect->index);
-			usleep_range(work_data->effect->replay.length,
-				     work_data->effect->replay.length + 100);
+			usleep_range(work_data->length, work_data->length + 100);
 		}
 	} else {
 		dev_err(vib->dev, "Effect to play not found\n");
@@ -405,7 +406,8 @@ static int cs40l50_playback(struct input_dev *dev, int effect_id, int val)
 	work_data->vib = vib;
 
 	if (val > 0) {
-		work_data->effect = &dev->ff->effects[effect_id];
+		work_data->effect_id = effect_id;
+		work_data->length = dev->ff->effects[effect_id].replay.length;
 		work_data->count = val;
 		INIT_WORK(&work_data->work, cs40l50_start_worker);
 	} else {
