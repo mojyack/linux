@@ -358,6 +358,11 @@ properties:
           connector:
             type: object
 
+          port:
+            $ref: /schemas/graph.yaml#/properties/port
+            description: Link to the high-speed port of a USB Type-C
+              connector whose controller selects the role of this port.
+
           mode:
             description: A string that determines the mode in which to
               run the port.
@@ -375,7 +380,8 @@ properties:
               A boolean property whole presence indicates that the port
               supports OTG or peripheral mode. If present, the port
               supports switching between USB host and peripheral roles.
-              A connector must be added as a subnode in that case.
+              A connector must be added as a subnode in that case, or a
+              port linking to the connector of a USB Type-C controller.
 
               See ../connector/usb-connector.yaml.
 
@@ -383,8 +389,11 @@ properties:
             description: A phandle to the regulator supplying the VBUS
               voltage.
 
-        dependencies:
-          usb-role-switch: [ connector ]
+        dependentSchemas:
+          usb-role-switch:
+            oneOf:
+              - required: [ connector ]
+              - required: [ port ]
 
       usb2-1:
         type: object
@@ -396,6 +405,11 @@ properties:
           connector:
             type: object
 
+          port:
+            $ref: /schemas/graph.yaml#/properties/port
+            description: Link to the high-speed port of a USB Type-C
+              connector whose controller selects the role of this port.
+
           mode:
             description: A string that determines the mode in which to
               run the port.
@@ -413,7 +427,8 @@ properties:
               A boolean property whole presence indicates that the port
               supports OTG or peripheral mode. If present, the port
               supports switching between USB host and peripheral roles.
-              A connector must be added as a subnode in that case.
+              A connector must be added as a subnode in that case, or a
+              port linking to the connector of a USB Type-C controller.
 
               See ../connector/usb-connector.yaml.
 
@@ -421,8 +436,11 @@ properties:
             description: A phandle to the regulator supplying the VBUS
               voltage.
 
-        dependencies:
-          usb-role-switch: [ connector ]
+        dependentSchemas:
+          usb-role-switch:
+            oneOf:
+              - required: [ connector ]
+              - required: [ port ]
 
       usb2-2:
         type: object
@@ -434,6 +452,11 @@ properties:
           connector:
             type: object
 
+          port:
+            $ref: /schemas/graph.yaml#/properties/port
+            description: Link to the high-speed port of a USB Type-C
+              connector whose controller selects the role of this port.
+
           mode:
             description: A string that determines the mode in which to
               run the port.
@@ -451,7 +474,8 @@ properties:
               A boolean property whole presence indicates that the port
               supports OTG or peripheral mode. If present, the port
               supports switching between USB host and peripheral roles.
-              A connector must be added as a subnode in that case.
+              A connector must be added as a subnode in that case, or a
+              port linking to the connector of a USB Type-C controller.
 
               See ../connector/usb-connector.yaml.
 
@@ -459,8 +483,11 @@ properties:
             description: A phandle to the regulator supplying the VBUS
               voltage.
 
-        dependencies:
-          usb-role-switch: [ connector ]
+        dependentSchemas:
+          usb-role-switch:
+            oneOf:
+              - required: [ connector ]
+              - required: [ port ]
 
       usb2-3:
         type: object
@@ -472,6 +499,11 @@ properties:
           connector:
             type: object
 
+          port:
+            $ref: /schemas/graph.yaml#/properties/port
+            description: Link to the high-speed port of a USB Type-C
+              connector whose controller selects the role of this port.
+
           mode:
             description: A string that determines the mode in which to
               run the port.
@@ -489,7 +521,8 @@ properties:
               A boolean property whole presence indicates that the port
               supports OTG or peripheral mode. If present, the port
               supports switching between USB host and peripheral roles.
-              A connector must be added as a subnode in that case.
+              A connector must be added as a subnode in that case, or a
+              port linking to the connector of a USB Type-C controller.
 
               See ../connector/usb-connector.yaml.
 
@@ -497,8 +530,11 @@ properties:
             description: A phandle to the regulator supplying the VBUS
               voltage.
 
-        dependencies:
-          usb-role-switch: [ connector ]
+        dependentSchemas:
+          usb-role-switch:
+            oneOf:
+              - required: [ connector ]
+              - required: [ port ]
 
       hsic-0:
         type: object
@@ -781,6 +817,36 @@ examples:
 
             usb3-3 {
                 status = "disabled";
+            };
+        };
+    };
+
+  - |
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+
+    padctl@7009f000 {
+        compatible = "nvidia,tegra210-xusb-padctl";
+        reg = <0x7009f000 0x1000>;
+        interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;
+        resets = <&tegra_car 142>;
+        reset-names = "padctl";
+
+        avdd-pll-utmip-supply = <&vdd_1v8>;
+        avdd-pll-uerefe-supply = <&vdd_pex_1v05>;
+        dvdd-pex-pll-supply = <&vdd_pex_1v05>;
+        hvdd-pex-pll-e-supply = <&vdd_1v8>;
+
+        ports {
+            /* the role is set by the USB Type-C controller owning the connector */
+            usb2-0 {
+                mode = "otg";
+                usb-role-switch;
+
+                port {
+                    endpoint {
+                        remote-endpoint = <&typec_con_hs>;
+                    };
+                };
             };
         };
     };
