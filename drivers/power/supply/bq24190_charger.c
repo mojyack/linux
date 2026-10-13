@@ -2231,13 +2231,16 @@ static int bq24190_probe(struct i2c_client *client)
 	if (ret < 0)
 		goto out_charger;
 
-	ret = devm_device_init_wakeup(dev);
-	if (ret < 0)
-		goto out_charger;
+	/* the I2C core has set up the wakeup of a declared wakeup source */
+	if (!(client->flags & I2C_CLIENT_WAKE)) {
+		ret = devm_device_init_wakeup(dev);
+		if (ret < 0)
+			goto out_charger;
 
-	ret = devm_pm_set_wake_irq(dev, client->irq);
-	if (ret < 0)
-		goto out_charger;
+		ret = devm_pm_set_wake_irq(dev, client->irq);
+		if (ret < 0)
+			goto out_charger;
+	}
 
 	pm_runtime_put_autosuspend(dev);
 
