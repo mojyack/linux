@@ -9,6 +9,7 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/devm-helpers.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/pm_wakeirq.h>
 #include <linux/power_supply.h>
@@ -2114,6 +2115,21 @@ static const struct bq24190_chip_info bq24190_chip_info_tbl[] = {
 	},
 };
 
+/* boards that relied on wakeup being enabled before they could declare it */
+static const char * const bq24190_wakeup_machines[] = {
+	"lge,hammerhead",
+	"mundoreader,bq-edison2qc",
+	"oneplus,bacon",
+	"xiaomi,mocha",
+	NULL
+};
+
+static bool bq24190_wakeup_by_default(struct device *dev)
+{
+	return !dev_of_node(dev) ||
+	       of_machine_compatible_match(bq24190_wakeup_machines);
+}
+
 static int bq24190_probe(struct i2c_client *client)
 {
 	const struct i2c_device_id *id = i2c_client_get_device_id(client);
@@ -2232,7 +2248,8 @@ static int bq24190_probe(struct i2c_client *client)
 		goto out_charger;
 
 	/* the I2C core has set up the wakeup of a declared wakeup source */
-	if (!(client->flags & I2C_CLIENT_WAKE)) {
+	if (!(client->flags & I2C_CLIENT_WAKE) &&
+	    bq24190_wakeup_by_default(dev)) {
 		ret = devm_device_init_wakeup(dev);
 		if (ret < 0)
 			goto out_charger;
