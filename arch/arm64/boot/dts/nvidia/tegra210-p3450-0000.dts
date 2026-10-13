@@ -554,7 +554,6 @@
 			usb3-0 {
 				status = "okay";
 				nvidia,usb2-companion = <1>;
-				vbus-supply = <&vdd_hub_3v3>;
 			};
 		};
 	};
@@ -832,6 +831,8 @@
 		regulator-name = "VDD_HUB_3V3";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
 
 		gpio = <&gpio TEGRA_GPIO(A, 6) GPIO_ACTIVE_HIGH>;
 		enable-active-high;
