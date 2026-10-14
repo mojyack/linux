@@ -389,6 +389,7 @@ struct tegra_pmc_soc {
 	unsigned int num_pin_descs;
 
 	const struct tegra_pmc_regs *regs;
+	const struct syscore_ops *syscore_ops;
 	void (*init)(struct tegra_pmc *pmc);
 	void (*setup_irq_polarity)(struct tegra_pmc *pmc,
 				   struct device_node *np);
@@ -1962,24 +1963,27 @@ static void tegra186_pmc_wake_handler(struct irq_work *work)
 
 static int tegra_pmc_init(struct tegra_pmc *pmc)
 {
-	if (pmc->soc->max_wake_events > 0) {
-		pmc->wake_type_level_map = bitmap_zalloc(pmc->soc->max_wake_events, GFP_KERNEL);
+	unsigned int num = pmc->soc->max_wake_events;
+
+	if (num > 0) {
+		pmc->wake_type_level_map = devm_bitmap_zalloc(pmc->dev, num, GFP_KERNEL);
 		if (!pmc->wake_type_level_map)
 			return -ENOMEM;
 
-		pmc->wake_type_dual_edge_map = bitmap_zalloc(pmc->soc->max_wake_events, GFP_KERNEL);
+		pmc->wake_type_dual_edge_map = devm_bitmap_zalloc(pmc->dev, num, GFP_KERNEL);
 		if (!pmc->wake_type_dual_edge_map)
 			return -ENOMEM;
 
-		pmc->wake_sw_status_map = bitmap_zalloc(pmc->soc->max_wake_events, GFP_KERNEL);
+		pmc->wake_sw_status_map = devm_bitmap_zalloc(pmc->dev, num, GFP_KERNEL);
 		if (!pmc->wake_sw_status_map)
 			return -ENOMEM;
 
-		pmc->wake_cntrl_level_map = bitmap_zalloc(pmc->soc->max_wake_events, GFP_KERNEL);
+		pmc->wake_cntrl_level_map = devm_bitmap_zalloc(pmc->dev, num, GFP_KERNEL);
 		if (!pmc->wake_cntrl_level_map)
 			return -ENOMEM;
 
-		pmc->wake_status = kcalloc(pmc->soc->max_wake_vectors, sizeof(u32), GFP_KERNEL);
+		pmc->wake_status = devm_kcalloc(pmc->dev, pmc->soc->max_wake_vectors,
+						sizeof(u32), GFP_KERNEL);
 		if (!pmc->wake_status)
 			return -ENOMEM;
 
@@ -2993,6 +2997,14 @@ static int tegra_pmc_acpi_probe(struct platform_device *pdev, struct tegra_pmc *
 	return 0;
 }
 
+static void tegra_pmc_unregister_syscore(void *data)
+{
+	struct tegra_pmc *pmc = data;
+
+	unregister_syscore(&pmc->syscore);
+	irq_work_sync(&pmc->wake_work);
+}
+
 static int tegra_pmc_probe(struct platform_device *pdev)
 {
 	struct tegra_pmc *pmc;
@@ -3160,6 +3172,18 @@ static int tegra_pmc_probe(struct platform_device *pdev)
 	err = tegra_powergate_init(pmc, pdev->dev.of_node);
 	if (err < 0)
 		goto cleanup_powergates;
+
+	if (pmc->soc->syscore_ops) {
+		pmc->syscore.ops = pmc->soc->syscore_ops;
+		pmc->syscore.data = pmc;
+		register_syscore(&pmc->syscore);
+
+		err = devm_add_action_or_reset(&pdev->dev,
+					       tegra_pmc_unregister_syscore,
+					       pmc);
+		if (err < 0)
+			goto cleanup_powergates;
+	}
 
 	err = tegra_pmc_irq_init(pmc);
 	if (err < 0)
@@ -4086,13 +4110,6 @@ static const struct tegra_pmc_regs tegra186_pmc_regs = {
 	.aowake_ctrl = 0x4f4,
 };
 
-static void tegra186_pmc_init(struct tegra_pmc *pmc)
-{
-	pmc->syscore.ops = &tegra186_pmc_wake_syscore_ops;
-	pmc->syscore.data = pmc;
-	register_syscore(&pmc->syscore);
-}
-
 static void tegra186_pmc_setup_irq_polarity(struct tegra_pmc *pmc,
 					    struct device_node *np)
 {
@@ -4173,7 +4190,7 @@ static const struct tegra_pmc_soc tegra186_pmc_soc = {
 	.num_pin_descs = ARRAY_SIZE(tegra186_pin_descs),
 	.pin_descs = tegra186_pin_descs,
 	.regs = &tegra186_pmc_regs,
-	.init = tegra186_pmc_init,
+	.syscore_ops = &tegra186_pmc_wake_syscore_ops,
 	.setup_irq_polarity = tegra186_pmc_setup_irq_polarity,
 	.set_wake_filters = tegra186_pmc_set_wake_filters,
 	.irq_set_wake = tegra186_pmc_irq_set_wake,
@@ -4377,7 +4394,7 @@ static const struct tegra_pmc_soc tegra194_pmc_soc = {
 	.num_pin_descs = ARRAY_SIZE(tegra194_pin_descs),
 	.pin_descs = tegra194_pin_descs,
 	.regs = &tegra194_pmc_regs,
-	.init = tegra186_pmc_init,
+	.syscore_ops = &tegra186_pmc_wake_syscore_ops,
 	.setup_irq_polarity = tegra186_pmc_setup_irq_polarity,
 	.set_wake_filters = tegra186_pmc_set_wake_filters,
 	.irq_set_wake = tegra186_pmc_irq_set_wake,
@@ -4534,7 +4551,7 @@ static const struct tegra_pmc_soc tegra234_pmc_soc = {
 	.num_pin_descs = ARRAY_SIZE(tegra234_pin_descs),
 	.pin_descs = tegra234_pin_descs,
 	.regs = &tegra234_pmc_regs,
-	.init = tegra186_pmc_init,
+	.syscore_ops = &tegra186_pmc_wake_syscore_ops,
 	.setup_irq_polarity = tegra186_pmc_setup_irq_polarity,
 	.set_wake_filters = tegra186_pmc_set_wake_filters,
 	.irq_set_wake = tegra186_pmc_irq_set_wake,
@@ -4692,7 +4709,7 @@ static const struct tegra_pmc_soc tegra238_pmc_soc = {
 	.num_pin_descs = ARRAY_SIZE(tegra238_pin_descs),
 	.pin_descs = tegra238_pin_descs,
 	.regs = &tegra238_pmc_regs,
-	.init = tegra186_pmc_init,
+	.syscore_ops = &tegra186_pmc_wake_syscore_ops,
 	.setup_irq_polarity = tegra186_pmc_setup_irq_polarity,
 	.set_wake_filters = tegra186_pmc_set_wake_filters,
 	.irq_set_wake = tegra186_pmc_irq_set_wake,
@@ -4884,7 +4901,7 @@ static const struct tegra_pmc_soc tegra264_pmc_soc = {
 	.num_pin_descs = ARRAY_SIZE(tegra264_pin_descs),
 	.pin_descs = tegra264_pin_descs,
 	.regs = &tegra264_pmc_regs,
-	.init = tegra186_pmc_init,
+	.syscore_ops = &tegra186_pmc_wake_syscore_ops,
 	.setup_irq_polarity = tegra186_pmc_setup_irq_polarity,
 	.set_wake_filters = tegra186_pmc_set_wake_filters,
 	.irq_set_wake = tegra186_pmc_irq_set_wake,
