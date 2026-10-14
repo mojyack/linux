@@ -429,6 +429,8 @@ struct tegra_sor {
 
 	struct drm_dp_link link;
 	struct drm_dp_aux *aux;
+	bool panel_prepared;
+	bool panel_enabled;
 
 	struct drm_info_list *debugfs_files;
 
@@ -2673,8 +2675,10 @@ static void tegra_sor_dp_disable(struct drm_encoder *encoder)
 	u32 value;
 	int err;
 
-	if (output->panel)
+	if (sor->panel_enabled) {
 		drm_panel_disable(output->panel);
+		sor->panel_enabled = false;
+	}
 
 	/*
 	 * Do not attempt to power down a DP link if we're not connected since
@@ -2723,8 +2727,10 @@ static void tegra_sor_dp_disable(struct drm_encoder *encoder)
 	if (err < 0)
 		dev_err(sor->dev, "failed disable DPAUX: %d\n", err);
 
-	if (output->panel)
+	if (sor->panel_prepared) {
 		drm_panel_unprepare(output->panel);
+		sor->panel_prepared = false;
+	}
 
 	host1x_client_suspend(&sor->client);
 }
@@ -2777,8 +2783,10 @@ static void tegra_sor_dp_enable(struct drm_encoder *encoder)
 	if (err < 0)
 		dev_err(sor->dev, "failed to choose link: %d\n", err);
 
-	if (output->panel)
+	if (output->panel) {
 		drm_panel_prepare(output->panel);
+		sor->panel_prepared = true;
+	}
 
 	value = tegra_sor_readl(sor, sor->soc->regs->pll2);
 	value &= ~SOR_PLL2_BANDGAP_POWERDOWN;
@@ -2959,8 +2967,10 @@ static void tegra_sor_dp_enable(struct drm_encoder *encoder)
 	if (err < 0)
 		dev_err(sor->dev, "failed to wakeup SOR: %d\n", err);
 
-	if (output->panel)
+	if (output->panel) {
 		drm_panel_enable(output->panel);
+		sor->panel_enabled = true;
+	}
 }
 
 static const struct drm_encoder_helper_funcs tegra_sor_dp_helpers = {
