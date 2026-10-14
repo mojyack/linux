@@ -495,11 +495,15 @@ static int tegra_smmu_attach_dev(struct iommu_domain *domain,
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 	struct tegra_smmu *smmu = dev_iommu_priv_get(dev);
 	struct tegra_smmu_as *as = to_smmu_as(domain);
+	struct tegra_smmu_as *old_as = NULL;
 	unsigned int index;
 	int err;
 
 	if (!fwspec)
 		return -ENOENT;
+
+	if (old && (old->type & __IOMMU_DOMAIN_PAGING))
+		old_as = to_smmu_as(old);
 
 	for (index = 0; index < fwspec->num_ids; index++) {
 		err = tegra_smmu_as_prepare(smmu, as);
@@ -512,11 +516,19 @@ static int tegra_smmu_attach_dev(struct iommu_domain *domain,
 	if (index == 0)
 		return -ENODEV;
 
+	/* The swgroups use the new ASID now, release the old domain */
+	if (old_as)
+		for (index = 0; index < fwspec->num_ids; index++)
+			tegra_smmu_as_unprepare(smmu, old_as);
+
 	return 0;
 
 disable:
 	while (index--) {
-		tegra_smmu_disable(smmu, fwspec->ids[index], as->id);
+		if (old_as)
+			tegra_smmu_enable(smmu, fwspec->ids[index], old_as->id);
+		else
+			tegra_smmu_disable(smmu, fwspec->ids[index], as->id);
 		tegra_smmu_as_unprepare(smmu, as);
 	}
 
