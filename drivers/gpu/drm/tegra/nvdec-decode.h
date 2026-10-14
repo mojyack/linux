@@ -202,6 +202,27 @@ struct nvdec_hevc_request {
 #define NVDEC_HEVC_PPS_SLICE_HEADER_EXTENSION	BIT(19)
 #define NVDEC_HEVC_PPS_UNIFORM_SPACING		BIT(20)
 
+/* Golden, altref and last; the current picture takes the fourth slot. */
+#define NVDEC_VP8_REFS		3
+
+/* Copied, validated VP8 state. This is not a V4L2 control layout. */
+struct nvdec_vp8_request {
+	struct nvdec_frame frame;
+	u8 version;
+	u8 flags;
+	u32 first_part_size;
+	struct v4l2_vp8_entropy entropy;
+	/* Header state that persists across frames, as in the control. */
+	s8 segment_quant[4];
+	s8 segment_lf[4];
+	s8 ref_lf_delta[4];
+	s8 mode_lf_delta[4];
+};
+
+#define NVDEC_VP8_REQ_KEY_FRAME		BIT(0)
+#define NVDEC_VP8_REQ_SEGMENT_UPDATE	BIT(1)
+#define NVDEC_VP8_REQ_SEGMENT_ABSOLUTE	BIT(2)
+
 /* Last, golden and altref; the current picture takes the fourth slot. */
 #define NVDEC_VP9_REFS		3
 /* The largest superblock, which the coded size is padded up to. */
@@ -281,6 +302,7 @@ union nvdec_request {
 	struct nvdec_frame frame;
 	struct nvdec_h264_request h264;
 	struct nvdec_hevc_request hevc;
+	struct nvdec_vp8_request vp8;
 	struct nvdec_vp9_request vp9;
 	struct nvdec_mpeg2_request mpeg2;
 };
@@ -288,6 +310,7 @@ union nvdec_request {
 enum nvdec_codec {
 	NVDEC_CODEC_H264,
 	NVDEC_CODEC_HEVC,
+	NVDEC_CODEC_VP8,
 	NVDEC_CODEC_VP9,
 	NVDEC_CODEC_MPEG2,
 	NVDEC_NUM_CODECS,

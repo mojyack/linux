@@ -201,6 +201,14 @@ static const u32 nvdec_hevc_required[] = {
 	V4L2_CID_STATELESS_HEVC_DECODE_PARAMS,
 };
 
+static const struct v4l2_ctrl_config nvdec_vp8_ctrls[] = {
+	{ .id = V4L2_CID_STATELESS_VP8_FRAME, .ops = &nvdec_ctrl_ops },
+};
+
+static const u32 nvdec_vp8_required[] = {
+	V4L2_CID_STATELESS_VP8_FRAME,
+};
+
 static const struct v4l2_ctrl_config nvdec_vp9_ctrls[] = {
 	{ .id = V4L2_CID_STATELESS_VP9_FRAME, .ops = &nvdec_ctrl_ops },
 	{ .id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR },
@@ -566,6 +574,24 @@ static int nvdec_try_ctrl(struct v4l2_ctrl *ctrl)
 		    sps->chroma_format_idc != 1 ||
 		    (sps->flags & V4L2_HEVC_SPS_FLAG_SEPARATE_COLOUR_PLANE))
 			return -EINVAL;
+		return 0;
+	}
+	case V4L2_CID_STATELESS_VP8_FRAME: {
+		const struct v4l2_ctrl_vp8_frame *frame = ctrl->p_new.p_vp8_frame;
+
+		unsigned int i;
+
+		/* The decoded picture is the coded size; there is no upscaler. */
+		if (frame->version > 3 || frame->horizontal_scale ||
+		    frame->vertical_scale)
+			return -EINVAL;
+		/* The bitstream codes a sign and a 7-bit or 6-bit magnitude. */
+		for (i = 0; i < 4; i++)
+			if (abs(frame->segment.quant_update[i]) > 127 ||
+			    abs(frame->segment.lf_update[i]) > 63 ||
+			    abs(frame->lf.ref_frm_delta[i]) > 63 ||
+			    abs(frame->lf.mb_mode_delta[i]) > 63)
+				return -EINVAL;
 		return 0;
 	}
 	case V4L2_CID_STATELESS_VP9_FRAME: {
@@ -1265,6 +1291,68 @@ static int nvdec_snapshot_hevc_request(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+static int nvdec_validate_vp8_request(struct nvdec_v4l2_ctx *ctx)
+{
+	const struct v4l2_ctrl_vp8_frame *frame;
+	const char *why;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	if (ALIGN(frame->width, 16) != ctx->coded_width ||
+	    ALIGN(frame->height, 16) != ctx->coded_height) {
+		why = "frame dimensions do not match the negotiated coded format";
+		goto reject;
+	}
+
+	if (!frame->first_part_size) {
+		why = "empty first partition";
+		goto reject;
+	}
+
+	return 0;
+
+reject:
+	dev_dbg(ctx->nvdec->dev, "vp8 reject: %s\n", why);
+	return -EINVAL;
+}
+
+/* The firmware parses the frame header; it takes the state that persists across frames. */
+static int nvdec_snapshot_vp8_request(struct nvdec_v4l2_ctx *ctx,
+				      struct vb2_v4l2_buffer *src,
+				      struct vb2_v4l2_buffer *dst)
+{
+	struct nvdec_vp8_request *request = &ctx->request.vp8;
+	const struct v4l2_ctrl_vp8_frame *frame;
+
+	if (nvdec_validate_vp8_request(ctx))
+		return -EINVAL;
+
+	frame = nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+
+	nvdec_snapshot_frame(ctx);
+	/* The frame tag, and on a key frame the start code and dimensions. */
+	ctx->bitstream_offset = frame->flags & V4L2_VP8_FRAME_FLAG_KEY_FRAME ? 10 : 3;
+	request->version = frame->version;
+	request->first_part_size = frame->first_part_size;
+	request->entropy = frame->entropy;
+	memcpy(request->segment_quant, frame->segment.quant_update,
+	       sizeof(request->segment_quant));
+	memcpy(request->segment_lf, frame->segment.lf_update,
+	       sizeof(request->segment_lf));
+	memcpy(request->ref_lf_delta, frame->lf.ref_frm_delta,
+	       sizeof(request->ref_lf_delta));
+	memcpy(request->mode_lf_delta, frame->lf.mb_mode_delta,
+	       sizeof(request->mode_lf_delta));
+	if (frame->flags & V4L2_VP8_FRAME_FLAG_KEY_FRAME)
+		request->flags |= NVDEC_VP8_REQ_KEY_FRAME;
+	if ((frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_ENABLED) &&
+	    (frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_UPDATE_FEATURE_DATA))
+		request->flags |= NVDEC_VP8_REQ_SEGMENT_UPDATE;
+	if (!(frame->segment.flags & V4L2_VP8_SEGMENT_FLAG_DELTA_VALUE_MODE))
+		request->flags |= NVDEC_VP8_REQ_SEGMENT_ABSOLUTE;
+
+	return 0;
+}
+
 static int nvdec_validate_vp9_request(struct nvdec_v4l2_ctx *ctx)
 {
 	const struct v4l2_ctrl_vp9_compressed_hdr *hdr;
@@ -1641,6 +1729,32 @@ static int nvdec_resolve_hevc(struct nvdec_v4l2_ctx *ctx,
 	return 0;
 }
 
+/* VP8 slots are roles, not DPB entries: golden, altref, last. */
+static int nvdec_resolve_vp8(struct nvdec_v4l2_ctx *ctx,
+			     struct nvdec_v4l2_job *job)
+{
+	const struct v4l2_ctrl_vp8_frame *frame =
+		nvdec_ctrl_ptr(ctx, V4L2_CID_STATELESS_VP8_FRAME);
+	const u64 timestamps[NVDEC_VP8_REFS] = {
+		frame->golden_frame_ts, frame->alt_frame_ts,
+		frame->last_frame_ts,
+	};
+	unsigned int i;
+
+	/* Key frames name stale roles; an inter frame's macroblocks may use all three. */
+	if (ctx->request.vp8.flags & NVDEC_VP8_REQ_KEY_FRAME)
+		return 0;
+
+	for (i = 0; i < NVDEC_VP8_REFS; i++) {
+		if (!nvdec_pin_reference(ctx, job, i, timestamps[i])) {
+			dev_dbg(ctx->nvdec->dev, "vp8 reject: reference %u\n", i);
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
 /* VP9 slots are roles too, in the order last, golden, altref. */
 static int nvdec_resolve_vp9(struct nvdec_v4l2_ctx *ctx,
 			     struct nvdec_v4l2_job *job)
@@ -1737,6 +1851,18 @@ static const struct nvdec_codec_desc nvdec_codecs[] = {
 		.num_required = ARRAY_SIZE(nvdec_hevc_required),
 		.snapshot = nvdec_snapshot_hevc_request,
 		.resolve = nvdec_resolve_hevc,
+	},
+	[NVDEC_CODEC_VP8] = {
+		.pixelformat = V4L2_PIX_FMT_VP8_FRAME,
+		.min_width = 48,
+		.min_height = 16,
+		.align = 16,
+		.ctrls = nvdec_vp8_ctrls,
+		.num_ctrls = ARRAY_SIZE(nvdec_vp8_ctrls),
+		.required = nvdec_vp8_required,
+		.num_required = ARRAY_SIZE(nvdec_vp8_required),
+		.snapshot = nvdec_snapshot_vp8_request,
+		.resolve = nvdec_resolve_vp8,
 	},
 	[NVDEC_CODEC_VP9] = {
 		.pixelformat = V4L2_PIX_FMT_VP9_FRAME,
