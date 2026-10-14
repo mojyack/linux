@@ -22,7 +22,31 @@ struct tegra_uart {
 	struct clk *clk;
 	struct reset_control *rst;
 	struct uart_8250_port *uport;
+	unsigned int quot;
 };
+
+static void tegra_uart_set_divisor(struct uart_port *p, unsigned int baud,
+				   unsigned int quot, unsigned int quot_frac)
+{
+	struct tegra_uart *uart = p->private_data;
+
+	uart->quot = quot;
+	serial8250_do_set_divisor(p, baud, quot);
+}
+
+static void tegra_uart_serial_out(struct uart_port *p, unsigned int offset,
+				  u32 value)
+{
+	struct tegra_uart *uart = p->private_data;
+
+	writel(value, p->membase + (offset << p->regshift));
+	if (offset != UART_FCR || !(value & UART_FCR_ENABLE_FIFO) || !uart->quot)
+		return;
+
+	/* Nothing may enter the FIFO for 3 periods of the 16x clock. */
+	readl(p->membase + (UART_SCR << p->regshift));
+	udelay(DIV_ROUND_UP_ULL(3ULL * uart->quot * USEC_PER_SEC, p->uartclk));
+}
 
 static void tegra_uart_handle_break(struct uart_port *p)
 {
@@ -62,6 +86,9 @@ static int tegra_uart_probe(struct platform_device *pdev)
 	port->type = PORT_TEGRA;
 	port->dev = &pdev->dev;
 	port->handle_break = tegra_uart_handle_break;
+	port->serial_out = tegra_uart_serial_out;
+	port->set_divisor = tegra_uart_set_divisor;
+	port->private_data = uart;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
