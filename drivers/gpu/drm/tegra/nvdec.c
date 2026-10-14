@@ -167,21 +167,18 @@ static int nvdec_init(struct host1x_client *client)
 		return err;
 	}
 
-	nvdec->channel = host1x_channel_request(client);
-	if (!nvdec->channel) {
-		err = -ENOMEM;
-		goto detach;
-	}
-
 	client->syncpts[0] = host1x_syncpt_request(client, 0);
 	if (!client->syncpts[0]) {
 		err = -ENOMEM;
-		goto free_channel;
+		goto detach;
 	}
 
 	err = tegra_drm_register_client(tegra, drm);
 	if (err < 0)
 		goto free_syncpt;
+
+	/* Legacy and CHANNEL_OPEN jobs share it: nothing else orders them. */
+	nvdec->channel = host1x_channel_get(drm->shared_channel);
 
 	/*
 	 * Inherit the DMA parameters (such as maximum segment size) from the
@@ -193,8 +190,6 @@ static int nvdec_init(struct host1x_client *client)
 
 free_syncpt:
 	host1x_syncpt_put(client->syncpts[0]);
-free_channel:
-	host1x_channel_put(nvdec->channel);
 detach:
 	host1x_client_iommu_detach(client);
 
