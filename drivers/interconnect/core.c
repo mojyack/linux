@@ -1147,6 +1147,7 @@ void icc_node_del(struct icc_node *node)
 	mutex_lock(&icc_lock);
 
 	list_del(&node->node_list);
+	node->provider = NULL;
 
 	mutex_unlock(&icc_lock);
 }
