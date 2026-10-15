@@ -3127,10 +3127,25 @@ static int _regulator_handle_consumer_disable(struct regulator *regulator)
 	}
 
 	regulator->enable_count--;
-	if (regulator->uA_load && regulator->enable_count == 0)
-		return drms_uA_update(rdev);
+	if (regulator->uA_load && regulator->enable_count == 0) {
+		int ret = drms_uA_update(rdev);
+
+		if (ret)
+			rdev_err(rdev, "failed to update load: %pe\n", ERR_PTR(ret));
+	}
 
 	return 0;
+}
+
+/* A supply enable that cannot be dropped is kept for the next enable to reuse. */
+static void _regulator_disable_supply(struct regulator_dev *rdev)
+{
+	int ret = _regulator_disable(rdev->supply);
+
+	if (ret) {
+		rdev_err(rdev, "failed to disable supply: %pe\n", ERR_PTR(ret));
+		rdev->supply_kept = 1;
+	}
 }
 
 /* locks held by regulator_enable() */
@@ -3142,9 +3157,13 @@ static int _regulator_enable(struct regulator *regulator)
 	lockdep_assert_held_once(&rdev->mutex.base);
 
 	if (rdev->use_count == 0 && rdev->supply) {
-		ret = _regulator_enable(rdev->supply);
-		if (ret < 0)
-			return ret;
+		if (rdev->supply_kept) {
+			rdev->supply_kept = 0;
+		} else {
+			ret = _regulator_enable(rdev->supply);
+			if (ret < 0)
+				return ret;
+		}
 	}
 
 	/* balance only if there are regulators coupled */
@@ -3194,7 +3213,7 @@ err_consumer_disable:
 
 err_disable_supply:
 	if (rdev->use_count == 0 && rdev->supply)
-		_regulator_disable(rdev->supply);
+		_regulator_disable_supply(rdev);
 
 	return ret;
 }
@@ -3298,16 +3317,22 @@ static int _regulator_disable(struct regulator *regulator)
 		}
 	}
 
-	if (ret == 0)
-		ret = _regulator_handle_consumer_disable(regulator);
+	ret = _regulator_handle_consumer_disable(regulator);
+	if (ret)
+		return ret;
 
-	if (ret == 0 && rdev->coupling_desc.n_coupled > 1)
+	/* The consumer has let go: what fails from here on is not its to retry. */
+	if (rdev->coupling_desc.n_coupled > 1) {
 		ret = regulator_balance_voltage(rdev, PM_SUSPEND_ON);
+		if (ret)
+			rdev_err(rdev, "failed to balance coupled regulators: %pe\n",
+				 ERR_PTR(ret));
+	}
 
-	if (ret == 0 && rdev->use_count == 0 && rdev->supply)
-		ret = _regulator_disable(rdev->supply);
+	if (rdev->use_count == 0 && rdev->supply)
+		_regulator_disable_supply(rdev);
 
-	return ret;
+	return 0;
 }
 
 /**
@@ -3322,7 +3347,8 @@ static int _regulator_disable(struct regulator *regulator)
  * devices have it enabled, the regulator device supports disabling and
  * machine constraints permit this operation.
  *
- * Return: 0 on success or a negative error number on failure.
+ * Return: 0 on success or a negative error number on failure.  A failed
+ * call leaves the consumer's enable in place.
  */
 int regulator_disable(struct regulator *regulator)
 {
@@ -6288,6 +6314,19 @@ rinse:
 }
 EXPORT_SYMBOL_GPL(regulator_register);
 
+/* Leave an enable that cannot be dropped, and the consumer holding it, with the supply. */
+static void regulator_orphan_supply(struct regulator_dev *rdev)
+{
+	struct regulator *supply = rdev->supply;
+
+	rdev_err(rdev, "failed to release supply, leaving it enabled\n");
+
+	sysfs_remove_link(&supply->rdev->dev.kobj, supply->supply_name);
+	regulator_lock(supply->rdev);
+	supply->dev = NULL;
+	regulator_unlock(supply->rdev);
+}
+
 /**
  * regulator_unregister - unregister regulator
  * @rdev: regulator to unregister
@@ -6305,7 +6344,10 @@ void regulator_unregister(struct regulator_dev *rdev)
 
 		while (rdev->use_count--)
 			regulator_disable(rdev->supply);
-		regulator_put(rdev->supply);
+		if (rdev->supply_kept && regulator_disable(rdev->supply))
+			regulator_orphan_supply(rdev);
+		else
+			regulator_put(rdev->supply);
 	}
 
 	flush_work(&rdev->disable_work.work);

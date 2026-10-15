@@ -657,6 +657,7 @@ struct regulator_dev {
 
 	unsigned int constraints_pending:1;
 	unsigned int is_switch:1;
+	unsigned int supply_kept:1;	/* holds a supply enable it failed to drop */
 
 	/* time when this regulator was disabled last time */
 	ktime_t last_off;
