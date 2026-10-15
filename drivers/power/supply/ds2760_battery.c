@@ -386,7 +386,7 @@ static void ds2760_battery_update_status(struct ds2760_device_info *di)
 	if (di->charge_status == POWER_SUPPLY_STATUS_UNKNOWN)
 		di->full_counter = 0;
 
-	if (power_supply_am_i_supplied(di->bat)) {
+	if (power_supply_am_i_supplied(di->bat) > 0) {
 		if (di->current_uA > 10000) {
 			di->charge_status = POWER_SUPPLY_STATUS_CHARGING;
 			di->full_counter = 0;
