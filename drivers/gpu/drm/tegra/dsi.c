@@ -18,8 +18,11 @@
 
 #include <video/mipi_display.h>
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_debugfs.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_file.h>
 #include <drm/drm_mipi_dsi.h>
@@ -885,16 +888,10 @@ static void tegra_dsi_unprepare(struct tegra_dsi *dsi)
 		dev_err(dsi->dev, "failed to suspend: %d\n", err);
 }
 
-static void tegra_dsi_encoder_disable(struct drm_encoder *encoder)
+static void tegra_dsi_stop_video(struct tegra_dsi *dsi, struct tegra_dc *dc)
 {
-	struct tegra_output *output = encoder_to_output(encoder);
-	struct tegra_dc *dc = to_tegra_dc(encoder->crtc);
-	struct tegra_dsi *dsi = to_dsi(output);
 	u32 value;
 	int err;
-
-	if (output->panel)
-		drm_panel_disable(output->panel);
 
 	tegra_dsi_video_disable(dsi);
 
@@ -915,6 +912,17 @@ static void tegra_dsi_encoder_disable(struct drm_encoder *encoder)
 		dev_dbg(dsi->dev, "failed to idle DSI: %d\n", err);
 
 	tegra_dsi_soft_reset(dsi);
+}
+
+static void tegra_dsi_encoder_disable(struct drm_encoder *encoder)
+{
+	struct tegra_output *output = encoder_to_output(encoder);
+	struct tegra_dsi *dsi = to_dsi(output);
+
+	if (output->panel)
+		drm_panel_disable(output->panel);
+
+	tegra_dsi_stop_video(dsi, to_tegra_dc(encoder->crtc));
 
 	if (output->panel)
 		drm_panel_unprepare(output->panel);
@@ -1536,6 +1544,126 @@ static int tegra_dsi_ganged_setup(struct tegra_dsi *dsi)
 	return 0;
 }
 
+static int tegra_dsi_disable_crtc(struct tegra_output *output,
+				  struct drm_modeset_acquire_ctx *ctx)
+{
+	struct drm_device *drm = output->connector.dev;
+	struct drm_connector_state *conn_state;
+	struct drm_plane_state *plane_state;
+	struct drm_crtc_state *crtc_state;
+	struct drm_atomic_commit *state;
+	struct drm_connector *conn;
+	struct drm_plane *plane;
+	int err, i;
+
+	state = drm_atomic_commit_alloc(drm);
+	if (!state)
+		return -ENOMEM;
+
+	state->acquire_ctx = ctx;
+
+	/* also waits for a commit that is still switching the output off */
+	conn_state = drm_atomic_get_connector_state(state, &output->connector);
+	if (IS_ERR(conn_state)) {
+		err = PTR_ERR(conn_state);
+		goto put;
+	}
+
+	if (conn_state->crtc) {
+		crtc_state = drm_atomic_get_crtc_state(state, conn_state->crtc);
+		if (IS_ERR(crtc_state)) {
+			err = PTR_ERR(crtc_state);
+			goto put;
+		}
+
+		crtc_state->active = false;
+
+		err = drm_atomic_set_mode_prop_for_crtc(crtc_state, NULL);
+		if (err < 0)
+			goto put;
+
+		err = drm_atomic_add_affected_planes(state, crtc_state->crtc);
+		if (err < 0)
+			goto put;
+
+		err = drm_atomic_add_affected_connectors(state, crtc_state->crtc);
+		if (err < 0)
+			goto put;
+	}
+
+	for_each_new_connector_in_state(state, conn, conn_state, i) {
+		err = drm_atomic_set_crtc_for_connector(conn_state, NULL);
+		if (err < 0)
+			goto put;
+	}
+
+	for_each_new_plane_in_state(state, plane, plane_state, i) {
+		err = drm_atomic_set_crtc_for_plane(plane_state, NULL);
+		if (err < 0)
+			goto put;
+
+		drm_atomic_set_fb_for_plane(plane_state, NULL);
+	}
+
+	err = drm_atomic_commit(state);
+put:
+	drm_atomic_commit_put(state);
+	return err;
+}
+
+/* waits for the output's last commit, then powers the panel down if it runs */
+static void tegra_dsi_panel_off(struct tegra_dsi *dsi)
+{
+	struct tegra_output *output = &dsi->output;
+	struct drm_connector_state *conn_state = output->connector.state;
+
+	if (conn_state->commit)
+		wait_for_completion(&conn_state->commit->hw_done);
+
+	if (!conn_state->crtc || !conn_state->crtc->state->active)
+		return;
+
+	drm_panel_disable(output->panel);
+	tegra_dsi_stop_video(dsi, to_tegra_dc(conn_state->crtc));
+	drm_panel_unprepare(output->panel);
+}
+
+/* switches the output off under the modeset locks, then swaps its panel */
+static int tegra_dsi_set_panel(struct tegra_dsi *dsi, struct drm_panel *panel)
+{
+	struct tegra_output *output = &dsi->output;
+	struct drm_device *drm = output->connector.dev;
+	struct drm_modeset_acquire_ctx ctx;
+	int err;
+
+	if (!drm) {
+		output->panel = panel;
+		return 0;
+	}
+
+	mutex_lock(&drm->mode_config.mutex);
+	DRM_MODESET_LOCK_ALL_BEGIN(drm, ctx, 0, err);
+
+	err = tegra_dsi_disable_crtc(output, &ctx);
+	if (!err) {
+		output->panel = panel;
+	} else if (err != -EDEADLK && !panel) {
+		tegra_dsi_panel_off(dsi);
+		output->panel = NULL;
+	}
+
+	DRM_MODESET_LOCK_ALL_END(drm, ctx, err);
+	mutex_unlock(&drm->mode_config.mutex);
+
+	if (err < 0)
+		dev_err(dsi->dev, "failed to disable output: %d\n", err);
+
+	if (!err || !panel)
+		drm_helper_hpd_irq_event(drm);
+
+	return err;
+}
+
 static int tegra_dsi_host_attach(struct mipi_dsi_host *host,
 				 struct mipi_dsi_device *device)
 {
@@ -1564,18 +1692,21 @@ static int tegra_dsi_host_attach(struct mipi_dsi_host *host,
 	 * merely the second channel.
 	 */
 	if (!dsi->master) {
-		struct tegra_output *output = &dsi->output;
+		struct drm_panel *panel;
 
 		/*
 		 * tegra_output_probe() never populates a panel for DSI
 		 * outputs, so output->panel is always NULL here.
 		 */
-		output->panel = of_drm_find_panel(device->dev.of_node);
-		if (IS_ERR(output->panel))
-			output->panel = NULL;
+		panel = of_drm_find_panel(device->dev.of_node);
+		if (!IS_ERR(panel)) {
+			int err = tegra_dsi_set_panel(dsi, panel);
 
-		if (output->panel && output->connector.dev)
-			drm_helper_hpd_irq_event(output->connector.dev);
+			if (err < 0) {
+				drm_panel_put(panel);
+				return err;
+			}
+		}
 	}
 
 	return 0;
@@ -1585,14 +1716,11 @@ static int tegra_dsi_host_detach(struct mipi_dsi_host *host,
 				 struct mipi_dsi_device *device)
 {
 	struct tegra_dsi *dsi = host_to_tegra(host);
-	struct tegra_output *output = &dsi->output;
+	struct drm_panel *panel = dsi->output.panel;
 
-	if (output->panel && &device->dev == output->panel->dev) {
-		drm_panel_put(output->panel);
-		output->panel = NULL;
-
-		if (output->connector.dev)
-			drm_helper_hpd_irq_event(output->connector.dev);
+	if (panel && &device->dev == panel->dev) {
+		tegra_dsi_set_panel(dsi, NULL);
+		drm_panel_put(panel);
 	}
 
 	return 0;
