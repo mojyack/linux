@@ -327,9 +327,20 @@ static void ttm_pool_type_give(struct ttm_pool_type *pt, struct page *p)
 {
 	unsigned int i, num_pages = 1 << pt->order;
 	int nid = page_to_nid(p);
+	void *vaddr = NULL;
+
+	/* Not through the cached linear map of write-combined DMA memory. */
+	if (pt->pool && ttm_pool_uses_dma_alloc(pt->pool) &&
+	    pt->caching != ttm_cached) {
+		struct ttm_pool_dma *dma = (void *)p->private;
+
+		vaddr = (void *)(dma->vaddr & PAGE_MASK);
+	}
 
 	for (i = 0; i < num_pages; ++i) {
-		if (PageHighMem(p))
+		if (vaddr)
+			clear_page(vaddr + i * PAGE_SIZE);
+		else if (PageHighMem(p))
 			clear_highpage(p + i);
 		else
 			clear_page(page_address(p + i));
