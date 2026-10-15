@@ -304,15 +304,14 @@ nvkm_pstate_prog(struct nvkm_clk *clk, int pstatei)
 	return nvkm_cstate_prog(clk, pstate, NVKM_CLK_CSTATE_HIGHEST);
 }
 
-static void
-nvkm_pstate_work(struct work_struct *work)
+static int
+nvkm_pstate_run(struct nvkm_clk *clk)
 {
-	struct nvkm_clk *clk = container_of(work, typeof(*clk), work);
 	struct nvkm_subdev *subdev = &clk->subdev;
-	int pstate;
+	int pstate, ret = 0;
 
-	if (!atomic_xchg(&clk->waiting, 0))
-		return;
+	lockdep_assert_held(&clk->mutex);
+
 	clk->pwrsrc = power_supply_is_system_supplied();
 
 	nvkm_trace(subdev, "P %d PWR %d U(AC) %d U(DC) %d A %d T %d°C D %d\n",
@@ -330,24 +329,42 @@ nvkm_pstate_work(struct work_struct *work)
 
 	nvkm_trace(subdev, "-> %d\n", pstate);
 	if (pstate != clk->pstate) {
-		int ret = nvkm_pstate_prog(clk, pstate);
+		ret = nvkm_pstate_prog(clk, pstate);
 		if (ret) {
 			nvkm_error(subdev, "error setting pstate %d: %d\n",
 				   pstate, ret);
+			clk->pstate = -1;
 		}
 	}
 
-	wake_up_all(&clk->wait);
+	return ret;
 }
 
+static void
+nvkm_pstate_work(struct work_struct *work)
+{
+	struct nvkm_clk *clk = container_of(work, typeof(*clk), work);
+
+	mutex_lock(&clk->mutex);
+	nvkm_pstate_run(clk);
+	mutex_unlock(&clk->mutex);
+}
+
+/* A waiting request programs the pstate itself and gets that result. */
 static int
 nvkm_pstate_calc(struct nvkm_clk *clk, bool wait)
 {
-	atomic_set(&clk->waiting, 1);
-	schedule_work(&clk->work);
-	if (wait)
-		wait_event(clk->wait, !atomic_read(&clk->waiting));
-	return 0;
+	int ret;
+
+	if (!wait) {
+		schedule_work(&clk->work);
+		return 0;
+	}
+
+	mutex_lock(&clk->mutex);
+	ret = nvkm_pstate_run(clk);
+	mutex_unlock(&clk->mutex);
+	return ret;
 }
 
 static void
@@ -687,9 +704,8 @@ nvkm_clk_ctor(const struct nvkm_clk_func *func, struct nvkm_device *device,
 	clk->ustate_dc = -1;
 	clk->allow_reclock = allow_reclock;
 
+	mutex_init(&clk->mutex);
 	INIT_WORK(&clk->work, nvkm_pstate_work);
-	init_waitqueue_head(&clk->wait);
-	atomic_set(&clk->waiting, 0);
 
 	/* If no pstates are provided, try and fetch them from the BIOS */
 	if (!func->pstates) {

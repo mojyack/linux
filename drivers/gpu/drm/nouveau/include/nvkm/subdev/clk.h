@@ -89,9 +89,8 @@ struct nvkm_clk {
 	struct list_head states;
 	int state_nr;
 
+	struct mutex mutex; /* serializes pstate selection and programming */
 	struct work_struct work;
-	wait_queue_head_t wait;
-	atomic_t waiting;
 
 	int pwrsrc;
 	int pstate; /* current */
