@@ -145,6 +145,8 @@
 #define BQ24296_REG_F_NTC_FAULT_MASK		(BIT(1) | BIT(0))
 #define BQ24296_REG_F_NTC_FAULT_SHIFT		0
 
+#define BQ24190_REDETECT_RETRY_MS	1000
+
 #define BQ24190_REG_VPRS	0x0A /* Vendor/Part/Revision Status */
 #define BQ24190_REG_VPRS_PN_MASK		(BIT(5) | BIT(4) | BIT(3))
 #define BQ24190_REG_VPRS_PN_SHIFT		3
@@ -233,6 +235,7 @@ struct bq24190_dev_info {
 	bool				initialized;
 	bool				irq_event;
 	bool				otg_vbus_enabled;
+	bool				supplier_iinlim;
 	int				charge_type;
 	u16				sys_min;
 	u16				iprechg;
@@ -1498,13 +1501,36 @@ static void bq24190_input_current_limit_work(struct work_struct *work)
 	ret = power_supply_get_property_from_supplier(bdi->charger,
 						      POWER_SUPPLY_PROP_CURRENT_MAX,
 						      &val);
-	if (ret)
+	if (!ret) {
+		ret = bq24190_charger_set_property(bdi->charger,
+						   POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+						   &val);
+		if (!ret)
+			bdi->supplier_iinlim = true;
+	} else if (bdi->supplier_iinlim) {
+		/* The supplier withdrew its limit: detect the input again */
+		ret = pm_runtime_resume_and_get(bdi->dev);
+		if (ret < 0)
+			goto retry;
+		ret = bq24190_write_mask(bdi, BQ24190_REG_MOC,
+					 BQ24190_REG_MOC_DPDM_EN_MASK,
+					 BQ24190_REG_MOC_DPDM_EN_SHIFT, 1);
+		pm_runtime_put_autosuspend(bdi->dev);
+		if (ret < 0)
+			goto retry;
+		bdi->supplier_iinlim = false;
+	} else {
 		return;
+	}
 
-	bq24190_charger_set_property(bdi->charger,
-				     POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
-				     &val);
 	power_supply_changed(bdi->charger);
+	return;
+
+retry:
+	/* Nothing else may notify: ask the supplier again later */
+	dev_dbg(bdi->dev, "input redetection failed: %d\n", ret);
+	queue_delayed_work(system_percpu_wq, &bdi->input_current_limit_work,
+			   msecs_to_jiffies(BQ24190_REDETECT_RETRY_MS));
 }
 
 /* Sync the input-current-limit with our parent supply (if we have one) */
