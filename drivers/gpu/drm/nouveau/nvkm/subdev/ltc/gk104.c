@@ -23,7 +23,7 @@
  */
 #include "priv.h"
 
-static void
+static int
 gk104_ltc_init(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -33,6 +33,7 @@ gk104_ltc_init(struct nvkm_ltc *ltc)
 	nvkm_wr32(device, 0x17e000, ltc->ltc_nr);
 	nvkm_wr32(device, 0x17e8d4, ltc->tag_base);
 	nvkm_mask(device, 0x17e8c0, 0x00000002, lpg128 ? 0x00000002 : 0x00000000);
+	return 0;
 }
 
 static const struct nvkm_ltc_func

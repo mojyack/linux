@@ -70,7 +70,7 @@ gm20b_ltc_oneinit(struct nvkm_ltc *ltc)
 	return nvkm_mm_init(&fb->tags.mm, 0, 0, ltc->num_tags, 1);
 }
 
-static void
+static int
 gm20b_ltc_init(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -81,7 +81,7 @@ gm20b_ltc_init(struct nvkm_ltc *ltc)
 	nvkm_wr32(device, 0x17e318, nvkm_rd32(device, 0x140518) | 0x00008000);
 
 	if (!ltc->num_tags)
-		return;
+		return 0;
 
 	/* Nothing the CBC holds yet describes the backing store. */
 	nvkm_mask(device, 0x17e26c, 0x00000000, 0x00000002);
@@ -89,26 +89,36 @@ gm20b_ltc_init(struct nvkm_ltc *ltc)
 		for (s = 0; s < ltc->lts_nr; s++) {
 			const u32 addr = 0x14046c + (c * 0x2000) + (s * 0x200);
 
-			nvkm_wait_msec(device, 2000, addr,
-				       0x00000002, 0x00000000);
+			if (nvkm_wait_msec(device, 2000, addr,
+					   0x00000002, 0x00000000) < 0) {
+				nvkm_error(&ltc->subdev, "CBC invalidate timed out\n");
+				return -ETIMEDOUT;
+			}
 		}
 	}
+	return 0;
 }
 
 /* The GPU is about to lose power, and the L2 and the CBC with it. */
-static void
+static int
 gm20b_ltc_suspend(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
+	s64 taken = 0;
 
 	if (ltc->num_tags) {
 		mutex_lock(&ltc->mutex);
 		nvkm_wr32(device, 0x7000c, 0x00000001);
-		nvkm_wait_msec(device, 2000, 0x7000c, 0x00000003, 0x00000000);
+		taken = nvkm_wait_msec(device, 2000, 0x7000c,
+				       0x00000003, 0x00000000);
 		mutex_unlock(&ltc->mutex);
 	}
+	if (taken < 0) {
+		nvkm_error(&ltc->subdev, "CBC clean timed out\n");
+		return -ETIMEDOUT;
+	}
 
-	nvkm_ltc_flush(ltc);
+	return nvkm_ltc_flush(ltc);
 }
 
 static const struct nvkm_ltc_func

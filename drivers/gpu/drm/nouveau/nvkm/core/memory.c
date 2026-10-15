@@ -46,7 +46,7 @@ nvkm_memory_tags_put(struct nvkm_memory *memory, struct nvkm_device *device,
 
 int
 nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
-		     u32 nr, void (*clr)(struct nvkm_device *, u32, u32),
+		     u32 nr, int (*clr)(struct nvkm_device *, u32, u32),
 		     struct nvkm_tags **ptags)
 {
 	struct nvkm_fb *fb = device->fb;
@@ -75,8 +75,15 @@ nvkm_memory_tags_get(struct nvkm_memory *memory, struct nvkm_device *device,
 	}
 
 	if (!nvkm_mm_head(&fb->tags.mm, 0, 1, nr, nr, 1, &tags->mn)) {
-		if (clr)
-			clr(device, tags->mn->offset, tags->mn->length);
+		int ret = clr ? clr(device, tags->mn->offset, tags->mn->length) : 0;
+
+		/* Tags the CBC may not have cleared would decode garbage. */
+		if (ret) {
+			nvkm_mm_free(&fb->tags.mm, &tags->mn);
+			kfree(tags);
+			mutex_unlock(&fb->tags.mutex);
+			return ret;
+		}
 	} else {
 		/* Failure to allocate HW comptags is not an error, the
 		 * caller should fall back to an uncompressed map.

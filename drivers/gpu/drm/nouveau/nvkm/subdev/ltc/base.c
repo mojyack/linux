@@ -25,18 +25,22 @@
 
 #include <core/memory.h>
 
-void
+int
 nvkm_ltc_tags_clear(struct nvkm_device *device, u32 first, u32 count)
 {
 	struct nvkm_ltc *ltc = device->ltc;
 	const u32 limit = first + count - 1;
+	int ret;
 
 	BUG_ON((first > limit) || (limit >= ltc->num_tags));
 
 	mutex_lock(&ltc->mutex);
 	ltc->func->cbc_clear(ltc, first, limit);
-	ltc->func->cbc_wait(ltc);
+	ret = ltc->func->cbc_wait(ltc);
 	mutex_unlock(&ltc->mutex);
+	if (ret)
+		nvkm_error(&ltc->subdev, "CBC clear timed out\n");
+	return ret;
 }
 
 int
@@ -63,24 +67,30 @@ nvkm_ltc_zbc_stencil_get(struct nvkm_ltc *ltc, int index, const u32 stencil)
 	return index;
 }
 
-void
+int
 nvkm_ltc_invalidate(struct nvkm_ltc *ltc)
 {
+	int ret = 0;
+
 	if (ltc->func->invalidate) {
 		mutex_lock(&ltc->mutex);
-		ltc->func->invalidate(ltc);
+		ret = ltc->func->invalidate(ltc);
 		mutex_unlock(&ltc->mutex);
 	}
+	return ret;
 }
 
-void
+int
 nvkm_ltc_flush(struct nvkm_ltc *ltc)
 {
+	int ret = 0;
+
 	if (ltc->func->flush) {
 		mutex_lock(&ltc->mutex);
-		ltc->func->flush(ltc);
+		ret = ltc->func->flush(ltc);
 		mutex_unlock(&ltc->mutex);
 	}
+	return ret;
 }
 
 static void
@@ -112,8 +122,7 @@ nvkm_ltc_init(struct nvkm_subdev *subdev)
 			ltc->func->zbc_clear_stencil(ltc, i, ltc->zbc_stencil[i]);
 	}
 
-	ltc->func->init(ltc);
-	return 0;
+	return ltc->func->init(ltc);
 }
 
 static int
@@ -122,7 +131,7 @@ nvkm_ltc_fini(struct nvkm_subdev *subdev, enum nvkm_suspend_state suspend)
 	struct nvkm_ltc *ltc = nvkm_ltc(subdev);
 
 	if (suspend != NVKM_POWEROFF && ltc->func->suspend)
-		ltc->func->suspend(ltc);
+		return ltc->func->suspend(ltc);
 	return 0;
 }
 

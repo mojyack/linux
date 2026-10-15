@@ -52,7 +52,7 @@ int nvkm_memory_new(struct nvkm_device *, enum nvkm_memory_target,
 struct nvkm_memory *nvkm_memory_ref(struct nvkm_memory *);
 void nvkm_memory_unref(struct nvkm_memory **);
 int nvkm_memory_tags_get(struct nvkm_memory *, struct nvkm_device *, u32 tags,
-			 void (*clear)(struct nvkm_device *, u32, u32),
+			 int (*clear)(struct nvkm_device *, u32, u32),
 			 struct nvkm_tags **);
 void nvkm_memory_tags_put(struct nvkm_memory *, struct nvkm_device *,
 			  struct nvkm_tags **);

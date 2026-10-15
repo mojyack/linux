@@ -24,7 +24,7 @@
 
 #include "priv.h"
 
-static void
+static int
 gp10b_ltc_init(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -36,6 +36,7 @@ gp10b_ltc_init(struct nvkm_ltc *ltc)
 
 	if (tegra_dev_iommu_get_stream_id(device->dev, &sid))
 		nvkm_wr32(device, 0x160000, sid << 2);
+	return 0;
 }
 
 static const struct nvkm_ltc_func

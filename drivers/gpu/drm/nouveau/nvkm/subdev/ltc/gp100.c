@@ -48,10 +48,11 @@ gp100_ltc_oneinit(struct nvkm_ltc *ltc)
 	return 0;
 }
 
-void
+int
 gp100_ltc_init(struct nvkm_ltc *ltc)
 {
 	/*XXX: PMU LS call to setup tagram address */
+	return 0;
 }
 
 static const struct nvkm_ltc_func

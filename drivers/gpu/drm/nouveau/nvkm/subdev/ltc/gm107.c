@@ -35,7 +35,7 @@ gm107_ltc_cbc_clear(struct nvkm_ltc *ltc, u32 start, u32 limit)
 	nvkm_mask(device, 0x17e26c, 0x00000000, 0x00000004);
 }
 
-void
+int
 gm107_ltc_cbc_wait(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -43,10 +43,12 @@ gm107_ltc_cbc_wait(struct nvkm_ltc *ltc)
 	for (c = 0; c < ltc->ltc_nr; c++) {
 		for (s = 0; s < ltc->lts_nr; s++) {
 			const u32 addr = 0x14046c + (c * 0x2000) + (s * 0x200);
-			nvkm_wait_msec(device, 2000, addr,
-				       0x00000004, 0x00000000);
+			if (nvkm_wait_msec(device, 2000, addr,
+					   0x00000004, 0x00000000) < 0)
+				return -ETIMEDOUT;
 		}
 	}
+	return 0;
 }
 
 void
@@ -119,7 +121,7 @@ gm107_ltc_oneinit(struct nvkm_ltc *ltc)
 	return gf100_ltc_oneinit_tag_ram(ltc);
 }
 
-static void
+static int
 gm107_ltc_init(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -128,6 +130,7 @@ gm107_ltc_init(struct nvkm_ltc *ltc)
 	nvkm_wr32(device, 0x17e27c, ltc->ltc_nr);
 	nvkm_wr32(device, 0x17e278, ltc->tag_base);
 	nvkm_mask(device, 0x17e264, 0x00000002, lpg128 ? 0x00000002 : 0x00000000);
+	return 0;
 }
 
 static const struct nvkm_ltc_func

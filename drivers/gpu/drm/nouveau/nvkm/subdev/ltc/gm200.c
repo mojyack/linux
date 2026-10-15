@@ -36,10 +36,11 @@ gm200_ltc_oneinit(struct nvkm_ltc *ltc)
 
 	return gf100_ltc_oneinit_tag_ram(ltc);
 }
-static void
+static int
 gm200_ltc_init(struct nvkm_ltc *ltc)
 {
 	nvkm_wr32(ltc->subdev.device, 0x17e278, ltc->tag_base);
+	return 0;
 }
 
 static const struct nvkm_ltc_func

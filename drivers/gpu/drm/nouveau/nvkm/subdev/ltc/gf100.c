@@ -36,7 +36,7 @@ gf100_ltc_cbc_clear(struct nvkm_ltc *ltc, u32 start, u32 limit)
 	nvkm_wr32(device, 0x17e8c8, 0x00000004);
 }
 
-void
+int
 gf100_ltc_cbc_wait(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -44,12 +44,14 @@ gf100_ltc_cbc_wait(struct nvkm_ltc *ltc)
 	for (c = 0; c < ltc->ltc_nr; c++) {
 		for (s = 0; s < ltc->lts_nr; s++) {
 			const u32 addr = 0x1410c8 + (c * 0x2000) + (s * 0x400);
-			nvkm_msec(device, 2000,
+			if (nvkm_msec(device, 2000,
 				if (!nvkm_rd32(device, addr))
 					break;
-			);
+			) < 0)
+				return -ETIMEDOUT;
 		}
 	}
+	return 0;
 }
 
 void
@@ -122,7 +124,7 @@ gf100_ltc_intr(struct nvkm_ltc *ltc)
 	}
 }
 
-void
+int
 gf100_ltc_invalidate(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -130,12 +132,17 @@ gf100_ltc_invalidate(struct nvkm_ltc *ltc)
 
 	nvkm_wr32(device, 0x70004, 0x00000001);
 	taken = nvkm_wait_msec(device, 2000, 0x70004, 0x00000003, 0x00000000);
+	if (taken < 0) {
+		nvkm_error(&ltc->subdev, "LTC invalidate timed out\n");
+		return -ETIMEDOUT;
+	}
 
 	if (taken > 0)
 		nvkm_debug(&ltc->subdev, "LTC invalidate took %lld ns\n", taken);
+	return 0;
 }
 
-void
+int
 gf100_ltc_flush(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -143,9 +150,14 @@ gf100_ltc_flush(struct nvkm_ltc *ltc)
 
 	nvkm_wr32(device, 0x70010, 0x00000001);
 	taken = nvkm_wait_msec(device, 2000, 0x70010, 0x00000003, 0x00000000);
+	if (taken < 0) {
+		nvkm_error(&ltc->subdev, "LTC flush timed out\n");
+		return -ETIMEDOUT;
+	}
 
 	if (taken > 0)
 		nvkm_debug(&ltc->subdev, "LTC flush took %lld ns\n", taken);
+	return 0;
 }
 
 /* TODO: Figure out tag memory details and drop the over-cautious allocation.
@@ -222,7 +234,7 @@ gf100_ltc_oneinit(struct nvkm_ltc *ltc)
 	return gf100_ltc_oneinit_tag_ram(ltc);
 }
 
-static void
+static int
 gf100_ltc_init(struct nvkm_ltc *ltc)
 {
 	struct nvkm_device *device = ltc->subdev.device;
@@ -232,6 +244,7 @@ gf100_ltc_init(struct nvkm_ltc *ltc)
 	nvkm_wr32(device, 0x17e8d8, ltc->ltc_nr);
 	nvkm_wr32(device, 0x17e8d4, ltc->tag_base);
 	nvkm_mask(device, 0x17e8c0, 0x00000002, lpg128 ? 0x00000002 : 0x00000000);
+	return 0;
 }
 
 static const struct nvkm_ltc_func
