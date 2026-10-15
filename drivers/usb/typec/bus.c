@@ -519,6 +519,32 @@ static void typec_altmode_remove_links(struct altmode *alt)
 	sysfs_remove_link(&alt->adev.dev.kobj, "port");
 }
 
+/* An active mode holds its bound driver; call under ref_lock on any change */
+void typec_altmode_update_ref(struct altmode *alt)
+{
+	bool want = alt->bound && alt->adev.active;
+
+	if (want && !alt->ref_held) {
+		alt->ref_held = !WARN_ON(!try_module_get(alt->owner));
+	} else if (!want && alt->ref_held) {
+		module_put(alt->owner);
+		alt->ref_held = false;
+	}
+}
+
+static void typec_altmode_set_bound(struct altmode *alt, struct module *owner,
+				    bool bound)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&alt->ref_lock, flags);
+	if (bound)
+		alt->owner = owner;
+	alt->bound = bound;
+	typec_altmode_update_ref(alt);
+	spin_unlock_irqrestore(&alt->ref_lock, flags);
+}
+
 static int typec_probe(struct device *dev)
 {
 	struct typec_altmode_driver *drv = to_altmode_driver(dev->driver);
@@ -530,16 +556,24 @@ static int typec_probe(struct device *dev)
 	if (!altmode->partner)
 		return -ENODEV;
 
+	typec_altmode_set_bound(altmode, drv->driver.owner, true);
+
 	ret = typec_altmode_create_links(altmode);
 	if (ret) {
 		dev_warn(dev, "failed to create symlinks\n");
-		return ret;
+		goto err_unbind;
 	}
 
 	ret = drv->probe(adev);
-	if (ret)
+	if (ret) {
 		typec_altmode_remove_links(altmode);
+		goto err_unbind;
+	}
 
+	return 0;
+
+err_unbind:
+	typec_altmode_set_bound(altmode, NULL, false);
 	return ret;
 }
 
@@ -559,6 +593,7 @@ static void typec_remove(struct device *dev)
 		typec_altmode_update_active(adev, false);
 	}
 
+	typec_altmode_set_bound(altmode, NULL, false);
 	adev->desc = NULL;
 	adev->ops = NULL;
 }

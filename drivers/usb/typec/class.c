@@ -299,19 +299,20 @@ static void typec_altmode_put_partner(struct altmode *altmode)
  */
 void typec_altmode_update_active(struct typec_altmode *adev, bool active)
 {
+	struct altmode *alt = to_altmode(adev);
+	unsigned long flags;
 	char dir[6];
 
-	if (adev->active == active)
+	spin_lock_irqsave(&alt->ref_lock, flags);
+	if (adev->active == active) {
+		spin_unlock_irqrestore(&alt->ref_lock, flags);
 		return;
-
-	if (!is_typec_port(adev->dev.parent) && adev->dev.driver) {
-		if (!active)
-			module_put(adev->dev.driver->owner);
-		else
-			WARN_ON(!try_module_get(adev->dev.driver->owner));
 	}
-
 	adev->active = active;
+	if (!is_typec_port(adev->dev.parent))
+		typec_altmode_update_ref(alt);
+	spin_unlock_irqrestore(&alt->ref_lock, flags);
+
 	snprintf(dir, sizeof(dir), "mode%d", adev->mode);
 	sysfs_notify(&adev->dev.kobj, dir, "active");
 	sysfs_notify(&adev->dev.kobj, NULL, "active");
@@ -658,6 +659,7 @@ typec_register_altmode(struct device *parent,
 	alt->adev.mode_selection = desc->mode_selection;
 	alt->roles = desc->roles;
 	alt->id = id;
+	spin_lock_init(&alt->ref_lock);
 
 	alt->attrs[0] = &dev_attr_vdo.attr;
 	alt->attrs[1] = &dev_attr_description.attr;

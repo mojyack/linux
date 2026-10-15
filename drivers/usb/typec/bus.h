@@ -3,6 +3,7 @@
 #ifndef __USB_TYPEC_ALTMODE_H__
 #define __USB_TYPEC_ALTMODE_H__
 
+#include <linux/spinlock.h>
 #include <linux/usb/typec_altmode.h>
 
 struct typec_mux;
@@ -23,8 +24,16 @@ struct altmode {
 
 	struct altmode			*partner;
 	struct altmode			*plug[2];
+
+	/* The bound driver's module, held while the mode is active */
+	spinlock_t			ref_lock;
+	struct module			*owner;
+	bool				bound;
+	bool				ref_held;
 };
 
 #define to_altmode(d) container_of(d, struct altmode, adev)
+
+void typec_altmode_update_ref(struct altmode *alt);
 
 #endif /* __USB_TYPEC_ALTMODE_H__ */
