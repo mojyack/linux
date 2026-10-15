@@ -84,7 +84,7 @@ static bool a500_battery_update_capacity(struct a500_battery *bat)
 static int a500_battery_get_status(struct a500_battery *bat)
 {
 	if (bat->capacity < 100) {
-		if (power_supply_am_i_supplied(bat->psy))
+		if (power_supply_am_i_supplied(bat->psy) > 0)
 			return POWER_SUPPLY_STATUS_CHARGING;
 		else
 			return POWER_SUPPLY_STATUS_DISCHARGING;
