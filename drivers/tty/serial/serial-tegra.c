@@ -531,13 +531,16 @@ static void tegra_uart_tx_dma_complete(void *args)
 	struct tty_port *tport = &tup->uport.state->port;
 	struct dma_tx_state state;
 	unsigned long flags;
-	unsigned int count;
 
-	dmaengine_tx_status(tup->tx_dma_chan, tup->tx_cookie, &state);
-	count = tup->tx_bytes_requested - state.residue;
-	async_tx_ack(tup->tx_dma_desc);
 	uart_port_lock_irqsave(&tup->uport, &flags);
-	uart_xmit_advance(&tup->uport, count);
+	/* A stale callback: its transfer was stopped or flushed. */
+	if (tup->tx_in_progress != TEGRA_UART_TX_DMA ||
+	    dmaengine_tx_status(tup->tx_dma_chan, tup->tx_cookie,
+				&state) != DMA_COMPLETE) {
+		uart_port_unlock_irqrestore(&tup->uport, flags);
+		return;
+	}
+	uart_xmit_advance(&tup->uport, tup->tx_bytes_requested - state.residue);
 	tup->tx_in_progress = 0;
 	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
 		uart_write_wakeup(&tup->uport);
@@ -562,7 +565,7 @@ static int tegra_uart_start_tx_dma(struct tegra_uart_port *tup,
 
 	tup->tx_dma_desc = dmaengine_prep_slave_single(tup->tx_dma_chan,
 				tx_phys_addr, tup->tx_bytes, DMA_MEM_TO_DEV,
-				DMA_PREP_INTERRUPT);
+				DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 	if (!tup->tx_dma_desc) {
 		dev_err(tup->uport.dev, "Not able to get desc for Tx\n");
 		return -EIO;
@@ -641,7 +644,6 @@ static void tegra_uart_stop_tx(struct uart_port *u)
 	dmaengine_tx_status(tup->tx_dma_chan, tup->tx_cookie, &state);
 	dmaengine_terminate_all(tup->tx_dma_chan);
 	count = tup->tx_bytes_requested - state.residue;
-	async_tx_ack(tup->tx_dma_desc);
 	uart_xmit_advance(&tup->uport, count);
 	tup->tx_in_progress = 0;
 }
@@ -1276,6 +1278,9 @@ static void tegra_uart_flush_buffer(struct uart_port *u)
 	tup->tx_bytes = 0;
 	if (tup->tx_dma_chan)
 		dmaengine_terminate_all(tup->tx_dma_chan);
+	/* Its completion is gone with it: nothing else would start TX again. */
+	if (tup->tx_in_progress == TEGRA_UART_TX_DMA)
+		tup->tx_in_progress = 0;
 }
 
 static void tegra_uart_shutdown(struct uart_port *u)
