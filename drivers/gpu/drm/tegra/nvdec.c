@@ -47,6 +47,9 @@ struct nvdec {
 	bool ready;
 	/* Active when early_exit() suspended it: resumed again by late_init(). */
 	bool resume_at_init;
+	/* Out of reset and clocked. */
+	bool active;
+	struct mutex lock;	/* orders @active against job-timeout recovery */
 
 	/* Platform configuration */
 	const struct nvdec_config *config;
@@ -236,9 +239,55 @@ static int nvdec_exit(struct host1x_client *client)
 	return 0;
 }
 
+/* A job timed out and its channel is stopped: hold the engine in reset. */
+static int nvdec_quiesce(struct host1x_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(host1x_to_drm_client(client));
+	int err = 0;
+
+	/* An inactive engine is stopped and booted on its next resume. */
+	mutex_lock(&nvdec->lock);
+	/* Acquired for as long as the engine is active, see runtime resume. */
+	if (nvdec->active)
+		err = reset_control_assert(nvdec->reset);
+	mutex_unlock(&nvdec->lock);
+
+	return err;
+}
+
+static int nvdec_restore(struct host1x_client *client)
+{
+	struct nvdec *nvdec = to_nvdec(host1x_to_drm_client(client));
+	int err = 0;
+
+	mutex_lock(&nvdec->lock);
+	if (nvdec->active) {
+		usleep_range(10, 20);
+		err = reset_control_deassert(nvdec->reset);
+		if (!err) {
+			usleep_range(10, 20);
+			err = nvdec_boot_falcon(nvdec);
+			/* Left in reset, for the next attempt. */
+			if (err)
+				reset_control_assert(nvdec->reset);
+		}
+	}
+	mutex_unlock(&nvdec->lock);
+
+	return err;
+}
+
 static const struct host1x_client_ops nvdec_client_ops = {
 	.init = nvdec_init,
 	.exit = nvdec_exit,
+};
+
+/* Only an engine that can be reset is safe to recover from a job timeout. */
+static const struct host1x_client_ops nvdec_client_ops_reset = {
+	.init = nvdec_init,
+	.exit = nvdec_exit,
+	.quiesce = nvdec_quiesce,
+	.restore = nvdec_restore,
 };
 
 static int nvdec_load_falcon_firmware(struct nvdec *nvdec)
@@ -313,6 +362,13 @@ static __maybe_unused int nvdec_runtime_resume(struct device *dev)
 	if (!nvdec->ready)
 		return -ENODEV;
 
+	/* It allocates, which job-timeout recovery must not wait for. */
+	if (!nvdec->config->has_riscv) {
+		err = nvdec_load_falcon_firmware(nvdec);
+		if (err < 0)
+			return err;
+	}
+
 	err = clk_bulk_prepare_enable(nvdec->num_clks, nvdec->clks);
 	if (err < 0)
 		return err;
@@ -324,27 +380,30 @@ static __maybe_unused int nvdec_runtime_resume(struct device *dev)
 		if (err < 0)
 			goto disable;
 	} else {
-		/* In reset if it was suspended with its power domain left on. */
+		/* Held while active, so that a job timeout can reset the engine. */
 		err = reset_control_acquire(nvdec->reset);
 		if (err < 0)
 			goto disable;
 
-		err = reset_control_deassert(nvdec->reset);
-		reset_control_release(nvdec->reset);
-		if (err < 0)
-			goto disable;
+		mutex_lock(&nvdec->lock);
 
-		err = nvdec_load_falcon_firmware(nvdec);
+		err = reset_control_deassert(nvdec->reset);
 		if (err < 0)
-			goto disable;
+			goto unlock;
 
 		err = nvdec_boot_falcon(nvdec);
 		if (err < 0)
-			goto disable;
+			goto unlock;
+
+		nvdec->active = true;
+		mutex_unlock(&nvdec->lock);
 	}
 
 	return 0;
 
+unlock:
+	mutex_unlock(&nvdec->lock);
+	reset_control_release(nvdec->reset);
 disable:
 	clk_bulk_disable_unprepare(nvdec->num_clks, nvdec->clks);
 	return err;
@@ -354,11 +413,15 @@ static __maybe_unused int nvdec_runtime_suspend(struct device *dev)
 {
 	struct nvdec *nvdec = dev_get_drvdata(dev);
 
+	/* Waits for the channel, so before the lock that its recovery takes. */
 	host1x_channel_stop(nvdec->channel);
 
-	/* Also when the power domain stays on, see nvdec_early_exit(). */
-	if (!nvdec->config->has_riscv && !reset_control_acquire(nvdec->reset)) {
+	/* In reset even if the power domain stays on, see nvdec_early_exit(). */
+	if (!nvdec->config->has_riscv) {
+		mutex_lock(&nvdec->lock);
 		reset_control_assert(nvdec->reset);
+		nvdec->active = false;
+		mutex_unlock(&nvdec->lock);
 		reset_control_release(nvdec->reset);
 	}
 
@@ -575,10 +638,12 @@ static int nvdec_probe(struct platform_device *pdev)
 		}
 	}
 
+	mutex_init(&nvdec->lock);
 	platform_set_drvdata(pdev, nvdec);
 
 	INIT_LIST_HEAD(&nvdec->client.base.list);
-	nvdec->client.base.ops = &nvdec_client_ops;
+	nvdec->client.base.ops = nvdec->reset && !nvdec->config->has_riscv ?
+				 &nvdec_client_ops_reset : &nvdec_client_ops;
 	nvdec->client.base.dev = dev;
 	nvdec->client.base.class = host_class;
 	nvdec->client.base.syncpts = syncpts;
