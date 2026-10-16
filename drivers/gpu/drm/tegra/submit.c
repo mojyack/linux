@@ -737,17 +737,9 @@ int tegra_drm_ioctl_channel_submit(struct drm_device *drm, void *data,
 	/* Return postfences to userspace and add fences to DMA reservations. */
 	args->syncpt.value = job->syncpt_end;
 
-	if (syncobj) {
-		struct dma_fence *fence = host1x_fence_create(job->syncpt, job->syncpt_end, true);
-		if (IS_ERR(fence)) {
-			err = PTR_ERR(fence);
-			SUBMIT_ERR(context, "failed to create postfence: %d", err);
-			goto put_job;
-		}
-
-		drm_syncobj_replace_fence(syncobj, fence);
-		dma_fence_put(fence);
-	}
+	/* Not a fence of its own: the job's signals only once a timed-out engine stopped. */
+	if (syncobj)
+		drm_syncobj_replace_fence(syncobj, job->fence);
 
 	goto put_job;
 

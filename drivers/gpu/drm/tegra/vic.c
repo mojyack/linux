@@ -42,10 +42,15 @@ struct vic {
 	struct device *dev;
 	struct clk *clk;
 	struct reset_control *rst;
+	/* With a power domain, the reset it shares, held while active. */
+	struct reset_control *reset;
 	/* Between late_init() and early_exit(): firmware may be loaded. */
 	bool ready;
 	/* Active when early_exit() suspended it: resumed again by late_init(). */
 	bool resume_at_init;
+	/* Out of reset and clocked. */
+	bool active;
+	struct mutex lock;	/* orders @active against job-timeout recovery */
 
 	bool can_use_context;
 
@@ -229,9 +234,56 @@ static int vic_exit(struct host1x_client *client)
 	return 0;
 }
 
+/* A job timed out and its channel is stopped: hold the engine in reset. */
+static int vic_quiesce(struct host1x_client *client)
+{
+	struct vic *vic = to_vic(host1x_to_drm_client(client));
+	int err = 0;
+
+	/* An inactive engine is stopped and booted on its next resume. */
+	mutex_lock(&vic->lock);
+	/* Acquired for as long as the engine is active, see runtime resume. */
+	if (vic->active)
+		err = reset_control_assert(vic->rst ?: vic->reset);
+	mutex_unlock(&vic->lock);
+
+	return err;
+}
+
+static int vic_restore(struct host1x_client *client)
+{
+	struct vic *vic = to_vic(host1x_to_drm_client(client));
+	struct reset_control *rst = vic->rst ?: vic->reset;
+	int err = 0;
+
+	mutex_lock(&vic->lock);
+	if (vic->active) {
+		usleep_range(10, 20);
+		err = reset_control_deassert(rst);
+		if (!err) {
+			usleep_range(10, 20);
+			err = vic_boot(vic);
+			/* Left in reset, for the next attempt. */
+			if (err)
+				reset_control_assert(rst);
+		}
+	}
+	mutex_unlock(&vic->lock);
+
+	return err;
+}
+
 static const struct host1x_client_ops vic_client_ops = {
 	.init = vic_init,
 	.exit = vic_exit,
+};
+
+/* Only an engine that can be reset is safe to recover from a job timeout. */
+static const struct host1x_client_ops vic_client_ops_reset = {
+	.init = vic_init,
+	.exit = vic_exit,
+	.quiesce = vic_quiesce,
+	.restore = vic_restore,
 };
 
 static int vic_load_firmware(struct vic *vic)
@@ -340,30 +392,45 @@ static int __maybe_unused vic_runtime_resume(struct device *dev)
 	if (!vic->ready)
 		return -ENODEV;
 
+	/* It allocates, which job-timeout recovery must not wait for. */
+	err = vic_load_firmware(vic);
+	if (err < 0)
+		return err;
+
 	err = clk_prepare_enable(vic->clk);
 	if (err < 0)
 		return err;
 
 	usleep_range(10, 20);
 
-	err = reset_control_deassert(vic->rst);
+	/* Held while active, so that a job timeout can reset the engine. */
+	err = reset_control_acquire(vic->reset);
 	if (err < 0)
 		goto disable;
 
-	usleep_range(10, 20);
+	mutex_lock(&vic->lock);
 
-	err = vic_load_firmware(vic);
+	/* Also the domain's: a failed restore may have left it asserted. */
+	err = reset_control_deassert(vic->rst ?: vic->reset);
 	if (err < 0)
-		goto assert;
+		goto unlock;
+
+	usleep_range(10, 20);
 
 	err = vic_boot(vic);
 	if (err < 0)
 		goto assert;
 
+	vic->active = true;
+	mutex_unlock(&vic->lock);
+
 	return 0;
 
 assert:
 	reset_control_assert(vic->rst);
+unlock:
+	mutex_unlock(&vic->lock);
+	reset_control_release(vic->reset);
 disable:
 	clk_disable_unprepare(vic->clk);
 	return err;
@@ -371,6 +438,8 @@ disable:
 
 static void vic_power_off(struct vic *vic)
 {
+	reset_control_release(vic->reset);
+
 	usleep_range(2000, 4000);
 
 	clk_disable_unprepare(vic->clk);
@@ -381,9 +450,14 @@ static int __maybe_unused vic_runtime_suspend(struct device *dev)
 	struct vic *vic = dev_get_drvdata(dev);
 	int err;
 
+	/* Waits for the channel, so before the lock that its recovery takes. */
 	host1x_channel_stop(vic->channel);
 
+	mutex_lock(&vic->lock);
 	err = reset_control_assert(vic->rst);
+	if (!err)
+		vic->active = false;
+	mutex_unlock(&vic->lock);
 	if (err < 0)
 		return err;
 
@@ -458,6 +532,9 @@ static void vic_early_exit(struct tegra_drm_client *client)
 	err = vic_runtime_suspend(vic->dev);
 	if (err < 0) {
 		dev_err(vic->dev, "failed to suspend: %d\n", err);
+		mutex_lock(&vic->lock);
+		vic->active = false;
+		mutex_unlock(&vic->lock);
 		vic_power_off(vic);
 	}
 	pm_runtime_set_suspended(vic->dev);
@@ -585,7 +662,14 @@ static int vic_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "failed to get reset\n");
 			return PTR_ERR(vic->rst);
 		}
+	} else {
+		vic->reset = devm_reset_control_get_optional_exclusive_released(dev, "vic");
+		if (IS_ERR(vic->reset))
+			return dev_err_probe(dev, PTR_ERR(vic->reset),
+					     "failed to get reset\n");
 	}
+
+	mutex_init(&vic->lock);
 
 	vic->falcon.dev = dev;
 	vic->falcon.regs = vic->regs;
@@ -598,7 +682,8 @@ static int vic_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, vic);
 
 	INIT_LIST_HEAD(&vic->client.base.list);
-	vic->client.base.ops = &vic_client_ops;
+	vic->client.base.ops = vic->rst || vic->reset ? &vic_client_ops_reset :
+						      &vic_client_ops;
 	vic->client.base.dev = dev;
 	vic->client.base.class = HOST1X_CLASS_VIC;
 	vic->client.base.syncpts = syncpts;
