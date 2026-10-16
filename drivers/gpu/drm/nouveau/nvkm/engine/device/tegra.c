@@ -174,7 +174,7 @@ nvkm_device_tegra_remove_iommu(struct nvkm_device_tegra *tdev)
 #if IS_ENABLED(CONFIG_IOMMU_API)
 	if (tdev->iommu.domain) {
 		nvkm_mm_fini(&tdev->iommu.mm);
-		iommu_detach_device(tdev->iommu.domain, tdev->device.dev);
+		iommu_detach_device(tdev->iommu.domain, &tdev->pdev->dev);
 		iommu_domain_free(tdev->iommu.domain);
 	}
 #endif
