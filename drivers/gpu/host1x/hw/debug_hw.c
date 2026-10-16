@@ -223,24 +223,18 @@ static void show_channel_gathers(struct output *o, struct host1x_cdma *cdma)
 
 			g = &job->cmds[i].gather;
 
-			if (job->gather_copy_mapped)
-				mapped = (u32 *)job->gather_copy_mapped;
-			else
-				mapped = host1x_bo_mmap(g->bo);
-
-			if (!mapped) {
-				host1x_debug_output(o, "[could not mmap]\n");
-				continue;
-			}
-
 			host1x_debug_output(o, "  GATHER at %pad+%#x, %d words\n",
 					    &g->base, g->offset, g->words);
 
+			/* Mapping may allocate or take a reservation lock. */
+			if (!job->gather_copy_mapped) {
+				host1x_debug_output(o, "  [not mapped]\n");
+				continue;
+			}
+
+			mapped = (u32 *)job->gather_copy_mapped;
 			show_gather(o, g->base + g->offset, g->words, NULL,
 				    g->base, mapped);
-
-			if (!job->gather_copy_mapped)
-				host1x_bo_munmap(g->bo, mapped);
 		}
 	}
 }
