@@ -603,6 +603,17 @@ int host1x_job_pin(struct host1x_job *job, struct device *dev)
 	unsigned int i, j;
 	struct host1x *host = dev_get_drvdata(dev->parent);
 
+	/* Allocated here: host1x_job_submit() may be in a fence signalling path. */
+	if (!job->fence) {
+		job->fence = host1x_fence_create(job->syncpt, 0, true);
+		if (IS_ERR(job->fence)) {
+			err = PTR_ERR(job->fence);
+			job->fence = NULL;
+			return err;
+		}
+		INIT_LIST_HEAD(&job->fence_cb.node);
+	}
+
 	/* pin memory */
 	err = pin_job(host, job);
 	if (err)

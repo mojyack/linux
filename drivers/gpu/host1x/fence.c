@@ -144,6 +144,15 @@ struct dma_fence *host1x_fence_create(struct host1x_syncpt *sp, u32 threshold,
 }
 EXPORT_SYMBOL(host1x_fence_create);
 
+/* Set what a fence created at job pin waits for, before it is first used. */
+void host1x_fence_arm(struct dma_fence *f, u32 threshold, bool timeout)
+{
+	struct host1x_syncpt_fence *sf = to_host1x_fence(f);
+
+	sf->threshold = threshold;
+	sf->timeout = timeout;
+}
+
 void host1x_fence_cancel(struct dma_fence *f)
 {
 	struct host1x_syncpt_fence *sf = to_host1x_fence(f);

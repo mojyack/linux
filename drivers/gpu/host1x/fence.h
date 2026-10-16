@@ -26,5 +26,6 @@ struct host1x_fence_list {
 };
 
 void host1x_fence_signal(struct host1x_syncpt_fence *fence);
+void host1x_fence_arm(struct dma_fence *f, u32 threshold, bool timeout);
 
 #endif

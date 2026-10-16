@@ -15,6 +15,7 @@
 #include "../channel.h"
 #include "../context.h"
 #include "../dev.h"
+#include "../fence.h"
 #include "../intr.h"
 #include "../job.h"
 
@@ -350,16 +351,12 @@ static int channel_submit(struct host1x_job *job)
 	syncval = host1x_syncpt_read_max(sp);
 
 	/*
-	 * Create fence before submitting job to HW to avoid job completing
+	 * Arm the fence before submitting job to HW to avoid job completing
 	 * before the fence is set up.
 	 */
-	job->fence = host1x_fence_create(sp, syncval, true);
-	if (WARN(IS_ERR(job->fence), "Failed to create submit complete fence")) {
-		job->fence = NULL;
-	} else {
-		err = dma_fence_add_callback(job->fence, &job->fence_cb,
-					     job_complete_callback);
-	}
+	host1x_fence_arm(job->fence, syncval, true);
+	err = dma_fence_add_callback(job->fence, &job->fence_cb,
+				     job_complete_callback);
 
 	/* end CDMA submit & stash pinned hMems into sync queue */
 	host1x_cdma_end(&ch->cdma, job);
