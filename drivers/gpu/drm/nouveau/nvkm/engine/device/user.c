@@ -38,6 +38,7 @@
 struct nvkm_udevice {
 	struct nvkm_object object;
 	struct nvkm_device *device;
+	bool active;
 };
 
 static int
@@ -260,6 +261,8 @@ nvkm_udevice_fini(struct nvkm_object *object, enum nvkm_suspend_state suspend)
 	int ret = 0;
 
 	mutex_lock(&device->mutex);
+	if (!udev->active)
+		goto done;
 	if (!--device->refcount) {
 		ret = nvkm_device_fini(device, suspend);
 		if (ret && suspend) {
@@ -267,6 +270,7 @@ nvkm_udevice_fini(struct nvkm_object *object, enum nvkm_suspend_state suspend)
 			goto done;
 		}
 	}
+	udev->active = false;
 
 done:
 	mutex_unlock(&device->mutex);
@@ -288,6 +292,7 @@ nvkm_udevice_init(struct nvkm_object *object)
 			goto done;
 		}
 	}
+	udev->active = true;
 
 done:
 	mutex_unlock(&device->mutex);
