@@ -70,6 +70,7 @@ struct host1x_cdma {
 	struct buffer_timeout timeout;	/* channel's timeout state/wq */
 	bool running;
 	bool torndown;
+	unsigned int releasing;		/* jobs off sync_queue, not released yet */
 	struct work_struct update_work;
 };
 
@@ -90,5 +91,6 @@ void host1x_cdma_peek(struct host1x_cdma *cdma, u32 dmaget, int slot,
 unsigned int host1x_cdma_wait_locked(struct host1x_cdma *cdma,
 				     enum cdma_event event);
 void host1x_cdma_update_sync_queue(struct host1x_cdma *cdma,
-				   struct device *dev);
+				   struct device *dev, struct list_head *done);
+void host1x_cdma_release_jobs(struct host1x_cdma *cdma, struct list_head *done);
 #endif

@@ -297,6 +297,7 @@ static void cdma_timeout_handler(struct work_struct *work)
 	struct host1x_cdma *cdma;
 	struct host1x *host1x;
 	struct host1x_channel *ch;
+	LIST_HEAD(done);
 
 	cdma = container_of(to_delayed_work(work), struct host1x_cdma,
 			    timeout.wq);
@@ -339,8 +340,10 @@ static void cdma_timeout_handler(struct work_struct *work)
 	/* release any held MLOCK */
 	timeout_release_mlock(cdma);
 
-	host1x_cdma_update_sync_queue(cdma, ch->dev);
+	host1x_cdma_update_sync_queue(cdma, ch->dev, &done);
 	mutex_unlock(&cdma->lock);
+
+	host1x_cdma_release_jobs(cdma, &done);
 }
 
 /*
