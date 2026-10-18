@@ -21,6 +21,7 @@
 #include "channel.h"
 #include "dev.h"
 #include "debug.h"
+#include "fence.h"
 #include "job.h"
 
 /*
@@ -279,6 +280,10 @@ static void cdma_start_timer_locked(struct host1x_cdma *cdma,
 		return;
 	}
 
+	/* The timeout handler retries the recovery on this timer. */
+	if (cdma->recovery != CDMA_RECOVERY_NONE)
+		return;
+
 	cdma->timeout.client = job->client;
 	cdma->timeout.syncpt = job->syncpt;
 	cdma->timeout.syncpt_val = job->syncpt_end;
@@ -294,7 +299,8 @@ static void cdma_start_timer_locked(struct host1x_cdma *cdma,
  */
 static void stop_cdma_timer_locked(struct host1x_cdma *cdma)
 {
-	cancel_delayed_work(&cdma->timeout.wq);
+	if (cdma->recovery == CDMA_RECOVERY_NONE)
+		cancel_delayed_work(&cdma->timeout.wq);
 	cdma->timeout.client = NULL;
 }
 
@@ -385,12 +391,12 @@ void host1x_cdma_release_jobs(struct host1x_cdma *cdma, struct list_head *done)
 	mutex_unlock(&cdma->lock);
 }
 
-void host1x_cdma_update_sync_queue(struct host1x_cdma *cdma,
-				   struct device *dev, struct list_head *done)
+void host1x_cdma_cancel_jobs(struct host1x_cdma *cdma, struct device *dev,
+			     bool quiesced, struct list_head *done)
 {
 	struct host1x *host1x = cdma_to_host1x(cdma);
-	u32 restart_addr, syncpt_incrs, syncpt_val;
-	struct host1x_job *job, *next_job = NULL;
+	u32 syncpt_incrs, syncpt_val;
+	struct host1x_job *job;
 
 	syncpt_val = host1x_syncpt_load(cdma->timeout.syncpt);
 
@@ -408,13 +414,8 @@ void host1x_cdma_update_sync_queue(struct host1x_cdma *cdma,
 		__func__);
 
 	list_for_each_entry(job, &cdma->sync_queue, list) {
-		if (syncpt_val < job->syncpt_end) {
-
-			if (!list_is_last(&job->list, &cdma->sync_queue))
-				next_job = list_next_entry(job, list);
-
+		if (syncpt_val < job->syncpt_end)
 			goto syncpt_incr;
-		}
 
 		host1x_job_dump(dev, job);
 	}
@@ -430,13 +431,8 @@ syncpt_incr:
 	 * CDMA will continue execution starting with the next job or will get
 	 * into idle state.
 	 */
-	if (next_job)
-		restart_addr = next_job->first_get;
-	else
-		restart_addr = cdma->last_pos;
-
 	if (!job)
-		goto resume;
+		return;
 
 	/* do CPU increments for the remaining syncpts */
 	if (job->syncpt_recovery) {
@@ -507,12 +503,33 @@ syncpt_incr:
 
 		wmb();
 
+		/* The engine is stopped: none of them can run any more. */
+		if (quiesced) {
+			job = failed_job;
+			list_for_each_entry_from(job, &cdma->sync_queue, list)
+				if (job->cancelled &&
+				    !dma_fence_is_signaled(job->fence))
+					host1x_fence_cancel(job->fence);
+		}
+
 		update_cdma_locked(cdma, done);
 	}
+}
 
-resume:
+/* Restart the channel at the first job that has neither completed nor been cancelled. */
+void host1x_cdma_restart(struct host1x_cdma *cdma, struct list_head *done)
+{
+	struct host1x *host1x = cdma_to_host1x(cdma);
+	struct host1x_job *job;
+
+	/* Time the job at the head from now. */
+	if (cdma->timeout.client)
+		stop_cdma_timer_locked(cdma);
+	update_cdma_locked(cdma, done);
+
 	/* roll back DMAGET and start up channel again */
-	host1x_hw_cdma_resume(host1x, cdma, restart_addr);
+	job = list_first_entry_or_null(&cdma->sync_queue, struct host1x_job, list);
+	host1x_hw_cdma_resume(host1x, cdma, job ? job->first_get : cdma->last_pos);
 }
 
 static void cdma_update_work(struct work_struct *work)
@@ -543,6 +560,8 @@ int host1x_cdma_init(struct host1x_cdma *cdma)
 	cdma->event = CDMA_EVENT_NONE;
 	cdma->running = false;
 	cdma->torndown = false;
+	cdma->recovery = CDMA_RECOVERY_NONE;
+	cdma->recovery_client = NULL;
 	cdma->releasing = 0;
 
 	err = host1x_pushbuffer_init(&cdma->push_buffer);
@@ -565,9 +584,9 @@ int host1x_cdma_deinit(struct host1x_cdma *cdma)
 		return -EBUSY;
 	}
 
-	host1x_pushbuffer_destroy(pb);
 	host1x_hw_cdma_timeout_destroy(host1x, cdma);
 	flush_work(&cdma->update_work);
+	host1x_pushbuffer_destroy(pb);
 
 	return 0;
 }
@@ -589,6 +608,12 @@ int host1x_cdma_begin(struct host1x_cdma *cdma, struct host1x_job *job)
 	if (job->syncpt->locked) {
 		mutex_unlock(&cdma->lock);
 		return -EPERM;
+	}
+
+	/* The engine of a timed-out job could not be stopped or restarted. */
+	if (cdma->recovery != CDMA_RECOVERY_NONE) {
+		mutex_unlock(&cdma->lock);
+		return -EIO;
 	}
 
 	if (job->timeout) {

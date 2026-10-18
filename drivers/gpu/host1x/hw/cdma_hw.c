@@ -5,6 +5,7 @@
  * Copyright (c) 2010-2013, NVIDIA Corporation.
  */
 
+#include <linux/dma-fence.h>
 #include <linux/slab.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
@@ -151,22 +152,6 @@ static void cdma_flush(struct host1x_cdma *cdma)
 	}
 }
 
-static void cdma_stop(struct host1x_cdma *cdma)
-{
-	struct host1x_channel *ch = cdma_to_channel(cdma);
-
-	mutex_lock(&cdma->lock);
-
-	if (cdma->running) {
-		host1x_cdma_wait_locked(cdma, CDMA_EVENT_SYNC_QUEUE_EMPTY);
-		host1x_ch_writel(ch, HOST1X_CHANNEL_DMACTRL_DMASTOP,
-				 HOST1X_CHANNEL_DMACTRL);
-		cdma->running = false;
-	}
-
-	mutex_unlock(&cdma->lock);
-}
-
 static void cdma_hw_cmdproc_stop(struct host1x *host, struct host1x_channel *ch,
 				 bool stop)
 {
@@ -180,6 +165,39 @@ static void cdma_hw_cmdproc_stop(struct host1x *host, struct host1x_channel *ch,
 		cmdproc_stop &= ~BIT(ch->id);
 	host1x_sync_writel(host, cmdproc_stop, HOST1X_SYNC_CMDPROC_STOP);
 #endif
+}
+
+static void cdma_stop(struct host1x_cdma *cdma)
+{
+	struct host1x *host = cdma_to_host1x(cdma);
+	struct host1x_channel *ch = cdma_to_channel(cdma);
+
+	mutex_lock(&cdma->lock);
+
+	/* Also when frozen: a pending recovery may still hold jobs. */
+	host1x_cdma_wait_locked(cdma, CDMA_EVENT_SYNC_QUEUE_EMPTY);
+
+	if (cdma->running) {
+		host1x_ch_writel(ch, HOST1X_CHANNEL_DMACTRL_DMASTOP,
+				 HOST1X_CHANNEL_DMACTRL);
+		cdma->running = false;
+	}
+
+	/* Frozen with a restore pending: leave it idle, as cdma_start() expects. */
+	if (cdma->torndown) {
+		cdma_hw_cmdproc_stop(host, ch, false);
+		cdma->torndown = false;
+	}
+
+	/* The engine is powered off or handed over next, never restored. */
+	cdma->recovery = CDMA_RECOVERY_NONE;
+	cdma->recovery_client = NULL;
+
+	mutex_unlock(&cdma->lock);
+
+	/* A retry still queued now finds nothing to do. */
+	if (cdma->timeout.initialized)
+		cancel_delayed_work_sync(&cdma->timeout.wq);
 }
 
 static void cdma_hw_teardown(struct host1x *host, struct host1x_channel *ch)
@@ -286,6 +304,13 @@ static void timeout_release_mlock(struct host1x_cdma *cdma)
 #endif
 }
 
+#define HOST1X_RECOVERY_RETRY_MS 1000
+
+static bool host1x_client_can_quiesce(struct host1x_client *client)
+{
+	return client && client->ops && client->ops->quiesce;
+}
+
 /*
  * If this timeout fires, it indicates the current sync_queue entry has
  * exceeded its TTL and the userctx should be timed out and remaining
@@ -297,22 +322,33 @@ static void cdma_timeout_handler(struct work_struct *work)
 	struct host1x_cdma *cdma;
 	struct host1x *host1x;
 	struct host1x_channel *ch;
+	struct host1x_client *client;
 	LIST_HEAD(done);
+	bool cookie;
+	int err;
 
 	cdma = container_of(to_delayed_work(work), struct host1x_cdma,
 			    timeout.wq);
 	host1x = cdma_to_host1x(cdma);
 	ch = cdma_to_channel(cdma);
 
-	host1x_debug_dump(cdma_to_host1x(cdma));
+	if (READ_ONCE(cdma->recovery) == CDMA_RECOVERY_NONE)
+		host1x_debug_dump(cdma_to_host1x(cdma));
 
+	/* Cancelled jobs' fences signal from here, and later jobs wait for it. */
+	cookie = dma_fence_begin_signalling();
 	mutex_lock(&cdma->lock);
+
+	client = cdma->recovery_client;
+	if (cdma->recovery == CDMA_RECOVERY_QUIESCE)
+		goto quiesce;
+	if (cdma->recovery == CDMA_RECOVERY_RESTORE)
+		goto restore;
 
 	if (!cdma->timeout.client) {
 		dev_dbg(host1x->dev,
 			"cdma_timeout: expired, but has no clientid\n");
-		mutex_unlock(&cdma->lock);
-		return;
+		goto unlock;
 	}
 
 	/* stop processing to get a clean snapshot */
@@ -326,8 +362,7 @@ static void cdma_timeout_handler(struct work_struct *work)
 			"cdma_timeout: expired, but buffer had completed\n");
 		/* restore */
 		cdma_hw_cmdproc_stop(host1x, ch, false);
-		mutex_unlock(&cdma->lock);
-		return;
+		goto unlock;
 	}
 
 	dev_warn(host1x->dev, "%s: timeout: %u (%s), HW thresh %d, done %d\n",
@@ -337,11 +372,57 @@ static void cdma_timeout_handler(struct work_struct *work)
 	/* stop HW, resetting channel/module */
 	host1x_hw_cdma_freeze(host1x, cdma);
 
+	client = cdma->timeout.client;
+	cdma->recovery_client = client;
+
+quiesce:
+	/* The engine may still be executing the job: nothing is released until it stops. */
+	if (host1x_client_can_quiesce(client)) {
+		err = client->ops->quiesce(client);
+		if (err < 0) {
+			if (cdma->recovery != CDMA_RECOVERY_QUIESCE)
+				dev_err(client->dev,
+					"failed to stop engine, holding its jobs: %d\n",
+					err);
+			cdma->recovery = CDMA_RECOVERY_QUIESCE;
+			goto retry;
+		}
+	}
+
 	/* release any held MLOCK */
 	timeout_release_mlock(cdma);
 
-	host1x_cdma_update_sync_queue(cdma, ch->dev, &done);
+	host1x_cdma_cancel_jobs(cdma, ch->dev, host1x_client_can_quiesce(client),
+				&done);
+
+restore:
+	/* No job reaches the engine before it is back. */
+	if (host1x_client_can_quiesce(client)) {
+		err = client->ops->restore(client);
+		if (err < 0) {
+			if (cdma->recovery != CDMA_RECOVERY_RESTORE)
+				dev_err(client->dev,
+					"failed to restart engine, holding its channel: %d\n",
+					err);
+			cdma->recovery = CDMA_RECOVERY_RESTORE;
+			goto retry;
+		}
+	}
+
+	if (cdma->recovery != CDMA_RECOVERY_NONE)
+		dev_info(client->dev, "engine recovered\n");
+	cdma->recovery = CDMA_RECOVERY_NONE;
+	cdma->recovery_client = NULL;
+
+	host1x_cdma_restart(cdma, &done);
+	goto unlock;
+
+retry:
+	mod_delayed_work(system_percpu_wq, &cdma->timeout.wq,
+			 msecs_to_jiffies(HOST1X_RECOVERY_RETRY_MS));
+unlock:
 	mutex_unlock(&cdma->lock);
+	dma_fence_end_signalling(cookie);
 
 	host1x_cdma_release_jobs(cdma, &done);
 }

@@ -51,6 +51,12 @@ struct buffer_timeout {
 	struct host1x_client *client;
 };
 
+enum cdma_recovery {
+	CDMA_RECOVERY_NONE,
+	CDMA_RECOVERY_QUIESCE,		/* engine not stopped, jobs held */
+	CDMA_RECOVERY_RESTORE,		/* engine stopped, not restarted */
+};
+
 enum cdma_event {
 	CDMA_EVENT_NONE,		/* not waiting for any event */
 	CDMA_EVENT_SYNC_QUEUE_EMPTY,	/* wait for empty sync queue */
@@ -70,6 +76,8 @@ struct host1x_cdma {
 	struct buffer_timeout timeout;	/* channel's timeout state/wq */
 	bool running;
 	bool torndown;
+	enum cdma_recovery recovery;	/* a timeout's recovery is pending */
+	struct host1x_client *recovery_client;
 	unsigned int releasing;		/* jobs off sync_queue, not released yet */
 	struct work_struct update_work;
 };
@@ -90,7 +98,8 @@ void host1x_cdma_peek(struct host1x_cdma *cdma, u32 dmaget, int slot,
 		      u32 *out);
 unsigned int host1x_cdma_wait_locked(struct host1x_cdma *cdma,
 				     enum cdma_event event);
-void host1x_cdma_update_sync_queue(struct host1x_cdma *cdma,
-				   struct device *dev, struct list_head *done);
+void host1x_cdma_cancel_jobs(struct host1x_cdma *cdma, struct device *dev,
+			     bool quiesced, struct list_head *done);
+void host1x_cdma_restart(struct host1x_cdma *cdma, struct list_head *done);
 void host1x_cdma_release_jobs(struct host1x_cdma *cdma, struct list_head *done);
 #endif

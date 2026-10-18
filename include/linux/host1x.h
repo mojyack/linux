@@ -68,6 +68,15 @@ static inline void host1x_bo_cache_destroy(struct host1x_bo_cache *cache)
  * @late_exit: host1x client late tear down code
  * @suspend: host1x client suspend code
  * @resume: host1x client resume code
+ * @quiesce: stop the engine after a job of this client timed out, with the
+ *   channel stopped; return 0 only if the engine can no longer access memory
+ * @restore: bring the engine back after @quiesce, before any further job runs
+ *   on the channel
+ *
+ * With @quiesce, the job fences of the client signal only when the job
+ * completes or, after @quiesce succeeded, is cancelled. @quiesce and @restore
+ * are called with the channel's cdma lock held, in the signalling path of
+ * those fences, and are retried until they succeed.
  */
 struct host1x_client_ops {
 	int (*early_init)(struct host1x_client *client);
@@ -76,6 +85,8 @@ struct host1x_client_ops {
 	int (*late_exit)(struct host1x_client *client);
 	int (*suspend)(struct host1x_client *client);
 	int (*resume)(struct host1x_client *client);
+	int (*quiesce)(struct host1x_client *client);
+	int (*restore)(struct host1x_client *client);
 };
 
 /**

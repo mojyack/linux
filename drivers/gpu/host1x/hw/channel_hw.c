@@ -352,9 +352,12 @@ static int channel_submit(struct host1x_job *job)
 
 	/*
 	 * Arm the fence before submitting job to HW to avoid job completing
-	 * before the fence is set up.
+	 * before the fence is set up. If the client can stop its engine, the
+	 * timeout handler signals the fence of a cancelled job once it has.
 	 */
-	host1x_fence_arm(job->fence, syncval, true);
+	host1x_fence_arm(job->fence, syncval,
+			 !(job->timeout && job->client && job->client->ops &&
+			   job->client->ops->quiesce));
 	err = dma_fence_add_callback(job->fence, &job->fence_cb,
 				     job_complete_callback);
 
