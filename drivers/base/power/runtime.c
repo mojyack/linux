@@ -107,7 +107,7 @@ static void __update_runtime_status(struct device *dev, enum rpm_status status)
 {
 	update_pm_runtime_accounting(dev);
 	trace_rpm_status(dev, status);
-	dev->power.runtime_status = status;
+	WRITE_ONCE(dev->power.runtime_status, status);
 }
 
 static u64 rpm_get_accounted_time(struct device *dev, bool suspended)
@@ -651,7 +651,8 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 		if (dev->power.irq_safe) {
 			spin_unlock(&dev->power.lock);
 
-			cpu_relax();
+			while (READ_ONCE(dev->power.runtime_status) == RPM_SUSPENDING)
+				cpu_relax();
 
 			spin_lock(&dev->power.lock);
 			goto repeat;
@@ -839,9 +840,14 @@ static int rpm_resume(struct device *dev, int rpmflags)
 		}
 
 		if (dev->power.irq_safe) {
+			enum rpm_status status;
+
 			spin_unlock(&dev->power.lock);
 
-			cpu_relax();
+			do {
+				cpu_relax();
+				status = READ_ONCE(dev->power.runtime_status);
+			} while (status == RPM_RESUMING || status == RPM_SUSPENDING);
 
 			spin_lock(&dev->power.lock);
 			goto repeat;
