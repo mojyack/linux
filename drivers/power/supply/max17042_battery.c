@@ -44,6 +44,8 @@
 
 /* Interrupt mask bits */
 #define CFG_ALRT_BIT_ENBL	(1 << 2)
+
+#define MAX17042_ALERT_POLL_MS	1000
 #define CFG2_DSOCI_BIT_ENBL	(1 << 7)
 
 #define VFSOC0_LOCK		0x0000
@@ -95,6 +97,10 @@ struct max17042_chip {
 	bool   init_complete;
 	bool   hib_restore_pending;
 	u16    hib_cfg;
+	struct delayed_work alert_work;
+	struct mutex alert_lock;	/* serializes alert servicing */
+	int    alert_temp;	/* armed temperature alert: 1 above, -1 below */
+	int    alert_volt;	/* armed voltage alert: 1 above, -1 below */
 	unsigned int r_sns;
 	int    vmin;	/* in millivolts */
 	int    vmax;	/* in millivolts */
@@ -1169,30 +1175,121 @@ static u32 max17042_alert_bits(struct max17042_chip *chip)
 	return STATUS_ALERT_BITS;
 }
 
+static int max17042_alert_dir(int max, int min, int val)
+{
+	if (val > max * 256)
+		return 1;
+	if (val < min * 256)
+		return -1;
+	return 0;
+}
+
+/* Track a channel's armed side; returns true for a newly latched excursion */
+static bool max17042_track_alert(struct max17042_chip *chip, u32 status,
+				 u32 mx, u32 mn, unsigned int th_reg,
+				 unsigned int val_reg, bool sign, int *dir)
+{
+	bool hi = (status & mx) && *dir != 1;
+	bool lo = (status & mn) && *dir != -1;
+	bool fresh = hi || lo;
+	int max, min, v;
+	u32 th, val;
+
+	if (fresh)
+		*dir = hi ? 1 : -1;
+	if (!*dir)
+		return false;
+
+	/* On a failed read the alert stays armed and the poll retries */
+	if (regmap_read(chip->regmap, th_reg, &th) ||
+	    regmap_read(chip->regmap, val_reg, &val))
+		return fresh;
+
+	max = sign ? (s8)(th >> 8) : th >> 8;
+	min = sign ? (s8)th : (u8)th;
+	v = sign ? (s16)val : val;
+	/* Stay armed until one LSB back inside the window */
+	if (*dir > 0)
+		max = max_t(int, max - 1, min);
+	else
+		min = min_t(int, min + 1, max);
+	*dir = max17042_alert_dir(max, min, v);
+	return fresh;
+}
+
+/* Returns the alert bits acknowledged in Status, sets @changed */
+static u32 max17042_service_alerts(struct max17042_chip *chip, bool *changed)
+{
+	struct regmap *map = chip->regmap;
+	u32 val, alerts = 0;
+	int temp, volt;
+	bool fresh, armed;
+
+	guard(mutex)(&chip->alert_lock);
+
+	temp = chip->alert_temp;
+	volt = chip->alert_volt;
+	*changed = false;
+	if (!regmap_read(map, MAX17042_STATUS, &val)) {
+		if ((val & STATUS_SMN_BIT) || (val & STATUS_SMX_BIT) ||
+		    (val & STATUS_DSOCI_BIT)) {
+			dev_dbg(chip->dev, "SOC threshold INTR\n");
+			max17042_enable_soc_alerts(chip);
+		}
+
+		fresh = max17042_track_alert(chip, val, STATUS_TMX_BIT,
+					     STATUS_TMN_BIT, MAX17042_TALRT_Th,
+					     MAX17042_TEMP, true, &chip->alert_temp);
+		fresh |= max17042_track_alert(chip, val, STATUS_VMX_BIT,
+					      STATUS_VMN_BIT, MAX17042_VALRT_Th,
+					      MAX17042_VCELL, false,
+					      &chip->alert_volt);
+
+		alerts = val & max17042_alert_bits(chip);
+		*changed = fresh ||
+			   (alerts & ~(STATUS_TMX_BIT | STATUS_TMN_BIT |
+				       STATUS_VMX_BIT | STATUS_VMN_BIT)) ||
+			   temp != chip->alert_temp || volt != chip->alert_volt;
+
+		/* we implicitly handle all alerts via power_supply_changed */
+		if (regmap_clear_bits(map, MAX17042_STATUS,
+				      0xFFFF & ~(STATUS_POR_BIT | STATUS_BST_BIT)))
+			alerts = 0;
+	}
+
+	/* Aen gates only threshold alerts on the pin; Status keeps latching */
+	armed = chip->alert_temp || chip->alert_volt;
+	if (regmap_update_bits(map, MAX17042_CONFIG, CFG_ALRT_BIT_ENBL,
+			       armed ? 0 : CFG_ALRT_BIT_ENBL) || armed)
+		queue_delayed_work(system_freezable_wq, &chip->alert_work,
+				   msecs_to_jiffies(MAX17042_ALERT_POLL_MS));
+
+	return alerts;
+}
+
+static void max17042_alert_worker(struct work_struct *work)
+{
+	struct max17042_chip *chip = container_of(to_delayed_work(work),
+				struct max17042_chip, alert_work);
+	bool changed;
+
+	max17042_service_alerts(chip, &changed);
+	if (changed)
+		power_supply_changed(chip->battery);
+}
+
 static irqreturn_t max17042_thread_handler(int id, void *dev)
 {
 	struct max17042_chip *chip = dev;
-	u32 val;
-	int ret;
+	bool changed;
+	u32 alerts;
 
-	ret = regmap_read(chip->regmap, MAX17042_STATUS, &val);
-	if (ret)
-		return IRQ_HANDLED;
-
-	if ((val & STATUS_SMN_BIT) || (val & STATUS_SMX_BIT) ||
-	    (val & STATUS_DSOCI_BIT)) {
-		dev_dbg(chip->dev, "SOC threshold INTR\n");
-		max17042_enable_soc_alerts(chip);
-	}
-
-	/* we implicitly handle all alerts via power_supply_changed */
-	ret = regmap_clear_bits(chip->regmap, MAX17042_STATUS,
-				0xFFFF & ~(STATUS_POR_BIT | STATUS_BST_BIT));
+	alerts = max17042_service_alerts(chip, &changed);
 
 	power_supply_changed(chip->battery);
 
 	/* ALRT follows a cleared alert only at the next task period */
-	if (!ret && (val & max17042_alert_bits(chip)))
+	if (alerts)
 		msleep(DIV_ROUND_UP(176 * chip->task_period,
 				    MAX17042_DEFAULT_TASK_PERIOD));
 
@@ -1541,6 +1638,16 @@ static int max17042_probe(struct i2c_client *client, struct device *dev, int irq
 		regmap_write(chip->regmap, MAX17047_FullSOCThr,
 			     MAX17042_BATTERY_FULL << 8);
 
+	ret = devm_mutex_init(dev, &chip->alert_lock);
+	if (ret)
+		return ret;
+
+	/* Cancelled after the IRQ is freed, which may queue it */
+	ret = devm_delayed_work_autocancel(dev, &chip->alert_work,
+					   max17042_alert_worker);
+	if (ret)
+		return ret;
+
 	if (irq) {
 		unsigned int flags = IRQF_ONESHOT | IRQF_SHARED | IRQF_PROBE_SHARED;
 
@@ -1631,7 +1738,20 @@ static int max17042_suspend(struct device *dev)
 	 * capability to the interrupt line.
 	 */
 	if (chip->irq) {
+		bool changed;
+		int ret;
+
 		disable_irq(chip->irq);
+		max17042_service_alerts(chip, &changed);
+		if (changed)
+			power_supply_changed(chip->battery);
+		/* Sleep with every threshold alert enabled, armed or not */
+		ret = regmap_set_bits(chip->regmap, MAX17042_CONFIG,
+				      CFG_ALRT_BIT_ENBL);
+		if (ret) {
+			enable_irq(chip->irq);
+			return ret;
+		}
 		max17042_suspend_soc_alerts(chip);
 		enable_irq_wake(chip->irq);
 	}
