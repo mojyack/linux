@@ -26,7 +26,9 @@
 
 /* Status register bits */
 #define STATUS_POR_BIT         (1 << 1)
+#define STATUS_IMN_BIT         (1 << 2)
 #define STATUS_BST_BIT         (1 << 3)
+#define STATUS_IMX_BIT         (1 << 6)
 #define STATUS_DSOCI_BIT       (1 << 7)
 #define STATUS_VMN_BIT         (1 << 8)
 #define STATUS_TMN_BIT         (1 << 9)
@@ -36,6 +38,9 @@
 #define STATUS_TMX_BIT         (1 << 13)
 #define STATUS_SMX_BIT         (1 << 14)
 #define STATUS_BR_BIT          (1 << 15)
+#define STATUS_ALERT_BITS	(STATUS_BR_BIT | STATUS_SMX_BIT | STATUS_TMX_BIT | \
+				 STATUS_VMX_BIT | STATUS_BI_BIT | STATUS_SMN_BIT | \
+				 STATUS_TMN_BIT | STATUS_VMN_BIT)
 
 /* Interrupt mask bits */
 #define CFG_ALRT_BIT_ENBL	(1 << 2)
@@ -1155,6 +1160,15 @@ static void max17042_suspend_soc_alerts(struct max17042_chip *chip)
 	max17042_set_critical_soc_threshold(chip);
 }
 
+/* Status alert bits the variant defines */
+static u32 max17042_alert_bits(struct max17042_chip *chip)
+{
+	if (chip->chip_type == MAXIM_DEVICE_TYPE_MAX17055)
+		return STATUS_ALERT_BITS | STATUS_IMN_BIT | STATUS_IMX_BIT |
+		       STATUS_DSOCI_BIT;
+	return STATUS_ALERT_BITS;
+}
+
 static irqreturn_t max17042_thread_handler(int id, void *dev)
 {
 	struct max17042_chip *chip = dev;
@@ -1172,10 +1186,16 @@ static irqreturn_t max17042_thread_handler(int id, void *dev)
 	}
 
 	/* we implicitly handle all alerts via power_supply_changed */
-	regmap_clear_bits(chip->regmap, MAX17042_STATUS,
-			  0xFFFF & ~(STATUS_POR_BIT | STATUS_BST_BIT));
+	ret = regmap_clear_bits(chip->regmap, MAX17042_STATUS,
+				0xFFFF & ~(STATUS_POR_BIT | STATUS_BST_BIT));
 
 	power_supply_changed(chip->battery);
+
+	/* ALRT follows a cleared alert only at the next task period */
+	if (!ret && (val & max17042_alert_bits(chip)))
+		msleep(DIV_ROUND_UP(176 * chip->task_period,
+				    MAX17042_DEFAULT_TASK_PERIOD));
+
 	return IRQ_HANDLED;
 }
 
