@@ -13,10 +13,14 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/pm_runtime.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
 
 #include "8250.h"
+
+#define TEGRA_UART_IER_EORD	BIT(5)
+#define TEGRA_UART_IIR_EORD	0x08
 
 struct tegra_uart {
 	struct clk *clk;
@@ -65,6 +69,45 @@ static void tegra_uart_handle_break(struct uart_port *p)
 	}
 }
 
+/* Observed on Tegra210: EORD holds the line with IE_EORD clear, IIR shows it only with it set */
+static bool tegra_uart_ack_eord(struct uart_port *p, unsigned int *iir)
+{
+	unsigned long flags;
+	unsigned int ier;
+
+	uart_port_lock_irqsave(p, &flags);
+	ier = serial_port_in(p, UART_IER);
+	serial_port_out(p, UART_IER, ier | TEGRA_UART_IER_EORD);
+	*iir = serial_port_in(p, UART_IIR);
+	serial_port_out(p, UART_IER, ier & ~TEGRA_UART_IER_EORD);
+	uart_port_unlock_irqrestore(p, flags);
+
+	return (*iir & UART_IIR_ID) == TEGRA_UART_IIR_EORD;
+}
+
+static int tegra_uart_handle_irq(struct uart_port *p)
+{
+	unsigned int iir;
+	int pm_status;
+	int ret;
+
+	/* as serial8250_default_handle_irq() */
+	pm_status = pm_runtime_get_if_active(p->dev);
+	if (!pm_status)
+		return 0;
+
+	iir = serial_port_in(p, UART_IIR);
+	if ((iir & UART_IIR_NO_INT) && tegra_uart_ack_eord(p, &iir))
+		ret = 1;
+	else
+		ret = serial8250_handle_irq(p, iir);
+
+	if (pm_status > 0)
+		pm_runtime_put_autosuspend(p->dev);
+
+	return ret;
+}
+
 static int tegra_uart_probe(struct platform_device *pdev)
 {
 	struct uart_8250_port port8250;
@@ -86,6 +129,7 @@ static int tegra_uart_probe(struct platform_device *pdev)
 	port->type = PORT_TEGRA;
 	port->dev = &pdev->dev;
 	port->handle_break = tegra_uart_handle_break;
+	port->handle_irq = tegra_uart_handle_irq;
 	port->serial_out = tegra_uart_serial_out;
 	port->set_divisor = tegra_uart_set_divisor;
 	port->private_data = uart;
