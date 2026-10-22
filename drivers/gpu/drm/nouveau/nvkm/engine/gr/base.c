@@ -69,11 +69,20 @@ nvkm_gr_tile(struct nvkm_engine *engine, int region, struct nvkm_fb_tile *tile)
 		gr->func->tile(gr, region, tile);
 }
 
-u64
-nvkm_gr_units(struct nvkm_gr *gr)
+int
+nvkm_gr_units(struct nvkm_gr *gr, u64 *units)
 {
-	if (gr->func->units)
-		return gr->func->units(gr);
+	int ret;
+
+	*units = 0;
+	if (!gr->func->units)
+		return 0;
+
+	ret = nvkm_subdev_oneinit(&gr->engine.subdev);
+	if (ret)
+		return ret;
+
+	*units = gr->func->units(gr);
 	return 0;
 }
 

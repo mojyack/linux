@@ -27,7 +27,7 @@ struct nvkm_gr {
 	bool has_zcull_info;
 };
 
-u64 nvkm_gr_units(struct nvkm_gr *);
+int nvkm_gr_units(struct nvkm_gr *, u64 *);
 int nvkm_gr_tlb_flush(struct nvkm_gr *);
 int nvkm_gr_ctxsw_pause(struct nvkm_device *);
 int nvkm_gr_ctxsw_resume(struct nvkm_device *);

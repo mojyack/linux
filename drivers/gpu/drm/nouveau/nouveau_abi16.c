@@ -305,9 +305,16 @@ nouveau_abi16_ioctl_getparam(ABI16_IOCTL_ARGS)
 	case NOUVEAU_GETPARAM_HAS_PAGEFLIP:
 		getparam->value = 1;
 		break;
-	case NOUVEAU_GETPARAM_GRAPH_UNITS:
-		getparam->value = gr ? nvkm_gr_units(gr) : 0;
+	case NOUVEAU_GETPARAM_GRAPH_UNITS: {
+		int ret = 0;
+
+		getparam->value = 0;
+		if (gr)
+			ret = nvkm_gr_units(gr, &getparam->value);
+		if (ret)
+			return ret;
 		break;
+	}
 	case NOUVEAU_GETPARAM_EXEC_PUSH_MAX: {
 		int ib_max = getparam_dma_ib_max(device);
 
