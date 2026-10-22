@@ -183,9 +183,19 @@ the ``mbus_code`` field is handled differently:
 	via the event ``V4L2_EVENT_SOURCE_CHANGE`` when changes in the video
 	parameters are detected.
 
+	On a stateless decoder, the flag means that the decoder decodes a frame
+	of any supported size no larger than the width and height of the coded
+	format into the ``CAPTURE`` buffers allocated for it, and predicts from
+	reference frames of a different size where the codec allows it, so the
+	stream may change resolution within that size without the
+	:ref:`stateless decoder resolution change sequence <stateless_dynamic_resolution>`.
+	The frame sizes reported by :ref:`VIDIOC_ENUM_FRAMESIZES` and the
+	constraints of the codec still apply. No event is sent.
+
 	This flag can only be used in combination with the
 	``V4L2_FMT_FLAG_COMPRESSED`` flag, since this applies to
-	compressed formats only. This flag is valid for stateful codecs only.
+	compressed formats only. This flag is valid for stateful codecs and
+	stateless decoders only.
     * - ``V4L2_FMT_FLAG_ENC_CAP_FRAME_INTERVAL``
       - 0x0010
       - The hardware encoder supports setting the ``CAPTURE`` coded frame

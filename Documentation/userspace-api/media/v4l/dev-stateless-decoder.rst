@@ -386,11 +386,21 @@ In order to pause, the client can just cease queuing buffers onto the ``OUTPUT``
 queue. Without source bytestream data, there is no data to process and the codec
 will remain idle.
 
+.. _stateless_dynamic_resolution:
+
 Dynamic resolution change
 =========================
 
-If the client detects a resolution change in the stream, it will need to perform
-the initialization sequence again with the new resolution:
+If the coded format has the ``V4L2_FMT_FLAG_DYN_RESOLUTION`` flag set (see
+:c:func:`VIDIOC_ENUM_FMT`), a frame of a supported size no larger than the width
+and height of the ``OUTPUT`` format can be decoded without any of the steps
+below, and reference frames of a different size remain usable where the codec
+allows it, such as VP9 inter frames that change resolution. The flag does not
+extend the frame sizes the decoder supports: those reported by
+:c:func:`VIDIOC_ENUM_FRAMESIZES` and the constraints of the codec still apply.
+
+Otherwise, if the client detects a resolution change in the stream, it will
+need to perform the initialization sequence again with the new resolution:
 
 1. If the last submitted request resulted in a ``CAPTURE`` buffer being
    held by the use of the ``V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF`` flag, then the
